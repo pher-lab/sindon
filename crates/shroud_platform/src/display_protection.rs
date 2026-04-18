@@ -11,6 +11,7 @@
 //!
 //! On unsupported platforms, all operations return `false` / `Unsupported`.
 
+#[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
 use winit::window::Window;
@@ -54,6 +55,7 @@ impl DisplayProtectionResult {
 
 /// Query and apply display protection for a window.
 pub struct DisplayProtection {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     window: Arc<Window>,
     current_level: DisplayProtectionLevel,
 }
