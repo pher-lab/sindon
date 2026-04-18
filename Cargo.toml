@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/shroud",
+    "crates/shroud_core",
+    "crates/shroud_security",
+    "crates/shroud_reactive",
+    "crates/shroud_layout",
+    "crates/shroud_render",
+    "crates/shroud_text",
+    "crates/shroud_widgets",
+    "crates/shroud_platform",
+    "crates/shroud_app",
+    "examples/clock",
+    "examples/counter",
+    "examples/hello_world",
+    "examples/secure_password_form",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+
+[workspace.dependencies]
+# External
+wgpu = "29"
+winit = "0.30"
+cosmic-text = "0.18"
+taffy = "0.9"
+zeroize = { version = "1.8", features = ["derive"] }
+secrecy = "0.10"
+memsec = "0.7"
+slotmap = "1.0"
+arboard = { version = "3", default-features = false }
+log = "0.4"
+raw-window-handle = "0.6"
+bytemuck = { version = "1", features = ["derive"] }
+subtle = "2"
+
+# Internal
+shroud_core = { path = "crates/shroud_core" }
+shroud_security = { path = "crates/shroud_security" }
+shroud_reactive = { path = "crates/shroud_reactive" }
+shroud_layout = { path = "crates/shroud_layout" }
+shroud_render = { path = "crates/shroud_render" }
+shroud_text = { path = "crates/shroud_text" }
+shroud_widgets = { path = "crates/shroud_widgets" }
+shroud_platform = { path = "crates/shroud_platform" }
+shroud_app = { path = "crates/shroud_app" }

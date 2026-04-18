@@ -1,0 +1,15 @@
+[package]
+name = "shroud_render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "GPU renderer for the shroud UI framework"
+
+[dependencies]
+shroud_core = { workspace = true }
+shroud_security = { workspace = true }
+shroud_text = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }

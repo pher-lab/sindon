@@ -1,0 +1,829 @@
+use std::sync::Arc;
+
+use crate::atlas::{DEFAULT_ATLAS_SIZE, TextureAtlas};
+use crate::secure_atlas::SecureTextureAtlas;
+use shroud_core::{Color, Rect};
+use shroud_text::GlyphImage;
+use wgpu::util::DeviceExt;
+use winit::window::Window;
+
+// ── Rect vertex (position + color) ───────────────────────────────
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 2],
+    color: [f32; 4],
+}
+
+impl Vertex {
+    const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+        ],
+    };
+}
+
+// ── Text vertex (position + UV + color) ──────────────────────────
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct TextVertex {
+    position: [f32; 2],
+    uv: [f32; 2],
+    color: [f32; 4],
+}
+
+impl TextVertex {
+    const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<TextVertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+        ],
+    };
+}
+
+/// A positioned glyph to draw. Produced by the text engine, consumed by the renderer.
+pub struct DrawGlyph {
+    /// Screen X position (pixels, top-left origin).
+    pub x: i32,
+    /// Screen Y position (pixels, top-left origin).
+    pub y: i32,
+    /// Rasterized glyph image.
+    pub image: GlyphImage,
+    /// Text color.
+    pub color: Color,
+    /// Glyph cache key (for atlas dedup).
+    pub cache_key: shroud_text::CacheKey,
+    /// Scissor region in screen pixels; `None` means no clipping.
+    pub clip_rect: Option<Rect>,
+}
+
+/// A colored rectangle to draw.
+pub struct DrawRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub color: Color,
+    /// Scissor region in screen pixels; `None` means no clipping.
+    pub clip_rect: Option<Rect>,
+}
+
+/// Render error.
+#[derive(Debug)]
+pub enum RenderError {
+    SurfaceLost,
+    SurfaceTimeout,
+    SurfaceOutdated,
+}
+
+/// GPU renderer for shroud.
+pub struct Renderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    surface_config: wgpu::SurfaceConfiguration,
+    // Rect pipeline
+    rect_pipeline: wgpu::RenderPipeline,
+    // Text pipeline
+    text_pipeline: wgpu::RenderPipeline,
+    text_bind_group_layout: wgpu::BindGroupLayout,
+    text_bind_group: wgpu::BindGroup,
+    sampler: wgpu::Sampler,
+    // Standard atlas — cached across frames
+    atlas: TextureAtlas,
+    // Secure atlas — cleared every frame after rendering
+    secure_atlas: SecureTextureAtlas,
+    secure_text_bind_group: wgpu::BindGroup,
+}
+
+impl Renderer {
+    pub async fn new(window: Arc<Window>) -> Self {
+        let size = window.inner_size();
+
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        desc.backends = wgpu::Backends::all();
+        let instance = wgpu::Instance::new(desc);
+
+        let surface = instance.create_surface(window).unwrap();
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .expect("no suitable GPU adapter found");
+
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("shroud_device"),
+                ..Default::default()
+            })
+            .await
+            .expect("failed to create GPU device");
+
+        let surface_caps = surface.get_capabilities(&adapter);
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+        };
+        surface.configure(&device, &surface_config);
+
+        // ── Rect pipeline ────────────────────────────────────────
+        let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shroud_rect_shader"),
+            source: wgpu::ShaderSource::Wgsl(RECT_SHADER.into()),
+        });
+
+        let rect_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shroud_rect_pipeline_layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+
+        let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shroud_rect_pipeline"),
+            layout: Some(&rect_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &rect_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rect_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // ── Text pipeline ────────────────────────────────────────
+        let text_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shroud_text_bind_group_layout"),
+                entries: &[
+                    // @binding(0): atlas texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // @binding(1): sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shroud_text_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let atlas = TextureAtlas::new(&device, DEFAULT_ATLAS_SIZE, DEFAULT_ATLAS_SIZE);
+        let secure_atlas = SecureTextureAtlas::new(&device);
+
+        let text_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shroud_text_bind_group"),
+            layout: &text_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(atlas.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let secure_text_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shroud_secure_text_bind_group"),
+            layout: &text_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(secure_atlas.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shroud_text_shader"),
+            source: wgpu::ShaderSource::Wgsl(TEXT_SHADER.into()),
+        });
+
+        let text_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shroud_text_pipeline_layout"),
+            bind_group_layouts: &[Some(&text_bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shroud_text_pipeline"),
+            layout: Some(&text_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &text_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[TextVertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &text_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        Self {
+            device,
+            queue,
+            surface,
+            surface_config,
+            rect_pipeline,
+            text_pipeline,
+            text_bind_group_layout,
+            text_bind_group,
+            sampler,
+            atlas,
+            secure_atlas,
+            secure_text_bind_group,
+        }
+    }
+
+    /// Get the current surface dimensions (width, height).
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.surface_config.width, self.surface_config.height)
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.surface_config.width = width;
+            self.surface_config.height = height;
+            self.surface.configure(&self.device, &self.surface_config);
+        }
+    }
+
+    /// Access the atlas (for uploading glyphs before render).
+    pub fn atlas_mut(&mut self) -> &mut TextureAtlas {
+        &mut self.atlas
+    }
+
+    /// Access the queue (for atlas uploads).
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// Rebuild the text bind group after atlas changes.
+    fn rebuild_text_bind_group(&mut self) {
+        self.text_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shroud_text_bind_group"),
+            layout: &self.text_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(self.atlas.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+    }
+
+    /// Rebuild the secure text bind group after secure atlas changes.
+    fn rebuild_secure_text_bind_group(&mut self) {
+        self.secure_text_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shroud_secure_text_bind_group"),
+            layout: &self.text_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(self.secure_atlas.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+    }
+
+    pub fn render(
+        &mut self,
+        clear_color: Color,
+        rects: &[DrawRect],
+        glyphs: &[DrawGlyph],
+        secure_glyphs: &[DrawGlyph],
+    ) -> Result<(), RenderError> {
+        // Upload standard glyphs to the standard atlas (cached)
+        for glyph in glyphs {
+            self.atlas.upload(
+                &self.queue,
+                glyph.cache_key,
+                &glyph.image.data,
+                glyph.image.width,
+                glyph.image.height,
+            );
+        }
+
+        // Upload secure glyphs to the secure atlas (cleared every frame)
+        for glyph in secure_glyphs {
+            self.secure_atlas.upload(
+                &self.queue,
+                glyph.cache_key,
+                &glyph.image.data,
+                glyph.image.width,
+                glyph.image.height,
+            );
+        }
+
+        if self.atlas.is_dirty() {
+            self.rebuild_text_bind_group();
+            self.atlas.clear_dirty();
+        }
+
+        let secure_dirty = self.secure_atlas.is_dirty();
+        if secure_dirty {
+            self.rebuild_secure_text_bind_group();
+            self.secure_atlas.clear_dirty();
+        }
+
+        let surface_texture = self.surface.get_current_texture();
+        let output = match surface_texture {
+            wgpu::CurrentSurfaceTexture::Success(tex)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
+            wgpu::CurrentSurfaceTexture::Timeout => return Err(RenderError::SurfaceTimeout),
+            wgpu::CurrentSurfaceTexture::Outdated => return Err(RenderError::SurfaceOutdated),
+            _ => return Err(RenderError::SurfaceLost),
+        };
+
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Build rect geometry
+        let (rect_verts, rect_indices, rect_batches) = self.build_rect_geometry(rects);
+        let has_rects = !rect_verts.is_empty();
+
+        let rect_vb = self.create_vertex_buffer("rect_vb", bytemuck::cast_slice(&rect_verts));
+        let rect_ib = self.create_index_buffer("rect_ib", bytemuck::cast_slice(&rect_indices));
+
+        // Build standard text geometry
+        let (text_verts, text_indices, text_batches) =
+            self.build_text_geometry(glyphs, &self.atlas);
+        let has_text = !text_verts.is_empty();
+
+        let text_vb = self.create_vertex_buffer("text_vb", bytemuck::cast_slice(&text_verts));
+        let text_ib = self.create_index_buffer("text_ib", bytemuck::cast_slice(&text_indices));
+
+        // Build secure text geometry (uses secure atlas UVs)
+        let (sec_text_verts, sec_text_indices, sec_text_batches) =
+            self.build_text_geometry(secure_glyphs, self.secure_atlas.as_atlas());
+        let has_secure_text = !sec_text_verts.is_empty();
+
+        let sec_text_vb =
+            self.create_vertex_buffer("sec_text_vb", bytemuck::cast_slice(&sec_text_verts));
+        let sec_text_ib =
+            self.create_index_buffer("sec_text_ib", bytemuck::cast_slice(&sec_text_indices));
+
+        let surface_w = self.surface_config.width;
+        let surface_h = self.surface_config.height;
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("shroud_render_encoder"),
+            });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shroud_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: clear_color.r as f64,
+                            g: clear_color.g as f64,
+                            b: clear_color.b as f64,
+                            a: clear_color.a as f64,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+
+            // Draw rects first (background)
+            if has_rects {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, rect_vb.slice(..));
+                pass.set_index_buffer(rect_ib.slice(..), wgpu::IndexFormat::Uint16);
+                for batch in &rect_batches {
+                    apply_scissor(&mut pass, batch.clip_rect, surface_w, surface_h);
+                    let end = batch.index_start + batch.index_count;
+                    pass.draw_indexed(batch.index_start..end, 0, 0..1);
+                }
+            }
+
+            // Draw standard text
+            if has_text {
+                pass.set_pipeline(&self.text_pipeline);
+                pass.set_bind_group(0, &self.text_bind_group, &[]);
+                pass.set_vertex_buffer(0, text_vb.slice(..));
+                pass.set_index_buffer(text_ib.slice(..), wgpu::IndexFormat::Uint16);
+                for batch in &text_batches {
+                    apply_scissor(&mut pass, batch.clip_rect, surface_w, surface_h);
+                    let end = batch.index_start + batch.index_count;
+                    pass.draw_indexed(batch.index_start..end, 0, 0..1);
+                }
+            }
+
+            // Draw secure text (separate atlas)
+            if has_secure_text {
+                pass.set_pipeline(&self.text_pipeline);
+                pass.set_bind_group(0, &self.secure_text_bind_group, &[]);
+                pass.set_vertex_buffer(0, sec_text_vb.slice(..));
+                pass.set_index_buffer(sec_text_ib.slice(..), wgpu::IndexFormat::Uint16);
+                for batch in &sec_text_batches {
+                    apply_scissor(&mut pass, batch.clip_rect, surface_w, surface_h);
+                    let end = batch.index_start + batch.index_count;
+                    pass.draw_indexed(batch.index_start..end, 0, 0..1);
+                }
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+
+        // [SEC] Post-frame: clear secure atlas GPU texture + CPU state
+        self.post_frame_secure_clear();
+
+        Ok(())
+    }
+
+    /// Clear all secure GPU memory after frame presentation.
+    ///
+    /// 1. Zeros the secure atlas texture
+    /// 2. Resets secure atlas CPU cache
+    /// 3. Calls `device.poll(Wait)` to guarantee GPU has completed the clear
+    ///
+    /// This ensures sensitive glyph data does not persist in GPU memory
+    /// between frames.
+    fn post_frame_secure_clear(&mut self) {
+        self.secure_atlas.clear_after_frame(&self.queue);
+        // Ensure the GPU has actually completed the clear operation
+        // before we return control. This prevents a window where
+        // secure data could be read from GPU memory.
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(5)),
+        });
+    }
+
+    /// Access the secure atlas (for external clear verification).
+    pub fn secure_atlas(&self) -> &SecureTextureAtlas {
+        &self.secure_atlas
+    }
+
+    fn create_vertex_buffer(&self, label: &str, data: &[u8]) -> wgpu::Buffer {
+        if data.is_empty() {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            })
+        } else {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: data,
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        }
+    }
+
+    fn create_index_buffer(&self, label: &str, data: &[u8]) -> wgpu::Buffer {
+        if data.is_empty() {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: 4,
+                usage: wgpu::BufferUsages::INDEX,
+                mapped_at_creation: false,
+            })
+        } else {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: data,
+                    usage: wgpu::BufferUsages::INDEX,
+                })
+        }
+    }
+
+    fn build_rect_geometry(&self, rects: &[DrawRect]) -> (Vec<Vertex>, Vec<u16>, Vec<DrawBatch>) {
+        let w = self.surface_config.width as f32;
+        let h = self.surface_config.height as f32;
+
+        let mut vertices = Vec::with_capacity(rects.len() * 4);
+        let mut indices = Vec::with_capacity(rects.len() * 6);
+        let mut batches: Vec<DrawBatch> = Vec::new();
+
+        for rect in rects {
+            let base = vertices.len() as u16;
+            let index_start = indices.len() as u32;
+
+            let x0 = (rect.x / w) * 2.0 - 1.0;
+            let y0 = 1.0 - (rect.y / h) * 2.0;
+            let x1 = ((rect.x + rect.width) / w) * 2.0 - 1.0;
+            let y1 = 1.0 - ((rect.y + rect.height) / h) * 2.0;
+
+            let c = rect.color.to_array();
+
+            vertices.push(Vertex {
+                position: [x0, y0],
+                color: c,
+            });
+            vertices.push(Vertex {
+                position: [x1, y0],
+                color: c,
+            });
+            vertices.push(Vertex {
+                position: [x1, y1],
+                color: c,
+            });
+            vertices.push(Vertex {
+                position: [x0, y1],
+                color: c,
+            });
+
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            match batches.last_mut() {
+                Some(last) if last.clip_rect == rect.clip_rect => {
+                    last.index_count += 6;
+                }
+                _ => batches.push(DrawBatch {
+                    clip_rect: rect.clip_rect,
+                    index_start,
+                    index_count: 6,
+                }),
+            }
+        }
+
+        (vertices, indices, batches)
+    }
+
+    fn build_text_geometry(
+        &self,
+        glyphs: &[DrawGlyph],
+        atlas: &TextureAtlas,
+    ) -> (Vec<TextVertex>, Vec<u16>, Vec<DrawBatch>) {
+        let sw = self.surface_config.width as f32;
+        let sh = self.surface_config.height as f32;
+        let aw = atlas.width();
+        let ah = atlas.height();
+
+        let mut vertices = Vec::with_capacity(glyphs.len() * 4);
+        let mut indices = Vec::with_capacity(glyphs.len() * 6);
+        let mut batches: Vec<DrawBatch> = Vec::new();
+
+        for glyph in glyphs {
+            let region = match atlas.get(&glyph.cache_key) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            let base = vertices.len() as u16;
+            let index_start = indices.len() as u32;
+
+            // Screen-space position incorporating bearing offsets
+            let px = (glyph.x + glyph.image.left) as f32;
+            let py = (glyph.y - glyph.image.top) as f32;
+            let pw = glyph.image.width as f32;
+            let ph = glyph.image.height as f32;
+
+            // Pixel → NDC
+            let x0 = (px / sw) * 2.0 - 1.0;
+            let y0 = 1.0 - (py / sh) * 2.0;
+            let x1 = ((px + pw) / sw) * 2.0 - 1.0;
+            let y1 = 1.0 - ((py + ph) / sh) * 2.0;
+
+            // Atlas UV
+            let uv = region.uv(aw, ah);
+            let u0 = uv[0];
+            let v0 = uv[1];
+            let u1 = uv[2];
+            let v1 = uv[3];
+
+            let c = glyph.color.to_array();
+
+            vertices.push(TextVertex {
+                position: [x0, y0],
+                uv: [u0, v0],
+                color: c,
+            });
+            vertices.push(TextVertex {
+                position: [x1, y0],
+                uv: [u1, v0],
+                color: c,
+            });
+            vertices.push(TextVertex {
+                position: [x1, y1],
+                uv: [u1, v1],
+                color: c,
+            });
+            vertices.push(TextVertex {
+                position: [x0, y1],
+                uv: [u0, v1],
+                color: c,
+            });
+
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            match batches.last_mut() {
+                Some(last) if last.clip_rect == glyph.clip_rect => {
+                    last.index_count += 6;
+                }
+                _ => batches.push(DrawBatch {
+                    clip_rect: glyph.clip_rect,
+                    index_start,
+                    index_count: 6,
+                }),
+            }
+        }
+
+        (vertices, indices, batches)
+    }
+}
+
+/// A contiguous index range sharing a single scissor rectangle.
+struct DrawBatch {
+    clip_rect: Option<Rect>,
+    index_start: u32,
+    index_count: u32,
+}
+
+/// Apply a scissor rectangle to the render pass, clamped to the surface bounds.
+fn apply_scissor(pass: &mut wgpu::RenderPass, clip: Option<Rect>, surface_w: u32, surface_h: u32) {
+    let (x, y, w, h) = match clip {
+        Some(r) => {
+            let x0 = r.origin.x.max(0.0).min(surface_w as f32) as u32;
+            let y0 = r.origin.y.max(0.0).min(surface_h as f32) as u32;
+            let x1 = (r.origin.x + r.size.width).max(0.0).min(surface_w as f32) as u32;
+            let y1 = (r.origin.y + r.size.height).max(0.0).min(surface_h as f32) as u32;
+            (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+        }
+        None => (0, 0, surface_w, surface_h),
+    };
+    pass.set_scissor_rect(x, y, w, h);
+}
+
+// ── Shaders ───────────────────────────────────────────────────────
+
+const RECT_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(in.position, 0.0, 1.0);
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+
+const TEXT_SHADER: &str = r#"
+@group(0) @binding(0)
+var t_atlas: texture_2d<f32>;
+@group(0) @binding(1)
+var s_atlas: sampler;
+
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(in.position, 0.0, 1.0);
+    out.uv = in.uv;
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let alpha = textureSample(t_atlas, s_atlas, in.uv).r;
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+}
+"#;

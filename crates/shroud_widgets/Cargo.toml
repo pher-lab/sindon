@@ -1,0 +1,14 @@
+[package]
+name = "shroud_widgets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Widget library for the shroud UI framework"
+
+[dependencies]
+shroud_core = { workspace = true }
+shroud_security = { workspace = true }
+shroud_reactive = { workspace = true }
+shroud_render = { workspace = true }
+shroud_text = { workspace = true }
+shroud_layout = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "shroud"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A security-first Rust UI framework with secret zeroization guarantees"
+
+[dependencies]
+shroud_core = { workspace = true }
+shroud_security = { workspace = true }
+shroud_reactive = { workspace = true }
+shroud_render = { workspace = true }
+shroud_text = { workspace = true }
+shroud_layout = { workspace = true }
+shroud_widgets = { workspace = true }
+shroud_platform = { workspace = true }
+shroud_app = { workspace = true }

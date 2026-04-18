@@ -1,0 +1,19 @@
+# Rust
+/target
+**/*.rs.bk
+
+# OS
+Thumbs.db
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Env
+.env
+.envrc
+
+# Claude local overrides (keep shared .claude/ config, ignore local-only)
+.claude/settings.local.json

@@ -1,0 +1,13 @@
+[package]
+name = "shroud_reactive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Reactive signal system for the shroud UI framework"
+
+[dependencies]
+shroud_core = { workspace = true }
+shroud_security = { workspace = true }
+slotmap = { workspace = true }
+zeroize = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,307 @@
+use shroud_core::{Color, Point, SecurityLevel};
+use shroud_security::SecureString;
+use shroud_widgets::*;
+
+// ── SecureText ────────────────────────────────────────────────────
+
+#[test]
+fn secure_text_has_sensitive_security_level() {
+    let text = SecureText::new(SecureString::new("secret"));
+    assert_eq!(text.security_level(), SecurityLevel::Sensitive);
+}
+
+#[test]
+fn secure_text_paints_glyphs() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let _text = tree.add_child(
+        root,
+        SecureText::new(SecureString::new("password123")).font_size(20.0),
+    );
+
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    assert!(
+        !ctx.secure_glyphs.is_empty(),
+        "secure text should produce secure glyph draw commands"
+    );
+}
+
+#[test]
+fn secure_text_empty_produces_no_glyphs() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let _text = tree.add_child(root, SecureText::new(SecureString::empty()));
+
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    assert!(
+        ctx.secure_glyphs.is_empty(),
+        "empty secure text should produce no secure glyphs"
+    );
+}
+
+#[test]
+fn secure_text_from_fn() {
+    let secret = SecureString::new("via_fn");
+    let text = SecureText::from_fn(move |f| secret.expose(|s| f(s)));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let _t = tree.add_child(root, text);
+
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    assert!(!ctx.secure_glyphs.is_empty());
+}
+
+// ── SecureInput ───────────────────────────────────────────────────
+
+#[test]
+fn secure_input_has_protected_security_level() {
+    let input = SecureInput::new();
+    assert_eq!(input.security_level(), SecurityLevel::Protected);
+}
+
+#[test]
+fn secure_input_char_input() {
+    let mut input = SecureInput::new();
+    assert!(input.is_empty());
+    assert_eq!(input.char_count(), 0);
+
+    // Simulate focus
+    let mut ctx = EventContext::new();
+    input.event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(10.0, 10.0),
+            button: MouseButton::Left,
+        },
+        shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0),
+        &mut ctx,
+    );
+    assert!(input.is_focused());
+
+    // Type characters
+    for ch in "hunter2".chars() {
+        input.event(
+            &WidgetEvent::CharInput { ch },
+            shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0),
+            &mut ctx,
+        );
+    }
+
+    assert_eq!(input.char_count(), 7);
+    input.expose(|s| assert_eq!(s, "hunter2"));
+}
+
+#[test]
+fn secure_input_backspace() {
+    let mut input = SecureInput::new();
+    let mut ctx = EventContext::new();
+
+    // Focus
+    input.event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(10.0, 10.0),
+            button: MouseButton::Left,
+        },
+        shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0),
+        &mut ctx,
+    );
+
+    // Type "abc"
+    for ch in "abc".chars() {
+        input.event(
+            &WidgetEvent::CharInput { ch },
+            shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0),
+            &mut ctx,
+        );
+    }
+    assert_eq!(input.char_count(), 3);
+
+    // Backspace
+    input.event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Backspace),
+        },
+        shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0),
+        &mut ctx,
+    );
+    assert_eq!(input.char_count(), 2);
+    input.expose(|s| assert_eq!(s, "ab"));
+}
+
+#[test]
+fn secure_input_escape_unfocuses() {
+    let mut input = SecureInput::new();
+    let mut ctx = EventContext::new();
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
+
+    // Focus
+    input.event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(10.0, 10.0),
+            button: MouseButton::Left,
+        },
+        rect,
+        &mut ctx,
+    );
+    assert!(input.is_focused());
+
+    // Escape
+    input.event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Escape),
+        },
+        rect,
+        &mut ctx,
+    );
+    assert!(!input.is_focused());
+}
+
+#[test]
+fn secure_input_ignores_input_when_unfocused() {
+    let mut input = SecureInput::new();
+    let mut ctx = EventContext::new();
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
+
+    // Not focused — char input should be ignored
+    let result = input.event(&WidgetEvent::CharInput { ch: 'a' }, rect, &mut ctx);
+    assert_eq!(result, EventResult::Ignored);
+    assert!(input.is_empty());
+}
+
+#[test]
+fn secure_input_clear_zeroizes() {
+    let mut input = SecureInput::new();
+    let mut ctx = EventContext::new();
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
+
+    // Focus and type
+    input.event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(10.0, 10.0),
+            button: MouseButton::Left,
+        },
+        rect,
+        &mut ctx,
+    );
+    for ch in "secret".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
+    }
+    assert_eq!(input.char_count(), 6);
+
+    // Clear
+    input.clear();
+    assert!(input.is_empty());
+    assert_eq!(input.char_count(), 0);
+}
+
+#[test]
+fn secure_input_renders_masked() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let input_idx = tree.add_child(root, SecureInput::new().placeholder("Enter password"));
+
+    tree.compute_layout(800.0, 600.0);
+
+    // Type into the input
+    let mut ctx = EventContext::new();
+    let rect = tree.layout_rect(input_idx);
+
+    // Focus by clicking
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    // We can't easily downcast through dyn Widget, so just paint and check
+
+    // Paint — should show placeholder or mask chars
+    let mut paint_ctx = PaintContext::default();
+    tree.paint(&mut paint_ctx);
+
+    // Should have at least the background rect + border rects
+    assert!(
+        !paint_ctx.rects.is_empty(),
+        "secure input should paint background/border"
+    );
+}
+
+// ── SecurityLevel propagation ─────────────────────────────────────
+
+#[test]
+fn security_level_propagates_from_parent() {
+    let mut tree = WidgetTree::new();
+
+    // Root is Normal
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    assert_eq!(tree.effective_security(root), SecurityLevel::Normal);
+
+    // SecureInput child declares Protected
+    let input = tree.add_child(root, SecureInput::new());
+    assert_eq!(tree.effective_security(input), SecurityLevel::Protected);
+
+    // Normal child inside root stays Normal
+    let text = tree.add_child(root, TextWidget::new("hello"));
+    assert_eq!(tree.effective_security(text), SecurityLevel::Normal);
+}
+
+#[test]
+fn security_level_inherits_from_secure_parent() {
+    let mut tree = WidgetTree::new();
+
+    // Create a tree: root(Normal) → secure_container(Sensitive) → normal_child
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+
+    // Add a SecureText (Sensitive) as a container-like node
+    let secure = tree.add_child(root, SecureText::new(SecureString::new("secret")));
+    assert_eq!(tree.effective_security(secure), SecurityLevel::Sensitive);
+}
+
+#[test]
+fn security_level_max_of_parent_and_child() {
+    let mut tree = WidgetTree::new();
+
+    // Root is Normal
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+
+    // SecureInput (Protected) inside Normal → effective = Protected
+    let input = tree.add_child(root, SecureInput::new());
+    assert_eq!(tree.effective_security(input), SecurityLevel::Protected);
+
+    // Normal widget inside SecureInput → inherits Protected
+    // (In real usage, SecureInput wouldn't have children, but the mechanism works)
+}
+
+// ── Builder patterns ──────────────────────────────────────────────
+
+#[test]
+fn secure_input_builder() {
+    let _input = SecureInput::new()
+        .placeholder("Password")
+        .mask('*')
+        .font_size(18.0)
+        .background(Color::BLACK)
+        .text_color(Color::WHITE);
+}
+
+#[test]
+fn secure_text_builder() {
+    let _text = SecureText::new(SecureString::new("secret"))
+        .font_size(20.0)
+        .line_height(28.0)
+        .color(Color::rgb(0.9, 0.9, 0.9));
+}

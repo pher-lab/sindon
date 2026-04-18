@@ -1,0 +1,11 @@
+[package]
+name = "shroud_text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Text rendering for the shroud UI framework"
+
+[dependencies]
+shroud_core = { workspace = true }
+shroud_security = { workspace = true }
+cosmic-text = { workspace = true }
