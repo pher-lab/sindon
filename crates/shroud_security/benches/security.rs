@@ -30,11 +30,7 @@ fn drop_cost(c: &mut Criterion) {
             );
         });
         group.bench_with_input(BenchmarkId::new("String", size), &input, |b, s| {
-            b.iter_batched(
-                || String::from(s.as_str()),
-                drop,
-                BatchSize::SmallInput,
-            );
+            b.iter_batched(|| String::from(s.as_str()), drop, BatchSize::SmallInput);
         });
     }
     group.finish();
