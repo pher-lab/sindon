@@ -22,3 +22,10 @@ windows = { version = "0.61", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Memory",
 ] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "security"
+harness = false
