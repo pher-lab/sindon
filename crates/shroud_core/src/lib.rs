@@ -1,3 +1,10 @@
+//! shroud_core — Shared primitives used across the workspace.
+//!
+//! - [`geometry`]: `Color`, `Point`, `Rect`, `Size`
+//! - [`id`]: typed id handles (`NodeId`, `ScopeId`, `WidgetId`)
+//! - [`security_level`]: per-widget sensitivity marker
+//! - [`theme`]: `Theme`, `Colors`, `Typography`, `Spacing`
+
 pub mod geometry;
 pub mod id;
 pub mod security_level;

@@ -31,7 +31,7 @@ impl PlatformWindow {
         }
     }
 
-    /// Get a clone of the Arc<Window> for sharing with the renderer.
+    /// Get a clone of the `Arc<Window>` for sharing with the renderer.
     pub fn arc(&self) -> Arc<Window> {
         Arc::clone(&self.window)
     }
