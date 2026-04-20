@@ -5,9 +5,11 @@
 //! (core dump disable, ptrace protection, exploit mitigation) is applied
 //! on `run()` by default.
 //!
-//! [`AppHandle`] exposes `wake()` for external timers / async tasks that
-//! need to trigger a redraw.
+//! The build closure receives an [`AppScope`] with access to the
+//! thread-safe [`AppHandle`] (whose `wake()` kicks redraws from external
+//! timers or async tasks) and [`AppScope::on_frame`] for per-frame tick
+//! callbacks that run on the UI thread.
 
 pub mod event_loop;
 
-pub use event_loop::{App, AppHandle};
+pub use event_loop::{App, AppHandle, AppScope};

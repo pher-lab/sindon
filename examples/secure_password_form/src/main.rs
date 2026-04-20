@@ -23,7 +23,7 @@ fn main() {
         .title("shroud \u{2014} Secure Password Form")
         .size(600, 500)
         .capture_prevention(true)
-        .run(|_handle| {
+        .run(|_scope| {
             let mut tree = WidgetTree::new();
 
             // Root: centered column layout (background comes from theme)

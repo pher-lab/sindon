@@ -17,11 +17,11 @@ fn main() {
     App::new()
         .title("shroud — clock")
         .size(420, 240)
-        .run(|handle| {
+        .run(|scope| {
             // Spawn the waker on a detached thread. The handle is `Clone`, so
             // each producer gets its own proxy and they can all push toward
             // the same event loop.
-            let waker = handle.clone();
+            let waker = scope.handle().clone();
             thread::spawn(move || {
                 loop {
                     thread::sleep(Duration::from_millis(500));

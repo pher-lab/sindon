@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use shroud_core::{Point, Theme};
 use shroud_platform::PlatformWindow;
@@ -8,10 +9,15 @@ use shroud_widgets::event::{EventContext, Key, MouseButton, NamedKey, WidgetEven
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::tree::WidgetTree;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event::{ElementState, StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WinitKey, NamedKey as WinitNamedKey};
 use winit::window::WindowId;
+
+/// Default cadence for the periodic tick when an `on_frame` hook is set.
+const DEFAULT_TICK_INTERVAL: Duration = Duration::from_millis(500);
+
+type FrameHook = Box<dyn FnMut() + 'static>;
 
 /// Custom events sent to the event loop via [`AppHandle`].
 ///
@@ -51,6 +57,54 @@ impl AppHandle {
     }
 }
 
+/// UI-thread scope handed to the [`App::run`] build closure.
+///
+/// Exposes the thread-safe [`AppHandle`] and any registration points that
+/// must run on the UI thread — currently [`Self::on_frame`] for per-frame
+/// tick callbacks. The scope is consumed after the build closure returns;
+/// anything registered on it is handed to the event loop for the lifetime
+/// of the app.
+pub struct AppScope {
+    handle: AppHandle,
+    frame_hook: Option<FrameHook>,
+}
+
+impl AppScope {
+    fn new(handle: AppHandle) -> Self {
+        Self {
+            handle,
+            frame_hook: None,
+        }
+    }
+
+    /// Borrow the thread-safe handle. Call `.clone()` on it to hand to
+    /// background threads that need to [`AppHandle::wake`] the UI.
+    pub fn handle(&self) -> &AppHandle {
+        &self.handle
+    }
+
+    /// Register a callback that runs on a fixed cadence on the UI thread.
+    ///
+    /// Fires every [`App::tick_interval`] (default 500 ms), anchored to
+    /// the previous fire so unrelated events (mouse moves, focus
+    /// changes) don't drift the schedule. Each fire also schedules a
+    /// redraw so the paint that follows sees any state the hook changed.
+    ///
+    /// Use this for driving timers, polling external state, or
+    /// advancing animations without a background waker thread. The
+    /// hook does not fire on input-triggered paints — keep it cheap
+    /// and idempotent so the cadence stays predictable.
+    ///
+    /// Only one hook is supported per app — a second call replaces the
+    /// first.
+    pub fn on_frame<F>(&mut self, f: F)
+    where
+        F: FnMut() + 'static,
+    {
+        self.frame_hook = Some(Box::new(f));
+    }
+}
+
 /// Internal bag of window/runtime configuration. Users never see this —
 /// they set fields through the fluent [`App`] builder.
 struct AppConfig {
@@ -62,6 +116,7 @@ struct AppConfig {
     exploit_mitigation: bool,
     capture_prevention: bool,
     theme: Theme,
+    tick_interval: Duration,
 }
 
 impl Default for AppConfig {
@@ -75,6 +130,7 @@ impl Default for AppConfig {
             exploit_mitigation: true,
             capture_prevention: false,
             theme: Theme::default(),
+            tick_interval: DEFAULT_TICK_INTERVAL,
         }
     }
 }
@@ -83,8 +139,9 @@ impl Default for AppConfig {
 ///
 /// Configure the window, theme, and hardening flags with the setter
 /// methods, then call [`run`](Self::run) with a closure that builds the
-/// widget tree. The closure receives an [`AppHandle`] that can be cloned
-/// into background threads to wake the UI.
+/// widget tree. The closure receives an [`AppScope`] exposing the
+/// thread-safe [`AppHandle`] (for waking the UI from other threads) and
+/// [`AppScope::on_frame`] (for registering per-frame callbacks).
 ///
 /// ```no_run
 /// use shroud_app::App;
@@ -93,7 +150,7 @@ impl Default for AppConfig {
 /// App::new()
 ///     .title("hello")
 ///     .size(800, 600)
-///     .run(|_handle| WidgetTree::new());
+///     .run(|_scope| WidgetTree::new());
 /// ```
 pub struct App {
     config: AppConfig,
@@ -176,14 +233,28 @@ impl App {
         self
     }
 
+    /// Cadence for the idle tick when an [`AppScope::on_frame`] hook is
+    /// registered. Defaults to 500 ms, which is suitable for coarse
+    /// timers (countdown UI, clipboard auto-clear). Lower for smoother
+    /// animation, higher to save CPU when idle.
+    ///
+    /// Has no effect when no `on_frame` hook is set — the event loop
+    /// still waits for input as before.
+    pub fn tick_interval(mut self, interval: Duration) -> Self {
+        self.config.tick_interval = interval;
+        self
+    }
+
     /// Take over the main thread and run the application.
     ///
     /// The `build` closure is called once, before the event loop starts,
-    /// with an [`AppHandle`] that can be cloned into background threads.
-    /// Return the fully-constructed [`WidgetTree`] from the closure.
+    /// with an [`AppScope`] giving access to the thread-safe
+    /// [`AppHandle`] and UI-thread registration points such as
+    /// [`AppScope::on_frame`]. Return the fully-constructed
+    /// [`WidgetTree`] from the closure.
     pub fn run<F>(self, build: F)
     where
-        F: FnOnce(&AppHandle) -> WidgetTree,
+        F: FnOnce(&mut AppScope) -> WidgetTree,
     {
         if self.config.disable_core_dumps {
             if let Err(e) = hardening::disable_core_dumps() {
@@ -211,7 +282,9 @@ impl App {
         // Build the tree eagerly so the closure can hand `handle` to
         // threads during construction. The window/renderer come online
         // in `resumed`.
-        let tree = build(&handle);
+        let mut scope = AppScope::new(handle.clone());
+        let tree = build(&mut scope);
+        let AppScope { frame_hook, .. } = scope;
 
         let mut handler = ShroudEventLoop {
             config: self.config,
@@ -222,6 +295,8 @@ impl App {
             paint_ctx: None,
             event_ctx: EventContext::new(),
             cursor_position: Point::new(0.0, 0.0),
+            frame_hook,
+            next_tick: None,
         };
 
         event_loop.run_app(&mut handler).expect("event loop error");
@@ -244,6 +319,12 @@ struct ShroudEventLoop {
     paint_ctx: Option<PaintContext>,
     event_ctx: EventContext,
     cursor_position: Point,
+    frame_hook: Option<FrameHook>,
+    /// When the next frame-hook tick is due. Anchored to the prior tick
+    /// plus `tick_interval`, not "now"; this keeps the cadence steady
+    /// even when unrelated events (mouse moves, focus changes) cause
+    /// extra `about_to_wait` calls.
+    next_tick: Option<Instant>,
 }
 
 impl ShroudEventLoop {
@@ -255,6 +336,38 @@ impl ShroudEventLoop {
 }
 
 impl ApplicationHandler<AppEvent> for ShroudEventLoop {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
+        // Fire the frame hook whenever the scheduled tick is due,
+        // regardless of what actually woke the loop. Anchoring to
+        // `next_tick` (rather than "time since last wakeup") keeps the
+        // cadence steady when unrelated events interleave.
+        if self.frame_hook.is_none() {
+            return;
+        }
+
+        let now = Instant::now();
+        let due = self.next_tick.is_none_or(|t| now >= t);
+        if !due {
+            return;
+        }
+
+        if let Some(hook) = self.frame_hook.as_mut() {
+            hook();
+        }
+        self.next_tick = Some(now + self.config.tick_interval);
+        // Nudge a paint so the UI reflects any state the hook touched.
+        self.request_redraw();
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // While a frame hook is registered, park the loop until the
+        // next scheduled tick. `next_tick` is anchored to prior fires,
+        // so this does not drift on every event.
+        if let Some(deadline) = self.next_tick {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;

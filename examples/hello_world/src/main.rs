@@ -7,7 +7,7 @@ fn main() {
     App::new()
         .title("shroud — hello world")
         .size(800, 600)
-        .run(|_handle| {
+        .run(|_scope| {
             let mut tree = WidgetTree::new();
             let root = tree.set_root(Container::column().width(800.0).height(600.0).center());
             tree.add_child(
