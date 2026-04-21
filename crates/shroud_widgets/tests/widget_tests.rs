@@ -110,7 +110,7 @@ fn button_click_fires_handler() {
     let root = tree.set_root(Container::column().width(400.0).height(300.0));
     let _btn = tree.add_child(
         root,
-        Button::new("Click me").on_click(move || {
+        Button::new("Click me").on_click(move |_ctx| {
             clicked2.set(true);
         }),
     );
@@ -149,7 +149,7 @@ fn event_outside_widget_is_ignored() {
     let root = tree.set_root(Container::column().width(100.0).height(100.0));
     let _btn = tree.add_child(
         root,
-        Button::new("Click").on_click(move || {
+        Button::new("Click").on_click(move |_ctx| {
             clicked2.set(true);
         }),
     );
@@ -373,7 +373,7 @@ fn input_accepts_char_input() {
     let root = tree.set_root(Container::column().width(400.0).height(100.0));
     let input_idx = tree.add_child(
         root,
-        Input::new().on_change(move |text| {
+        Input::new().on_change(move |text, _ctx| {
             *last_value2.borrow_mut() = text.to_string();
         }),
     );
@@ -408,7 +408,7 @@ fn input_on_change_fires() {
     let root = tree.set_root(Container::column().width(400.0).height(100.0));
     let idx = tree.add_child(
         root,
-        Input::new().on_change(move |_text| {
+        Input::new().on_change(move |_text, _ctx| {
             changed2.set(true);
         }),
     );
@@ -441,7 +441,7 @@ fn input_on_submit_fires() {
     let root = tree.set_root(Container::column().width(400.0).height(100.0));
     let idx = tree.add_child(
         root,
-        Input::new().on_submit(move |_text| {
+        Input::new().on_submit(move |_text, _ctx| {
             submitted2.set(true);
         }),
     );
@@ -505,6 +505,79 @@ fn input_escape_unfocuses() {
 }
 
 #[test]
+fn input_click_outside_unfocuses() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(200.0));
+    let idx = tree.add_child(root, Input::new());
+    tree.compute_layout(400.0, 200.0);
+
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+
+    // Focus via click-in
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'a' }, &mut event_ctx);
+
+    // Click outside the input (above it, well inside the root container)
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.bottom() + 10.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    // After click-outside, char input should be ignored
+    let result = tree.dispatch_event(&WidgetEvent::CharInput { ch: 'b' }, &mut event_ctx);
+    assert_eq!(
+        result,
+        EventResult::Ignored,
+        "click outside must drop focus"
+    );
+}
+
+#[test]
+fn secure_input_click_outside_unfocuses() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(200.0));
+    let idx = tree.add_child(root, SecureInput::new().placeholder("pw"));
+    tree.compute_layout(400.0, 200.0);
+
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'x' }, &mut event_ctx);
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.bottom() + 10.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    let result = tree.dispatch_event(&WidgetEvent::CharInput { ch: 'y' }, &mut event_ctx);
+    assert_eq!(
+        result,
+        EventResult::Ignored,
+        "click outside must drop focus"
+    );
+}
+
+#[test]
 fn input_renders_text() {
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(400.0).height(100.0));
@@ -538,7 +611,7 @@ fn checkbox_toggle() {
     let root = tree.set_root(Container::column().width(400.0).height(100.0));
     tree.add_child(
         root,
-        Checkbox::new("Accept terms").on_change(move |checked| {
+        Checkbox::new("Accept terms").on_change(move |checked, _ctx| {
             toggled2.set(checked);
         }),
     );
@@ -843,7 +916,7 @@ fn scroll_view_hit_test_respects_scroll_offset() {
     tree.add_child(root, Container::column().width(200.0).height(100.0));
     let btn = tree.add_child(
         root,
-        Button::new("btn").on_click(move || clicked_clone.set(true)),
+        Button::new("btn").on_click(move |_ctx| clicked_clone.set(true)),
     );
     tree.compute_layout(400.0, 400.0);
 
@@ -1444,6 +1517,183 @@ fn container_background_accepts_reactive_derive_closure() {
     assert_eq!(ctx_off.rects[0].color, off_color);
 }
 
+// ── Visibility (Phase 18b) ───────────────────────────────────────
+
+#[test]
+fn hidden_container_collapses_layout_space() {
+    // `.visible(false)` must give `display: none` semantics: the container
+    // occupies zero space so sibling layout closes up. Regression guard for
+    // the gap #2 in the password_manager MVP (conditional rows).
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::row().width(400.0).height(100.0));
+    tree.add_child(root, Container::row().width(100.0).height(100.0));
+    let hidden = tree.add_child(
+        root,
+        Container::row().width(100.0).height(100.0).visible(false),
+    );
+    let after = tree.add_child(root, Container::row().width(100.0).height(100.0));
+
+    tree.compute_layout(400.0, 100.0);
+
+    let hidden_rect = tree.layout_rect(hidden);
+    assert_eq!(
+        hidden_rect.size.width, 0.0,
+        "hidden container should collapse to width 0, got {}",
+        hidden_rect.size.width
+    );
+
+    let after_rect = tree.layout_rect(after);
+    assert_eq!(
+        after_rect.origin.x, 100.0,
+        "sibling after a hidden node should sit flush against the previous \
+         visible sibling (x=100), got x={}",
+        after_rect.origin.x,
+    );
+}
+
+#[test]
+fn signal_flip_toggles_container_visibility() {
+    // Flipping a `Signal<bool>` between layout passes must propagate to
+    // Taffy — the widget should reclaim space when the signal goes `true`
+    // and release it when it goes `false`.
+    let shown = Signal::new(true);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::row().width(400.0).height(100.0));
+    let toggled = tree.add_child(
+        root,
+        Container::row().width(100.0).height(100.0).visible(shown),
+    );
+    let tail = tree.add_child(root, Container::row().width(100.0).height(100.0));
+
+    tree.compute_layout(400.0, 100.0);
+    assert_eq!(tree.layout_rect(toggled).size.width, 100.0);
+    assert_eq!(tree.layout_rect(tail).origin.x, 100.0);
+
+    shown.set(false);
+    tree.compute_layout(400.0, 100.0);
+    assert_eq!(
+        tree.layout_rect(toggled).size.width,
+        0.0,
+        "after Signal flip to false, width should collapse"
+    );
+    assert_eq!(
+        tree.layout_rect(tail).origin.x,
+        0.0,
+        "after Signal flip, sibling should slide left"
+    );
+
+    shown.set(true);
+    tree.compute_layout(400.0, 100.0);
+    assert_eq!(
+        tree.layout_rect(toggled).size.width,
+        100.0,
+        "Signal flipping back to true must restore the widget's size"
+    );
+    assert_eq!(tree.layout_rect(tail).origin.x, 100.0);
+}
+
+#[test]
+fn hidden_subtree_is_not_painted() {
+    // A hidden Container must skip paint for both itself and its descendants.
+    // We count rects: a visible Container with one Button child paints 2
+    // rects (container bg + button bg); hiding the container should drop
+    // both to 0.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(200.0));
+    let group = tree.add_child(
+        root,
+        Container::column()
+            .width(200.0)
+            .height(100.0)
+            .background(Color::rgb(0.5, 0.5, 0.5))
+            .visible(false),
+    );
+    tree.add_child(group, Button::new("inside"));
+
+    tree.compute_layout(400.0, 200.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    assert_eq!(
+        ctx.rects.len(),
+        0,
+        "hidden subtree must produce no rects (got {})",
+        ctx.rects.len()
+    );
+    assert_eq!(ctx.glyphs.len(), 0, "hidden subtree must produce no glyphs");
+}
+
+#[test]
+fn hidden_button_does_not_receive_click() {
+    // Hit-test must walk past a hidden widget, so its handler never fires.
+    // Covers dispatch_to_node's early return on !visible(): without it the
+    // click would still reach the Button even though its layout_rect is
+    // collapsed — because child dispatch shifts through the subtree first.
+    let clicked = Rc::new(Cell::new(false));
+    let clicked2 = clicked.clone();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    tree.add_child(
+        root,
+        Button::new("hidden")
+            .on_click(move |_ctx| clicked2.set(true))
+            .visible(false),
+    );
+    tree.compute_layout(400.0, 100.0);
+
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(10.0, 10.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(
+        &WidgetEvent::MouseUp {
+            position: Point::new(10.0, 10.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    assert!(
+        !clicked.get(),
+        "hidden Button must not receive click events"
+    );
+}
+
+#[test]
+fn measured_button_layout_honors_visibility() {
+    // Phase 18a / b interaction: under `compute_layout_with_measure`, a
+    // hidden Button still has `measure()` side-stepped because its Taffy
+    // style is `display: none`. The resulting layout_rect must be zero-sized.
+    use shroud_core::Theme;
+    use shroud_text::TextEngine;
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::row().width(400.0).height(100.0));
+    let hidden_btn = tree.add_child(root, Button::new("hidden-btn").visible(false));
+    let after = tree.add_child(root, Button::new("shown-btn"));
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(400.0, 100.0, &mut engine, &theme);
+
+    let h_rect = tree.layout_rect(hidden_btn);
+    assert_eq!(
+        h_rect.size.width, 0.0,
+        "hidden Button should have width 0 under measured layout"
+    );
+
+    let a_rect = tree.layout_rect(after);
+    assert_eq!(
+        a_rect.origin.x, 0.0,
+        "visible sibling should sit at x=0 when the only earlier child is hidden"
+    );
+}
+
 #[test]
 fn measured_button_inside_center_has_label_width() {
     // Same regression guard but for Button: its measured width must exceed
@@ -1468,4 +1718,461 @@ fn measured_button_inside_center_has_label_width() {
         rect.size.width,
     );
     assert!(rect.size.height > 0.0);
+}
+
+// ── Phase 18c-1: dynamic tree mutation ────────────────────────────
+
+/// Counts invocations of `Drop` via a shared `Cell`. Used to assert that
+/// `remove` and `replace_root` actually drop every widget in the subtree,
+/// which is what drives zeroize for secure widgets.
+struct DropCounter {
+    counter: Rc<Cell<u32>>,
+}
+
+impl DropCounter {
+    fn new(counter: Rc<Cell<u32>>) -> Self {
+        Self { counter }
+    }
+}
+
+impl Drop for DropCounter {
+    fn drop(&mut self) {
+        self.counter.set(self.counter.get() + 1);
+    }
+}
+
+impl shroud_widgets::Widget for DropCounter {
+    fn style(&self) -> shroud_layout::FlexStyle {
+        shroud_layout::FlexStyle::new().width(10.0).height(10.0)
+    }
+    fn paint(&self, _layout: shroud_core::Rect, _ctx: &mut PaintContext) {}
+}
+
+#[test]
+fn tree_remove_leaf_tombstones_slot_and_keeps_siblings() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let a = tree.add_child(root, Container::row().height(50.0));
+    let b = tree.add_child(root, Container::row().height(50.0));
+    assert_eq!(tree.len(), 3);
+
+    tree.remove(a);
+
+    assert!(!tree.contains(a), "removed slot must tombstone");
+    assert!(tree.try_widget(a).is_none());
+    assert!(tree.contains(b), "sibling index stays stable across remove");
+    assert!(tree.contains(root));
+    assert_eq!(tree.len(), 2);
+}
+
+#[test]
+fn tree_remove_cascades_to_descendants() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let branch = tree.add_child(root, Container::column());
+    let leaf = tree.add_child(branch, TextWidget::new("leaf"));
+
+    tree.remove(branch);
+
+    assert!(!tree.contains(branch));
+    assert!(
+        !tree.contains(leaf),
+        "descendants must be removed with their parent"
+    );
+    assert!(tree.contains(root));
+    assert_eq!(tree.len(), 1);
+}
+
+#[test]
+fn tree_remove_drops_every_widget_in_subtree() {
+    let counter = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let parent = tree.add_child(root, DropCounter::new(counter.clone()));
+    let _c1 = tree.add_child(parent, DropCounter::new(counter.clone()));
+    let _c2 = tree.add_child(parent, DropCounter::new(counter.clone()));
+
+    assert_eq!(counter.get(), 0);
+    tree.remove(parent);
+    assert_eq!(counter.get(), 3, "parent + 2 children should all drop");
+}
+
+#[test]
+fn tree_remove_root_clears_root_pointer() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    tree.add_child(root, Container::row().height(50.0));
+
+    tree.remove(root);
+
+    assert!(tree.root().is_none());
+    assert!(!tree.contains(root));
+    assert!(tree.is_empty());
+}
+
+#[test]
+fn tree_remove_tombstoned_index_is_noop() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let a = tree.add_child(root, Container::row().height(50.0));
+
+    tree.remove(a);
+    // Repeated remove of a tombstone must not panic.
+    tree.remove(a);
+    // Out-of-range index: also silently ignored.
+    tree.remove(9999);
+
+    assert!(!tree.contains(a));
+    assert_eq!(tree.len(), 1);
+}
+
+#[test]
+fn tree_remove_clears_hover_when_hovered_widget_goes_away() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let target = tree.add_child(root, Button::new("hover me"));
+    tree.compute_layout(400.0, 100.0);
+
+    let rect = tree.layout_rect(target);
+    let mut event_ctx = EventContext::new();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+        },
+        &mut event_ctx,
+    );
+    assert_eq!(tree.hovered(), Some(target));
+
+    tree.remove(target);
+    assert!(
+        tree.hovered().is_none(),
+        "removed widget must leave hover cleared"
+    );
+}
+
+#[test]
+fn tree_replace_root_drops_old_subtree() {
+    let counter = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let old_root = tree.set_root(DropCounter::new(counter.clone()));
+    tree.add_child(old_root, DropCounter::new(counter.clone()));
+    assert_eq!(tree.len(), 2);
+
+    let new_root = tree.replace_root(Container::column().width(10.0).height(10.0));
+    assert_eq!(
+        counter.get(),
+        2,
+        "replace_root drops old root + descendants"
+    );
+    assert!(!tree.contains(old_root));
+    assert_eq!(tree.root(), Some(new_root));
+    assert_eq!(tree.len(), 1);
+}
+
+#[test]
+fn event_handler_can_queue_remove_via_context() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(200.0));
+
+    let victim = tree.add_child(root, Button::new("victim"));
+    let killer = tree.add_child(
+        root,
+        Button::new("kill").on_click(move |ctx| {
+            ctx.remove(victim);
+        }),
+    );
+    tree.compute_layout(400.0, 200.0);
+
+    let rect = tree.layout_rect(killer);
+    let pos = Point::new(
+        rect.origin.x + rect.size.width / 2.0,
+        rect.origin.y + rect.size.height / 2.0,
+    );
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: pos,
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(
+        &WidgetEvent::MouseUp {
+            position: pos,
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    assert!(
+        !tree.contains(victim),
+        "handler-enqueued remove fires after dispatch"
+    );
+    assert!(tree.contains(killer));
+}
+
+#[test]
+fn event_handler_replace_screen_rebuilds_tree() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let btn = tree.add_child(
+        root,
+        Button::new("transition").on_click(move |ctx| {
+            ctx.replace_screen(|tree| {
+                let new_root = tree.set_root(Container::row().width(400.0).height(100.0));
+                tree.add_child(new_root, TextWidget::new("screen 2"));
+            });
+        }),
+    );
+    tree.compute_layout(400.0, 100.0);
+
+    let rect = tree.layout_rect(btn);
+    let pos = Point::new(
+        rect.origin.x + rect.size.width / 2.0,
+        rect.origin.y + rect.size.height / 2.0,
+    );
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: pos,
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(
+        &WidgetEvent::MouseUp {
+            position: pos,
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    assert!(
+        !tree.contains(root),
+        "old root tombstoned by replace_screen"
+    );
+    assert!(!tree.contains(btn));
+    let new_root = tree.root().expect("new root installed by rebuild closure");
+    assert!(tree.contains(new_root));
+    assert_eq!(tree.len(), 2, "new screen = root + its one child");
+}
+
+#[test]
+fn secure_input_drops_when_removed_from_tree() {
+    // SecureString zeroize-on-drop is covered in shroud_security's own tests.
+    // Here we pin down the tree-level guarantee: removing a SecureInput
+    // must actually drop it (so the zeroize chain is reachable), and must
+    // not disturb unrelated siblings.
+    let counter = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let pw = tree.add_child(root, SecureInput::new().placeholder("pw"));
+    tree.add_child(root, DropCounter::new(counter.clone()));
+
+    tree.remove(pw);
+    assert!(!tree.contains(pw));
+    assert_eq!(counter.get(), 0, "unrelated sibling must not drop");
+
+    tree.remove(root);
+    assert_eq!(counter.get(), 1, "cascading root removal drops the sibling");
+}
+
+// ── Phase 18c-2: subtree rebuild ──────────────────────────────────
+
+#[test]
+fn rebuild_children_replaces_existing_children() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let _old1 = tree.add_child(root, Container::row().height(20.0));
+    let _old2 = tree.add_child(root, Container::row().height(20.0));
+    assert_eq!(tree.len(), 3);
+
+    let mut event_ctx = EventContext::new();
+    event_ctx.rebuild_children(root, |tree, parent| {
+        tree.add_child(parent, Container::row().height(30.0));
+        tree.add_child(parent, Container::row().height(30.0));
+        tree.add_child(parent, Container::row().height(30.0));
+    });
+    // Drain via a no-op dispatch so apply_commands runs.
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(-999.0, -999.0),
+        },
+        &mut event_ctx,
+    );
+
+    assert!(tree.contains(root), "parent must survive rebuild");
+    assert_eq!(
+        tree.len(),
+        4,
+        "root + 3 fresh children; old children tombstoned"
+    );
+}
+
+#[test]
+fn rebuild_children_drops_old_subtree() {
+    let counter = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let mid = tree.add_child(root, DropCounter::new(counter.clone()));
+    tree.add_child(mid, DropCounter::new(counter.clone()));
+    tree.add_child(mid, DropCounter::new(counter.clone()));
+    assert_eq!(counter.get(), 0);
+
+    let mut event_ctx = EventContext::new();
+    event_ctx.rebuild_children(root, |tree, parent| {
+        tree.add_child(parent, Container::row().height(10.0));
+    });
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(-999.0, -999.0),
+        },
+        &mut event_ctx,
+    );
+
+    assert_eq!(
+        counter.get(),
+        3,
+        "rebuild drops mid + both grandchildren; cascades through subtree"
+    );
+}
+
+#[test]
+fn rebuild_children_preserves_parent_and_unrelated_siblings() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let list = tree.add_child(root, Container::column());
+    tree.add_child(list, Container::row().height(20.0));
+    let keep = tree.add_child(root, Container::row().height(40.0));
+    assert_eq!(tree.len(), 4);
+
+    let mut event_ctx = EventContext::new();
+    event_ctx.rebuild_children(list, |tree, parent| {
+        tree.add_child(parent, Container::row().height(20.0));
+        tree.add_child(parent, Container::row().height(20.0));
+    });
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(-999.0, -999.0),
+        },
+        &mut event_ctx,
+    );
+
+    assert!(tree.contains(list), "list parent index stays live");
+    assert!(
+        tree.contains(keep),
+        "sibling outside the rebuilt subtree is untouched"
+    );
+    // root + keep + list + 2 fresh rows = 5
+    assert_eq!(tree.len(), 5);
+}
+
+#[test]
+fn rebuild_children_is_noop_when_parent_tombstoned_first() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let list = tree.add_child(root, Container::column());
+    tree.add_child(list, Container::row().height(20.0));
+
+    // Queue: first remove the list, then try to rebuild its children. The
+    // rebuild must silently skip once drain notices the tombstone — without
+    // this the builder could install children on a dead parent and leak.
+    let rebuild_fired = Rc::new(Cell::new(false));
+    let flag = Rc::clone(&rebuild_fired);
+    let mut event_ctx = EventContext::new();
+    event_ctx.remove(list);
+    event_ctx.rebuild_children(list, move |tree, parent| {
+        flag.set(true);
+        tree.add_child(parent, Container::row().height(20.0));
+    });
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(-999.0, -999.0),
+        },
+        &mut event_ctx,
+    );
+
+    assert!(!tree.contains(list), "list was removed first");
+    assert!(
+        !rebuild_fired.get(),
+        "builder must not run when parent was tombstoned mid-queue"
+    );
+}
+
+#[test]
+fn rebuild_children_empty_parent_just_runs_builder() {
+    // A parent with zero existing children is a legal starting state — e.g.
+    // a freshly-added list container. Rebuild should still populate.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let list = tree.add_child(root, Container::column());
+    assert_eq!(tree.len(), 2);
+
+    let mut event_ctx = EventContext::new();
+    event_ctx.rebuild_children(list, |tree, parent| {
+        tree.add_child(parent, Container::row().height(10.0));
+        tree.add_child(parent, Container::row().height(10.0));
+    });
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(-999.0, -999.0),
+        },
+        &mut event_ctx,
+    );
+
+    assert_eq!(tree.len(), 4);
+}
+
+#[test]
+fn event_handler_rebuild_children_from_button_click() {
+    // Exercises the full password-manager-style path: a click handler
+    // enqueues `rebuild_children` for a sibling list container, and the
+    // drain at the end of dispatch applies it.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(200.0));
+    let list = tree.add_child(root, Container::column());
+    tree.add_child(list, Container::row().height(20.0));
+    tree.add_child(list, Container::row().height(20.0));
+
+    let btn = tree.add_child(
+        root,
+        Button::new("rebuild").on_click(move |ctx| {
+            ctx.rebuild_children(list, |tree, parent| {
+                // New row count (1) differs from old (2) so len() changes.
+                tree.add_child(parent, Container::row().height(20.0));
+            });
+        }),
+    );
+    tree.compute_layout(400.0, 200.0);
+
+    let rect = tree.layout_rect(btn);
+    let pos = Point::new(
+        rect.origin.x + rect.size.width / 2.0,
+        rect.origin.y + rect.size.height / 2.0,
+    );
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: pos,
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(
+        &WidgetEvent::MouseUp {
+            position: pos,
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    assert!(tree.contains(list));
+    assert!(tree.contains(btn));
+    // root + list + button + 1 new row = 4
+    assert_eq!(tree.len(), 4);
 }

@@ -160,6 +160,17 @@ impl FlexStyle {
         self
     }
 
+    /// Set `display: none`. The node is removed from the layout flow —
+    /// it takes zero space and Taffy cascades this to descendants.
+    ///
+    /// Used by `WidgetTree` to honor `Widget::visible() == false`. Widget
+    /// authors normally reach this via `Container::visible(...)` /
+    /// `Button::visible(...)` rather than calling this directly.
+    pub fn display_none(mut self) -> Self {
+        self.style.display = Display::None;
+        self
+    }
+
     /// Build the Taffy Style.
     pub fn build(self) -> Style {
         self.style

@@ -16,10 +16,10 @@ use shroud_layout::FlexStyle;
 /// ```ignore
 /// let input = Input::new()
 ///     .placeholder("Enter username")
-///     .on_change(|text| println!("changed: {text}"))
-///     .on_submit(|text| println!("submitted: {text}"));
+///     .on_change(|text, _ctx| println!("changed: {text}"))
+///     .on_submit(|text, _ctx| println!("submitted: {text}"));
 /// ```
-type TextCallback = Box<dyn FnMut(&str)>;
+type TextCallback = Box<dyn FnMut(&str, &mut EventContext)>;
 
 pub struct Input {
     value: String,
@@ -78,13 +78,19 @@ impl Input {
     }
 
     /// Set a callback for when the text changes.
-    pub fn on_change(mut self, f: impl FnMut(&str) + 'static) -> Self {
+    ///
+    /// Receives the current value and the [`EventContext`] — ignore the
+    /// ctx with `|text, _ctx| { ... }` when tree mutations aren't needed.
+    pub fn on_change(mut self, f: impl FnMut(&str, &mut EventContext) + 'static) -> Self {
         self.on_change = Some(Box::new(f));
         self
     }
 
     /// Set a callback for when Enter is pressed.
-    pub fn on_submit(mut self, f: impl FnMut(&str) + 'static) -> Self {
+    ///
+    /// Receives the current value and the [`EventContext`] — handlers can
+    /// drive screen transitions (`ctx.replace_screen(...)`) in response.
+    pub fn on_submit(mut self, f: impl FnMut(&str, &mut EventContext) + 'static) -> Self {
         self.on_submit = Some(Box::new(f));
         self
     }
@@ -277,12 +283,7 @@ impl Widget for Input {
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        _layout: Rect,
-        _ctx: &mut EventContext,
-    ) -> EventResult {
+    fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
         match event {
             WidgetEvent::MouseDown { .. } => {
                 self.focused = true;
@@ -291,12 +292,17 @@ impl Widget for Input {
                 EventResult::Consumed
             }
 
+            WidgetEvent::FocusLost => {
+                self.focused = false;
+                EventResult::Ignored
+            }
+
             WidgetEvent::CharInput { ch } if self.focused => {
                 if !ch.is_control() {
                     self.value.insert(self.cursor, *ch);
                     self.cursor += ch.len_utf8();
                     if let Some(handler) = &mut self.on_change {
-                        handler(&self.value);
+                        handler(&self.value, ctx);
                     }
                 }
                 EventResult::Consumed
@@ -309,7 +315,7 @@ impl Widget for Input {
                         self.value.drain(prev..self.cursor);
                         self.cursor = prev;
                         if let Some(handler) = &mut self.on_change {
-                            handler(&self.value);
+                            handler(&self.value, ctx);
                         }
                     }
                     EventResult::Consumed
@@ -319,7 +325,7 @@ impl Widget for Input {
                         let next = self.next_char_boundary(self.cursor);
                         self.value.drain(self.cursor..next);
                         if let Some(handler) = &mut self.on_change {
-                            handler(&self.value);
+                            handler(&self.value, ctx);
                         }
                     }
                     EventResult::Consumed
@@ -346,7 +352,7 @@ impl Widget for Input {
                 }
                 Key::Named(NamedKey::Enter) => {
                     if let Some(handler) = &mut self.on_submit {
-                        handler(&self.value);
+                        handler(&self.value, ctx);
                     }
                     EventResult::Consumed
                 }

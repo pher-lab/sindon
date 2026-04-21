@@ -11,6 +11,8 @@ use shroud_core::{Color, Rect, SecurityLevel};
 use shroud_layout::FlexStyle;
 use shroud_security::SecureString;
 
+type SubmitHandler = Box<dyn FnMut(&SecureString, &mut EventContext)>;
+
 /// A secure text input field for passwords and sensitive data.
 ///
 /// Key security properties:
@@ -38,6 +40,9 @@ pub struct SecureInput {
     focused: bool,
     /// Cursor position (character index).
     cursor: usize,
+    /// Submit handler, fired on Enter. Receives `&SecureString` so callers
+    /// can copy, hash, or consume the value without widening its exposure.
+    on_submit: Option<SubmitHandler>,
     // Colors (None = read from theme)
     bg_color: Option<Color>,
     bg_focused_color: Option<Color>,
@@ -57,6 +62,7 @@ impl SecureInput {
             font_size: None,
             focused: false,
             cursor: 0,
+            on_submit: None,
             bg_color: None,
             bg_focused_color: None,
             text_color: None,
@@ -93,6 +99,19 @@ impl SecureInput {
     /// Set the text color.
     pub fn text_color(mut self, color: Color) -> Self {
         self.text_color = Some(color);
+        self
+    }
+
+    /// Register a handler fired when the user presses Enter.
+    ///
+    /// The handler borrows the `SecureString` — use `expose` inside it to
+    /// read the raw bytes, or clone into a caller-owned `SecureString`.
+    /// Also receives the current [`EventContext`], so handlers can
+    /// transition the UI (`ctx.replace_screen(...)`) in response to an
+    /// unlock attempt. The input is *not* cleared after submit; callers
+    /// who want that behavior should call `clear()` in their handler.
+    pub fn on_submit(mut self, f: impl FnMut(&SecureString, &mut EventContext) + 'static) -> Self {
+        self.on_submit = Some(Box::new(f));
         self
     }
 
@@ -248,16 +267,16 @@ impl Widget for SecureInput {
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        _layout: Rect,
-        _ctx: &mut EventContext,
-    ) -> EventResult {
+    fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
         match event {
             WidgetEvent::MouseDown { .. } => {
                 self.focused = true;
                 EventResult::Consumed
+            }
+
+            WidgetEvent::FocusLost => {
+                self.focused = false;
+                EventResult::Ignored
             }
 
             WidgetEvent::CharInput { ch } if self.focused => {
@@ -282,7 +301,9 @@ impl Widget for SecureInput {
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Enter) => {
-                    // Enter could submit — for now just consume
+                    if let Some(handler) = &mut self.on_submit {
+                        handler(&self.value, ctx);
+                    }
                     EventResult::Consumed
                 }
                 _ => EventResult::Ignored,

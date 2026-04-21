@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::event::{EventContext, EventResult, WidgetEvent};
+use crate::event::{EventContext, EventResult, TreeCommand, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Point, Rect, SecurityLevel, Size, Theme};
@@ -21,14 +21,29 @@ struct WidgetNode {
     parent: Option<usize>,
     /// Effective security level: max(parent_effective, self.declared).
     effective_security: SecurityLevel,
+    /// Last visibility state applied to Taffy. Used so we only call
+    /// `set_style` when `Widget::visible()` actually flips — reverting from
+    /// `display: none` back to the widget's real style requires a refresh,
+    /// while a steady-state visible node can keep the style installed at
+    /// insert time.
+    last_applied_visible: bool,
 }
 
 /// Manages a tree of widgets with layout integration.
 ///
-/// Widgets are stored in a flat Vec. Parent-child relationships are tracked
-/// via indices. Each widget has a corresponding Taffy layout node.
+/// Widgets are stored in a flat `Vec<Option<WidgetNode>>`. Parent-child
+/// relationships are tracked via indices. Each widget has a corresponding
+/// Taffy layout node.
+///
+/// Indices are *stable across removals* — [`Self::remove`] tombstones the
+/// slot (sets it to `None`) instead of shifting later entries. A closure
+/// that captured an index before a remove keeps pointing at either the
+/// still-live widget or a tombstone; it never silently aliases a different
+/// widget. Operations on tombstoned indices panic via `widget()` /
+/// `layout_rect()` — use [`Self::contains`] or [`Self::try_widget`] when
+/// the index may refer to a removed node.
 pub struct WidgetTree {
-    nodes: Vec<WidgetNode>,
+    nodes: Vec<Option<WidgetNode>>,
     root: Option<usize>,
     layout: LayoutEngine,
     /// Index of the widget currently under the cursor (for MouseEnter/Leave).
@@ -46,46 +61,228 @@ impl WidgetTree {
     }
 
     /// Add a widget as the root of the tree.
+    ///
+    /// If a root is already set, it remains as a stranded subtree — use
+    /// [`Self::replace_root`] instead when swapping.
     pub fn set_root(&mut self, widget: impl Widget + 'static) -> usize {
-        let effective_security = widget.security_level();
-        let layout_node = self.layout.add_leaf(widget.style());
-        let idx = self.nodes.len();
-        self.nodes.push(WidgetNode {
-            widget: Box::new(widget),
-            layout_node,
-            children: Vec::new(),
-            parent: None,
-            effective_security,
-        });
-        self.root = Some(idx);
-        idx
+        self.set_root_boxed(Box::new(widget))
     }
 
     /// Add a child widget to the given parent.
     pub fn add_child(&mut self, parent: usize, widget: impl Widget + 'static) -> usize {
-        let parent_security = self.nodes[parent].effective_security;
-        let effective_security = parent_security.merge(widget.security_level());
-        let layout_node = self.layout.add_leaf(widget.style());
+        self.add_child_boxed(parent, Box::new(widget))
+    }
+
+    /// Replace the current root (and its entire subtree) with a new,
+    /// childless root widget.
+    ///
+    /// All descendants of the old root are dropped in post-order, so
+    /// widgets holding secure resources (`SecureInput`, `SecureText`)
+    /// zeroize their backing memory as part of the swap. Returns the new
+    /// root's index.
+    ///
+    /// For multi-widget screen transitions, prefer
+    /// [`EventContext::replace_screen`] (from an event handler) or build
+    /// the replacement tree inline after this call.
+    pub fn replace_root(&mut self, widget: impl Widget + 'static) -> usize {
+        self.replace_root_boxed(Box::new(widget))
+    }
+
+    /// Remove `idx` and every descendant from the tree.
+    ///
+    /// The slots are tombstoned (left as `None`) rather than compacted, so
+    /// surviving indices stay stable. Every widget in the subtree is
+    /// dropped in post-order; `Drop` impls fire as expected. If the root
+    /// itself is removed, `root` becomes `None`.
+    ///
+    /// Silently no-ops when `idx` is out of range or already tombstoned,
+    /// so repeated removes (e.g. from racing event handlers) don't panic.
+    pub fn remove(&mut self, idx: usize) {
+        if self.node(idx).is_none() {
+            return;
+        }
+
+        // Collect the subtree in post-order (leaves first) so we can drop
+        // Taffy nodes bottom-up. Taffy tolerates top-down removal too, but
+        // bottom-up keeps the intermediate tree valid at every step.
+        let mut to_remove = Vec::new();
+        self.collect_subtree_postorder(idx, &mut to_remove);
+
+        // Detach from parent's child list (or clear `root` if removing it).
+        // Done in two phases so the mut borrow of the parent slot doesn't
+        // overlap the immut borrows needed to gather the remaining
+        // children's Taffy node ids.
+        let parent_idx = self.nodes[idx].as_ref().and_then(|n| n.parent);
+        if let Some(p) = parent_idx {
+            if let Some(parent) = self.nodes[p].as_mut() {
+                parent.children.retain(|&c| c != idx);
+            }
+            if let Some(parent) = self.node(p) {
+                let parent_layout = parent.layout_node;
+                let child_ids: Vec<LayoutNodeId> = parent
+                    .children
+                    .iter()
+                    .map(|&i| {
+                        self.node(i)
+                            .expect("live child under live parent")
+                            .layout_node
+                    })
+                    .collect();
+                self.layout.set_children(parent_layout, &child_ids);
+            }
+        } else if self.root == Some(idx) {
+            self.root = None;
+        }
+
+        // Clear hover if it landed on something we're about to remove.
+        if let Some(h) = self.hovered {
+            if to_remove.contains(&h) {
+                self.hovered = None;
+            }
+        }
+
+        // Drop nodes and their Taffy layout nodes. Widget `Drop` runs here
+        // — secure widgets zeroize their backing memory.
+        for i in to_remove {
+            if let Some(node) = self.nodes[i].take() {
+                self.layout.remove(node.layout_node);
+            }
+        }
+    }
+
+    fn collect_subtree_postorder(&self, idx: usize, out: &mut Vec<usize>) {
+        let Some(node) = self.node(idx) else { return };
+        // Clone to avoid carrying an immutable borrow while we recurse; the
+        // child list is short enough that this is cheap.
+        let children: Vec<usize> = node.children.clone();
+        for c in children {
+            self.collect_subtree_postorder(c, out);
+        }
+        out.push(idx);
+    }
+
+    fn set_root_boxed(&mut self, widget: Box<dyn Widget + 'static>) -> usize {
+        let effective_security = widget.security_level();
+        let initial_visible = widget.visible();
+        let mut style = widget.style();
+        if !initial_visible {
+            style = style.display_none();
+        }
+        let layout_node = self.layout.add_leaf(style);
         let idx = self.nodes.len();
-        self.nodes.push(WidgetNode {
-            widget: Box::new(widget),
+        self.nodes.push(Some(WidgetNode {
+            widget,
+            layout_node,
+            children: Vec::new(),
+            parent: None,
+            effective_security,
+            last_applied_visible: initial_visible,
+        }));
+        self.root = Some(idx);
+        idx
+    }
+
+    fn add_child_boxed(&mut self, parent: usize, widget: Box<dyn Widget + 'static>) -> usize {
+        let parent_security = self
+            .node(parent)
+            .map(|n| n.effective_security)
+            .unwrap_or(SecurityLevel::Normal);
+        let effective_security = parent_security.merge(widget.security_level());
+        let initial_visible = widget.visible();
+        let mut style = widget.style();
+        if !initial_visible {
+            style = style.display_none();
+        }
+        let layout_node = self.layout.add_leaf(style);
+        let idx = self.nodes.len();
+        self.nodes.push(Some(WidgetNode {
+            widget,
             layout_node,
             children: Vec::new(),
             parent: Some(parent),
             effective_security,
-        });
-        self.nodes[parent].children.push(idx);
+            last_applied_visible: initial_visible,
+        }));
 
-        // Update Taffy parent-child relationship
-        let parent_layout = self.nodes[parent].layout_node;
-        let child_layout_nodes: Vec<LayoutNodeId> = self.nodes[parent]
-            .children
-            .iter()
-            .map(|&i| self.nodes[i].layout_node)
-            .collect();
-        self.layout.set_children(parent_layout, &child_layout_nodes);
+        // Same two-phase dance as remove(): mutate the parent's children
+        // vec, then reborrow immutably to gather Taffy node ids.
+        if let Some(parent_node) = self.nodes[parent].as_mut() {
+            parent_node.children.push(idx);
+        }
+        if let Some(parent_node) = self.node(parent) {
+            let parent_layout = parent_node.layout_node;
+            let child_layout_nodes: Vec<LayoutNodeId> = parent_node
+                .children
+                .iter()
+                .map(|&i| self.node(i).expect("live child just pushed").layout_node)
+                .collect();
+            self.layout.set_children(parent_layout, &child_layout_nodes);
+        }
 
         idx
+    }
+
+    fn replace_root_boxed(&mut self, widget: Box<dyn Widget + 'static>) -> usize {
+        if let Some(old) = self.root {
+            self.remove(old);
+        }
+        self.set_root_boxed(widget)
+    }
+
+    /// Apply queued tree commands from an event context.
+    ///
+    /// Called by [`Self::dispatch_event`] after the walk returns. Kept
+    /// crate-private because the command enum itself is internal.
+    fn apply_commands(&mut self, commands: Vec<TreeCommand>) {
+        for cmd in commands {
+            match cmd {
+                TreeCommand::AddChild { parent, widget } => {
+                    if self.node(parent).is_some() {
+                        self.add_child_boxed(parent, widget);
+                    }
+                    // Else: parent already removed — silently drop. Widget
+                    // runs its Drop (zeroize) as the Box goes out of scope.
+                }
+                TreeCommand::Remove { idx } => {
+                    self.remove(idx);
+                }
+                TreeCommand::ReplaceRoot { widget } => {
+                    self.replace_root_boxed(widget);
+                }
+                TreeCommand::ReplaceScreen { build } => {
+                    if let Some(old) = self.root {
+                        self.remove(old);
+                    }
+                    build(self);
+                }
+                TreeCommand::RebuildChildren { parent, build } => {
+                    // Skip if a prior command has already tombstoned the
+                    // parent. Matches AddChild's best-effort semantics.
+                    if self.node(parent).is_none() {
+                        continue;
+                    }
+                    // Snapshot the current child list; `remove` mutates the
+                    // parent's children vec in place, so iterating by clone
+                    // keeps the loop stable.
+                    let children: Vec<usize> = self
+                        .node(parent)
+                        .map(|n| n.children.clone())
+                        .unwrap_or_default();
+                    for c in children {
+                        self.remove(c);
+                    }
+                    build(self, parent);
+                }
+            }
+        }
+    }
+
+    fn node(&self, idx: usize) -> Option<&WidgetNode> {
+        self.nodes.get(idx).and_then(|slot| slot.as_ref())
+    }
+
+    fn node_mut(&mut self, idx: usize) -> Option<&mut WidgetNode> {
+        self.nodes.get_mut(idx).and_then(|slot| slot.as_mut())
     }
 
     /// Compute layout for the entire tree (no intrinsic-size measurement).
@@ -98,8 +295,32 @@ impl WidgetTree {
     /// [`Self::compute_layout_with_measure`].
     pub fn compute_layout(&mut self, width: f32, height: f32) {
         if let Some(root) = self.root {
-            let root_node = self.nodes[root].layout_node;
+            self.refresh_visibility_styles();
+            let root_node = self
+                .node(root)
+                .expect("root stays populated between set_root and remove")
+                .layout_node;
             self.layout.compute(root_node, width, height);
+        }
+    }
+
+    /// Re-apply Taffy styles for widgets whose `visible()` flipped since the
+    /// last layout pass. A widget that went hidden gets `display: none`; one
+    /// that came back visible gets its real style re-installed. Stable-visible
+    /// nodes are left alone (their install-time style still applies) to avoid
+    /// redundant `set_style` churn every frame.
+    fn refresh_visibility_styles(&mut self) {
+        let WidgetTree { nodes, layout, .. } = self;
+        for slot in nodes.iter_mut() {
+            let Some(node) = slot.as_mut() else { continue };
+            let vis = node.widget.visible();
+            if vis == node.last_applied_visible {
+                continue;
+            }
+            let style = node.widget.style();
+            let style = if vis { style } else { style.display_none() };
+            layout.set_style(node.layout_node, style);
+            node.last_applied_visible = vis;
         }
     }
 
@@ -116,7 +337,11 @@ impl WidgetTree {
         theme: &Theme,
     ) {
         let Some(root) = self.root else { return };
-        let root_node = self.nodes[root].layout_node;
+        self.refresh_visibility_styles();
+        let root_node = self
+            .node(root)
+            .expect("root stays populated between set_root and remove")
+            .layout_node;
 
         // Invalidate Taffy's measure cache. Taffy memoizes leaf measure
         // results by (node, available_width, available_height); when a
@@ -126,8 +351,8 @@ impl WidgetTree {
         // the cached "Count: 0" width, so paint re-shapes with a too-narrow
         // max_width and wraps. Marking each node dirty per pass forces re-
         // measure. Cost is negligible at our tree sizes.
-        for node in &self.nodes {
-            self.layout.mark_dirty(node.layout_node);
+        for n in self.nodes.iter().flatten() {
+            self.layout.mark_dirty(n.layout_node);
         }
 
         // Reverse-lookup Taffy node → widget index. Built fresh every layout
@@ -137,7 +362,7 @@ impl WidgetTree {
             .nodes
             .iter()
             .enumerate()
-            .map(|(i, n)| (n.layout_node, i))
+            .filter_map(|(i, slot)| slot.as_ref().map(|n| (n.layout_node, i)))
             .collect();
 
         let nodes = &self.nodes;
@@ -148,11 +373,14 @@ impl WidgetTree {
                     // return zero so Taffy falls back to style-based sizing.
                     return Size::ZERO;
                 };
+                let Some(node) = nodes[widget_idx].as_ref() else {
+                    return Size::ZERO;
+                };
 
                 // Width constraint: parent-decided width wins over available.
                 let constraint = query.known_width.or(query.available_width);
 
-                let widget = nodes[widget_idx].widget.as_ref();
+                let widget = node.widget.as_ref();
                 let mut ctx = MeasureContext::new(text_engine, theme);
                 widget.measure(constraint, &mut ctx).unwrap_or(Size::ZERO)
             });
@@ -166,7 +394,15 @@ impl WidgetTree {
     }
 
     fn paint_node(&self, idx: usize, ctx: &mut PaintContext) {
-        let node = &self.nodes[idx];
+        let Some(node) = self.node(idx) else {
+            return;
+        };
+        // `display: none` already collapses the subtree in layout, but we
+        // also skip paint so reactive paint-time work (colors, text shaping)
+        // is not spent on an invisible widget.
+        if !node.widget.visible() {
+            return;
+        }
         let layout_rect = self.layout.absolute_rect(node.layout_node);
         node.widget.paint(layout_rect, ctx);
 
@@ -184,6 +420,9 @@ impl WidgetTree {
     ///
     /// For `MouseMove`, automatically generates `MouseEnter`/`MouseLeave`
     /// events when the cursor moves between widgets.
+    ///
+    /// After the walk completes, drains any tree mutations that handlers
+    /// queued on the context (see [`EventContext::add_child`] and friends).
     pub fn dispatch_event(
         &mut self,
         event: &WidgetEvent,
@@ -194,10 +433,47 @@ impl WidgetTree {
             self.update_hover(*position, event_ctx);
         }
 
-        if let Some(root) = self.root {
-            return self.dispatch_to_node(root, event, event_ctx);
+        let result = if let Some(root) = self.root {
+            self.dispatch_to_node(root, event, event_ctx)
+        } else {
+            EventResult::Ignored
+        };
+
+        // After a MouseDown, notify every widget the click *missed* so
+        // focusable widgets can drop focus on a click-outside. Broadcast
+        // happens post-dispatch but pre-command-drain: queued mutations
+        // from the MouseDown handler apply after FocusLost has visited the
+        // still-live tree.
+        if let WidgetEvent::MouseDown { position, .. } = event {
+            self.broadcast_focus_lost(*position, event_ctx);
         }
-        EventResult::Ignored
+
+        // Drain tree-mutation commands queued by handlers. One pass is
+        // enough — `apply_commands` itself does not invoke widget `event`
+        // methods, so it cannot enqueue more commands.
+        let commands = event_ctx.take_commands();
+        if !commands.is_empty() {
+            self.apply_commands(commands);
+        }
+
+        result
+    }
+
+    /// Deliver `FocusLost` to every live widget whose layout rect does not
+    /// contain `click_pos`. Widgets that don't track focus ignore it.
+    fn broadcast_focus_lost(&mut self, click_pos: Point, event_ctx: &mut EventContext) {
+        for i in 0..self.nodes.len() {
+            let rect = match self.node(i) {
+                Some(n) => self.layout.absolute_rect(n.layout_node),
+                None => continue,
+            };
+            if rect.contains(click_pos) {
+                continue;
+            }
+            if let Some(n) = self.node_mut(i) {
+                n.widget.event(&WidgetEvent::FocusLost, rect, event_ctx);
+            }
+        }
     }
 
     /// Track which widget the cursor is over and generate Enter/Leave events.
@@ -210,18 +486,24 @@ impl WidgetTree {
 
         // Send MouseLeave to the widget we're leaving
         if let Some(old_idx) = self.hovered {
-            let old_rect = self.layout.absolute_rect(self.nodes[old_idx].layout_node);
-            self.nodes[old_idx]
-                .widget
-                .event(&WidgetEvent::MouseLeave, old_rect, event_ctx);
+            if let Some(old_node) = self.node(old_idx) {
+                let old_rect = self.layout.absolute_rect(old_node.layout_node);
+                if let Some(n) = self.node_mut(old_idx) {
+                    n.widget
+                        .event(&WidgetEvent::MouseLeave, old_rect, event_ctx);
+                }
+            }
         }
 
         // Send MouseEnter to the widget we're entering
         if let Some(new_idx) = new_hover {
-            let new_rect = self.layout.absolute_rect(self.nodes[new_idx].layout_node);
-            self.nodes[new_idx]
-                .widget
-                .event(&WidgetEvent::MouseEnter, new_rect, event_ctx);
+            if let Some(new_node) = self.node(new_idx) {
+                let new_rect = self.layout.absolute_rect(new_node.layout_node);
+                if let Some(n) = self.node_mut(new_idx) {
+                    n.widget
+                        .event(&WidgetEvent::MouseEnter, new_rect, event_ctx);
+                }
+            }
         }
 
         self.hovered = new_hover;
@@ -233,7 +515,10 @@ impl WidgetTree {
     }
 
     fn hit_test_node(&self, idx: usize, pos: Point) -> Option<usize> {
-        let node = &self.nodes[idx];
+        let node = self.node(idx)?;
+        if !node.widget.visible() {
+            return None;
+        }
         let rect = self.layout.absolute_rect(node.layout_node);
 
         if !rect.contains(pos) {
@@ -266,10 +551,16 @@ impl WidgetTree {
         event: &WidgetEvent,
         event_ctx: &mut EventContext,
     ) -> EventResult {
+        let Some(node) = self.node(idx) else {
+            return EventResult::Ignored;
+        };
+        if !node.widget.visible() {
+            return EventResult::Ignored;
+        }
         // When descending into a widget that introduces a scroll-offset, the
         // children see the event with the cursor position shifted into their
         // coordinate space.
-        let (ox, oy) = self.nodes[idx].widget.scroll_offset();
+        let (ox, oy) = node.widget.scroll_offset();
         let child_event;
         let child_event_ref: &WidgetEvent = if ox == 0.0 && oy == 0.0 {
             event
@@ -279,7 +570,7 @@ impl WidgetTree {
         };
 
         // Dispatch to children first (front-to-back: last child on top)
-        let children: Vec<usize> = self.nodes[idx].children.clone();
+        let children: Vec<usize> = node.children.clone();
         for &child in children.iter().rev() {
             if self.dispatch_to_node(child, child_event_ref, event_ctx) == EventResult::Consumed {
                 return EventResult::Consumed;
@@ -288,7 +579,9 @@ impl WidgetTree {
 
         // Then try this node (unshifted event — this node is painted at
         // its original layout_rect, so screen coords apply).
-        let node = &self.nodes[idx];
+        let Some(node) = self.node(idx) else {
+            return EventResult::Ignored;
+        };
         let layout_rect = self.layout.absolute_rect(node.layout_node);
 
         // Hit test for mouse events
@@ -299,23 +592,41 @@ impl WidgetTree {
         }
 
         // Borrow widget mutably (safe because we're not accessing children here)
-        let node = &mut self.nodes[idx];
+        let Some(node) = self.node_mut(idx) else {
+            return EventResult::Ignored;
+        };
         node.widget.event(event, layout_rect, event_ctx)
     }
 
     /// Get the layout rectangle for a widget.
+    ///
+    /// Panics if `idx` is out of range or has been tombstoned by a prior
+    /// remove. Use [`Self::contains`] to check liveness first.
     pub fn layout_rect(&self, idx: usize) -> Rect {
-        self.layout.absolute_rect(self.nodes[idx].layout_node)
+        let node = self
+            .node(idx)
+            .expect("layout_rect called with stale or out-of-range index");
+        self.layout.absolute_rect(node.layout_node)
     }
 
-    /// Get the number of widgets in the tree.
+    /// Number of live widgets in the tree (tombstoned slots excluded).
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        self.nodes.iter().filter(|s| s.is_some()).count()
     }
 
-    /// Check if the tree is empty.
+    /// Whether the tree has any live widgets. Tombstoned slots do not
+    /// count, so a tree that had its root removed reports `true` here.
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.len() == 0
+    }
+
+    /// Whether `idx` currently refers to a live widget.
+    ///
+    /// Useful when a captured index may have been tombstoned by a prior
+    /// remove; check this before calling [`Self::widget`] or similar
+    /// panicking accessors.
+    pub fn contains(&self, idx: usize) -> bool {
+        self.node(idx).is_some()
     }
 
     /// Access the layout engine.
@@ -328,14 +639,28 @@ impl WidgetTree {
         &mut self.layout
     }
 
-    /// Access a widget by index.
+    /// Access a widget by index. Panics if the slot is tombstoned or
+    /// out of range — use [`Self::try_widget`] for a checked variant.
     pub fn widget(&self, idx: usize) -> &dyn Widget {
-        self.nodes[idx].widget.as_ref()
+        self.node(idx)
+            .expect("widget called with stale or out-of-range index")
+            .widget
+            .as_ref()
     }
 
-    /// Mutable access to a widget by index.
+    /// Checked accessor for a widget by index. Returns `None` if the slot
+    /// has been tombstoned by a prior remove.
+    pub fn try_widget(&self, idx: usize) -> Option<&dyn Widget> {
+        self.node(idx).map(|n| n.widget.as_ref())
+    }
+
+    /// Mutable access to a widget by index. Panics if the slot is
+    /// tombstoned or out of range.
     pub fn widget_mut(&mut self, idx: usize) -> &mut dyn Widget {
-        self.nodes[idx].widget.as_mut()
+        self.node_mut(idx)
+            .expect("widget_mut called with stale or out-of-range index")
+            .widget
+            .as_mut()
     }
 
     /// Get the effective security level for a widget.
@@ -343,12 +668,19 @@ impl WidgetTree {
     /// This is `max(parent_effective, widget_declared)` — a child inside
     /// a `Protected` container inherits at least `Protected`.
     pub fn effective_security(&self, idx: usize) -> SecurityLevel {
-        self.nodes[idx].effective_security
+        self.node(idx)
+            .expect("effective_security called with stale or out-of-range index")
+            .effective_security
     }
 
     /// Get the currently hovered widget index (if any).
     pub fn hovered(&self) -> Option<usize> {
         self.hovered
+    }
+
+    /// Index of the current root widget, if set.
+    pub fn root(&self) -> Option<usize> {
+        self.root
     }
 }
 

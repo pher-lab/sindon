@@ -33,6 +33,19 @@ pub trait Widget {
         SecurityLevel::Normal
     }
 
+    /// Whether this widget should participate in layout, paint, and hit-test.
+    ///
+    /// Returning `false` gives `display: none` semantics: the subtree is
+    /// removed from the layout flow (siblings close up the space), is not
+    /// painted, and does not receive events. Descendants are skipped as well.
+    ///
+    /// Default is `true`. Widgets that expose a `.visible(Reactive<bool>)`
+    /// setter (e.g. `Container`, `Button`) override this to re-read the
+    /// reactive source each frame.
+    fn visible(&self) -> bool {
+        true
+    }
+
     /// Return the flex style for layout computation.
     fn style(&self) -> FlexStyle;
 

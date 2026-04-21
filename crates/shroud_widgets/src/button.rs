@@ -14,10 +14,14 @@ use shroud_reactive::Reactive;
 /// Label and all colors are stored as [`Reactive<T>`] so each accepts either
 /// a literal or a signal-backed source. Dynamic variants are re-read on every
 /// paint — see [`Reactive`]'s pull-based model.
+/// Handler type for `Button::on_click` — takes the dispatch context so
+/// handlers can queue tree mutations (`ctx.remove`, `ctx.replace_screen`).
+type ClickHandler = Box<dyn FnMut(&mut EventContext)>;
+
 pub struct Button {
     label: Reactive<String>,
     font_size: Option<f32>,
-    on_click: Option<Box<dyn FnMut()>>,
+    on_click: Option<ClickHandler>,
     // Visual state
     hovered: bool,
     pressed: bool,
@@ -26,6 +30,7 @@ pub struct Button {
     hover_bg: Option<Reactive<Color>>,
     press_bg: Option<Reactive<Color>>,
     text_color: Option<Reactive<Color>>,
+    visible: Reactive<bool>,
 }
 
 impl Button {
@@ -45,6 +50,7 @@ impl Button {
             hover_bg: None,
             press_bg: None,
             text_color: None,
+            visible: Reactive::Static(true),
         }
     }
 
@@ -64,11 +70,17 @@ impl Button {
             hover_bg: None,
             press_bg: None,
             text_color: None,
+            visible: Reactive::Static(true),
         }
     }
 
     /// Set the click handler.
-    pub fn on_click(mut self, f: impl FnMut() + 'static) -> Self {
+    ///
+    /// The closure receives the current [`EventContext`], which is the
+    /// hook for tree mutations like `ctx.remove(idx)` or
+    /// `ctx.replace_screen(|tree| { ... })`. Handlers that don't need
+    /// to touch the tree can ignore the parameter with `|_ctx| { ... }`.
+    pub fn on_click(mut self, f: impl FnMut(&mut EventContext) + 'static) -> Self {
         self.on_click = Some(Box::new(f));
         self
     }
@@ -105,6 +117,17 @@ impl Button {
         self.text_color = Some(color.into());
         self
     }
+
+    /// Toggle visibility. `false` gives `display: none` semantics — the
+    /// button is removed from the layout flow, not painted, and does not
+    /// receive events.
+    ///
+    /// Accepts a literal `bool`, `Signal<bool>`, `Memo<bool>`, or
+    /// `Reactive::derive(...)`. The reactive source is re-read every frame.
+    pub fn visible(mut self, v: impl Into<Reactive<bool>>) -> Self {
+        self.visible = v.into();
+        self
+    }
 }
 
 impl Widget for Button {
@@ -114,6 +137,10 @@ impl Widget for Button {
             .padding(8.0)
             .center()
             .min_height(font_size + 16.0)
+    }
+
+    fn visible(&self) -> bool {
+        self.visible.get()
     }
 
     fn measure(&self, available_width: Option<f32>, ctx: &mut MeasureContext) -> Option<Size> {
@@ -215,12 +242,7 @@ impl Widget for Button {
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        _layout: Rect,
-        _ctx: &mut EventContext,
-    ) -> EventResult {
+    fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
         match event {
             WidgetEvent::MouseEnter => {
                 self.hovered = true;
@@ -245,7 +267,7 @@ impl Widget for Button {
                 if self.pressed {
                     self.pressed = false;
                     if let Some(handler) = &mut self.on_click {
-                        handler();
+                        handler(ctx);
                     }
                     EventResult::Consumed
                 } else {

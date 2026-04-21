@@ -18,6 +18,7 @@ use shroud_reactive::Reactive;
 pub struct Container {
     style: FlexStyle,
     background: Option<Reactive<Color>>,
+    visible: Reactive<bool>,
 }
 
 impl Container {
@@ -26,6 +27,7 @@ impl Container {
         Self {
             style: FlexStyle::new().column(),
             background: None,
+            visible: Reactive::Static(true),
         }
     }
 
@@ -34,7 +36,20 @@ impl Container {
         Self {
             style: FlexStyle::new().row(),
             background: None,
+            visible: Reactive::Static(true),
         }
+    }
+
+    /// Toggle visibility. `false` gives `display: none` semantics — the
+    /// container and its subtree are removed from the layout flow, not
+    /// painted, and do not receive events.
+    ///
+    /// Accepts a literal `bool`, `Signal<bool>`, `Memo<bool>`, or
+    /// `Reactive::derive(...)`. The reactive source is re-read every frame,
+    /// so wrap expensive closures in a `Memo` if needed.
+    pub fn visible(mut self, v: impl Into<Reactive<bool>>) -> Self {
+        self.visible = v.into();
+        self
     }
 
     /// Set the background color.
@@ -98,6 +113,10 @@ impl Container {
 impl Widget for Container {
     fn style(&self) -> FlexStyle {
         self.style.clone()
+    }
+
+    fn visible(&self) -> bool {
+        self.visible.get()
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {

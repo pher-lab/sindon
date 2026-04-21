@@ -9,6 +9,11 @@
 //!   demonstrating `Reactive::derive` composing a `Signal` into a `Color`.
 //! - Container `.background(...)` — tinted by the same parity, to show that
 //!   the same pattern applies uniformly across widgets.
+//! - Button `.visible(...)` (Phase 18b) — a "Reset" button only appears when
+//!   `count > 0`, collapsing the slot in layout when hidden.
+//! - Container `.visible(...)` (Phase 18b) — an "odd!" badge container appears
+//!   on odd counts and disappears (with its child TextWidget via cascade) on
+//!   even counts.
 
 use shroud::app::App;
 use shroud::core::Color;
@@ -20,7 +25,7 @@ fn main() {
     App::new()
         .title("shroud — counter")
         .size(400, 300)
-        .run(|_handle| {
+        .run(|_scope| {
             // A reactive signal. `Signal<T>` is `Copy`, so moving it into
             // multiple closures is just copying a handle — no reference
             // counting, no lifetimes to juggle.
@@ -68,6 +73,22 @@ fn main() {
                 TextWidget::reactive(move || format!("Count: {}", count.get())).font_size(32.0),
             );
 
+            // Phase 18b — a small badge that only appears on odd counts.
+            // Hidden via `Container::visible(Reactive<bool>)`; the child
+            // TextWidget inherits the collapse via Taffy's `display: none`
+            // cascade, so we only toggle the parent.
+            let badge = tree.add_child(
+                root,
+                Container::column()
+                    .padding(6.0)
+                    .background(Color::rgb(0.85, 0.55, 0.25))
+                    .visible(Reactive::derive(move || count.get() % 2 != 0)),
+            );
+            tree.add_child(
+                badge,
+                TextWidget::new("odd!").font_size(14.0).color(Color::BLACK),
+            );
+
             // Increment button — `count` is `Copy`, so this move closure
             // captures a handle and can be called repeatedly. Background
             // flips with parity via the `Reactive::derive` above.
@@ -75,9 +96,20 @@ fn main() {
                 root,
                 Button::new("Increment")
                     .background(button_bg)
-                    .on_click(move || {
+                    .on_click(move |_ctx| {
                         count.update(|n| *n += 1);
                     }),
+            );
+
+            // Phase 18b — a Reset button that only appears when count > 0.
+            // Driven by `Button::visible(Reactive<bool>)`; when hidden, its
+            // slot collapses entirely (no layout space, no paint, no clicks).
+            tree.add_child(
+                root,
+                Button::new("Reset")
+                    .background(Color::rgb(0.5, 0.5, 0.5))
+                    .visible(Reactive::derive(move || count.get() > 0))
+                    .on_click(move |_ctx| count.set(0)),
             );
 
             tree

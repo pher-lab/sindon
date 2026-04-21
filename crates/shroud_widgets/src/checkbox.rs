@@ -11,13 +11,17 @@ use shroud_layout::FlexStyle;
 /// # Example (conceptual)
 /// ```ignore
 /// let cb = Checkbox::new("Remember me")
-///     .on_change(|checked| println!("checked: {checked}"));
+///     .on_change(|checked, _ctx| println!("checked: {checked}"));
 /// ```
+/// Handler type for `Checkbox::on_change`. Receives the new state and the
+/// dispatch context for queuing tree mutations.
+type ChangeHandler = Box<dyn FnMut(bool, &mut EventContext)>;
+
 pub struct Checkbox {
     checked: bool,
     label: String,
     font_size: Option<f32>,
-    on_change: Option<Box<dyn FnMut(bool)>>,
+    on_change: Option<ChangeHandler>,
     hovered: bool,
     // Colors (None = read from theme)
     check_color: Option<Color>,
@@ -55,7 +59,10 @@ impl Checkbox {
     }
 
     /// Set a callback for when the checked state changes.
-    pub fn on_change(mut self, f: impl FnMut(bool) + 'static) -> Self {
+    ///
+    /// Receives the new state and the [`EventContext`]; ignore the ctx
+    /// with `|checked, _ctx| { ... }` when no tree mutation is needed.
+    pub fn on_change(mut self, f: impl FnMut(bool, &mut EventContext) + 'static) -> Self {
         self.on_change = Some(Box::new(f));
         self
     }
@@ -194,12 +201,7 @@ impl Widget for Checkbox {
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        _layout: Rect,
-        _ctx: &mut EventContext,
-    ) -> EventResult {
+    fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
         match event {
             WidgetEvent::MouseEnter => {
                 self.hovered = true;
@@ -215,7 +217,7 @@ impl Widget for Checkbox {
             } => {
                 self.checked = !self.checked;
                 if let Some(handler) = &mut self.on_change {
-                    handler(self.checked);
+                    handler(self.checked, ctx);
                 }
                 EventResult::Consumed
             }
