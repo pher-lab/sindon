@@ -1,11 +1,13 @@
 //! password_manager — validation example for shroud.
 //!
 //! Two-screen password manager wired through the Phase 18c-1 tree-mutation
-//! primitives, with Phase 18c-2 add-entry flow layered on top. The demo
-//! exists to stress shroud's secret-handling story end-to-end:
+//! primitives, the Phase 18c-2 add-entry flow, and the Phase 18d reactive
+//! value / clear-trigger bindings. The demo exists to stress shroud's
+//! secret-handling story end-to-end:
 //!
 //! - `SecureInput` → master password stays inside `SecureString`; no
-//!   `String` intermediary.
+//!   `String` intermediary. A `ClearTrigger` (Phase 18d) zeroizes the
+//!   buffer after Save.
 //! - argon2id key derivation from the typed master password.
 //! - chacha20poly1305 decrypt of each entry's password into a `SecureString`.
 //! - `SecureClipboard::write_secure` + 10 s auto-clear, driven by
@@ -13,9 +15,11 @@
 //! - `EventContext::replace_screen` → lock ⇄ vault transitions. The old
 //!   tree drops in full, so the `SecureInput`'s `SecureString` zeroizes as
 //!   part of the transition (gap #1 validation for Phase 18c-1).
-//! - `EventContext::rebuild_children` → add-entry flow rebuilds just the
-//!   list and form subtrees instead of the whole screen (gap #6 validation
-//!   for Phase 18c-2).
+//! - `Input::value(Signal<String>)` → the add-entry drafts live in signals
+//!   that the form inputs bind bidirectionally. Clearing is `signal.set("")`
+//!   rather than rebuilding the form subtree (gap #7 validation for 18d).
+//! - `EventContext::rebuild_children` → only the list subtree is rebuilt
+//!   on save; the form stays put and its inputs clear via the signals.
 //! - Screen capture prevention (Windows only — no-op elsewhere).
 //!
 //! Out of scope: disk persistence, delete-entry, search.
@@ -33,9 +37,10 @@ use zeroize::Zeroizing;
 
 use shroud::app::App;
 use shroud::platform::SecureClipboard;
+use shroud::reactive::Signal;
 use shroud::security::SecureString;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, Input, SecureInput, TextWidget};
+use shroud::widgets::{Button, ClearTrigger, Container, Input, SecureInput, TextWidget};
 
 const DEMO_PASSWORD: &str = "hunter2";
 
@@ -68,24 +73,28 @@ struct AppState {
     /// add-entry flow can encrypt new rows without re-prompting for the
     /// master password.
     key: Option<Zeroizing<[u8; 32]>>,
-    /// Accumulated draft values for the add-entry form. The `Input` widgets
-    /// pipe their current text in via `on_change`; Save reads these and
-    /// clears them alongside rebuilding the form.
-    draft_site: String,
-    draft_username: String,
-    /// Stable tree indices for the vault screen's list and add-form
-    /// containers. `Some` while the vault screen is mounted, `None` on the
-    /// lock screen. Save handlers read these to target `rebuild_children`.
+    /// Add-entry drafts, bound bidirectionally to the form's `Input`
+    /// widgets via Phase-18d `.value(Signal<String>)`. Save reads the
+    /// current values, then writes `""` back to clear the inputs without a
+    /// subtree rebuild.
+    draft_site: Signal<String>,
+    draft_username: Signal<String>,
+    /// Fired after each successful Save to zeroize the SecureInput buffer
+    /// holding the freshly-entered password.
+    clear_password: ClearTrigger,
+    /// Stable tree index for the vault screen's list container. `Some`
+    /// while the vault screen is mounted, `None` on the lock screen. Save
+    /// reads this to target `rebuild_children` for the list only — the
+    /// form stays put and clears through the reactive bindings.
     list_idx: Option<usize>,
-    form_idx: Option<usize>,
 }
 
 impl AppState {
     fn clear_vault_refs(&mut self) {
         self.list_idx = None;
-        self.form_idx = None;
-        self.draft_site.clear();
-        self.draft_username.clear();
+        self.draft_site.set(String::new());
+        self.draft_username.set(String::new());
+        self.clear_password.bump();
     }
 }
 
@@ -182,12 +191,15 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) {
 /// Encrypt a new entry with the currently-resident key and append it to
 /// both the ciphertext store and the unlocked view. Returns `false` if
 /// preconditions aren't met (locked, empty site, etc.) so callers can skip
-/// the ensuing rebuild.
+/// the ensuing rebuild. On success, clears the draft signals and bumps the
+/// SecureInput clear trigger so the form zeroes out without a rebuild.
 fn add_entry(state: &Rc<RefCell<AppState>>, password: &SecureString) -> bool {
     let mut s = state.borrow_mut();
-    if s.draft_site.trim().is_empty() {
+    let site = s.draft_site.get_clone();
+    if site.trim().is_empty() {
         return false;
     }
+    let username = s.draft_username.get_clone();
     let Some(key) = s.key.as_ref() else {
         return false;
     };
@@ -197,9 +209,6 @@ fn add_entry(state: &Rc<RefCell<AppState>>, password: &SecureString) -> bool {
         Ok(ct) => ct,
         Err(_) => return false,
     };
-
-    let site = std::mem::take(&mut s.draft_site);
-    let username = std::mem::take(&mut s.draft_username);
 
     s.encrypted.push(EncryptedEntry {
         site,
@@ -213,6 +222,14 @@ fn add_entry(state: &Rc<RefCell<AppState>>, password: &SecureString) -> bool {
         let pw_clone = password.expose(SecureString::new);
         v.push(UnlockedEntry { password: pw_clone });
     }
+
+    // Clear the form through its reactive bindings. Signals fire on the
+    // next paint for the two Inputs; the SecureInput reads `clear_password`
+    // in its event loop (we're currently inside `on_submit`) and zeroizes
+    // its buffer before the next render.
+    s.draft_site.set(String::new());
+    s.draft_username.set(String::new());
+    s.clear_password.bump();
     true
 }
 
@@ -334,67 +351,49 @@ fn build_vault_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         .color(shroud::core::Color::rgb(0.7, 0.7, 0.75)),
     );
 
-    // Add-entry form. Its index is stashed on state so Save's handler can
-    // target it with `rebuild_children` (which also clears the inputs by
-    // re-instantiating the widgets).
+    // Add-entry form. Builds once and stays put across Saves — its Inputs
+    // are bound to the draft signals, and the SecureInput watches the
+    // clear trigger, so "reset after Save" is purely signal-driven.
     let form = tree.add_child(root, Container::column().gap(6.0).padding(8.0));
-    state.borrow_mut().form_idx = Some(form);
     build_add_form(tree, form, Rc::clone(&state));
 
-    // List container — rebuilt by Save whenever a new entry lands. Keeping
-    // the container alive (rather than rebuilding the whole screen) means
-    // the status line / lock button / form widgets the user is interacting
-    // with don't churn.
+    // List container — rebuilt by Save whenever a new entry lands.
     let list = tree.add_child(root, Container::column().gap(6.0));
     state.borrow_mut().list_idx = Some(list);
     build_list_rows(tree, list, Rc::clone(&state));
 }
 
 fn build_add_form(tree: &mut WidgetTree, parent: usize, state: Rc<RefCell<AppState>>) {
+    let (site_sig, user_sig, clear) = {
+        let s = state.borrow();
+        (s.draft_site, s.draft_username, s.clear_password)
+    };
+
     tree.add_child(
         parent,
         TextWidget::new("Add entry").color(shroud::core::Color::rgb(0.7, 0.7, 0.75)),
     );
 
-    let site_state = Rc::clone(&state);
-    tree.add_child(
-        parent,
-        Input::new()
-            .placeholder("Site")
-            .on_change(move |s, _ctx| site_state.borrow_mut().draft_site = s.to_string()),
-    );
+    tree.add_child(parent, Input::new().placeholder("Site").value(site_sig));
+    tree.add_child(parent, Input::new().placeholder("Username").value(user_sig));
 
-    let user_state = Rc::clone(&state);
-    tree.add_child(
-        parent,
-        Input::new()
-            .placeholder("Username")
-            .on_change(move |s, _ctx| user_state.borrow_mut().draft_username = s.to_string()),
-    );
-
-    // Submit is driven by Enter in the password field. The handler encrypts
-    // the draft, appends it, and surgically rebuilds just the list + form
-    // subtrees — the title / lock button / status line stay put.
+    // Submit is driven by Enter in the password field. The handler
+    // encrypts the draft, appends it, and rebuilds just the list subtree.
+    // The form clears through the draft signals + clear trigger.
     let save_state = Rc::clone(&state);
     tree.add_child(
         parent,
         SecureInput::new()
             .placeholder("Password (press Enter to save)")
+            .clear_on(clear)
             .on_submit(move |pw, ctx| {
                 if !add_entry(&save_state, pw) {
                     return;
                 }
-                let (list_idx, form_idx) = {
-                    let s = save_state.borrow();
-                    (s.list_idx, s.form_idx)
-                };
+                let list_idx = save_state.borrow().list_idx;
                 if let Some(list_idx) = list_idx {
                     let s = Rc::clone(&save_state);
                     ctx.rebuild_children(list_idx, move |tree, p| build_list_rows(tree, p, s));
-                }
-                if let Some(form_idx) = form_idx {
-                    let s = Rc::clone(&save_state);
-                    ctx.rebuild_children(form_idx, move |tree, p| build_add_form(tree, p, s));
                 }
             }),
     );
@@ -460,16 +459,19 @@ fn main() {
         .run(|scope| {
             let (salt, encrypted) = make_demo_vault();
 
+            // Signals and ClearTrigger need to be constructed inside the
+            // app callback so they register with the thread-local reactive
+            // runtime that `App::run` just initialized.
             let state = Rc::new(RefCell::new(AppState {
                 salt,
                 encrypted,
                 state: VaultState::Locked,
                 clipboard: SecureClipboard::new(),
                 key: None,
-                draft_site: String::new(),
-                draft_username: String::new(),
+                draft_site: Signal::new(String::new()),
+                draft_username: Signal::new(String::new()),
+                clear_password: ClearTrigger::new(),
                 list_idx: None,
-                form_idx: None,
             }));
 
             // Per-frame tick — advances the clipboard auto-clear timer on
