@@ -5,6 +5,7 @@
 
 mod button;
 mod checkbox;
+mod clear_trigger;
 mod container;
 pub mod event;
 mod input;
@@ -18,6 +19,7 @@ mod widget;
 
 pub use button::Button;
 pub use checkbox::Checkbox;
+pub use clear_trigger::ClearTrigger;
 pub use container::Container;
 pub use event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
 pub use input::Input;

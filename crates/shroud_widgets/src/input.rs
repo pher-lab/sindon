@@ -1,32 +1,55 @@
 //! Input widget — standard text input for non-sensitive data.
 //!
-//! Unlike `SecureInput`, the value is a plain `String` and rendered
-//! as-is (no masking). Supports cursor movement, Home/End, Delete,
-//! and `on_change`/`on_submit` callbacks.
+//! Unlike `SecureInput`, the value is a plain `String` and rendered as-is
+//! (no masking). Supports cursor movement, Home/End, Delete, and
+//! `on_change` / `on_submit` callbacks.
+//!
+//! ## Reactive value binding (Phase 18d)
+//!
+//! Callers can bind the input to a `Signal<String>` via
+//! [`Input::value`]. The binding is bidirectional: external writes
+//! (`signal.set("...")`) are picked up on the next paint (buffer rebases,
+//! cursor clamps), and every keystroke writes the fresh buffer back to the
+//! signal. No Effect loop — widgets don't subscribe to signals, they just
+//! pull on paint; a write-back to the same signal has no subscribers that
+//! would re-trigger this widget.
+
+use std::cell::{Cell, RefCell};
 
 use crate::event::{EventContext, EventResult, Key, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
 use shroud_core::{Color, Rect};
 use shroud_layout::FlexStyle;
+use shroud_reactive::Signal;
 
 /// A standard text input field.
 ///
 /// # Example (conceptual)
 /// ```ignore
+/// let text = Signal::new(String::new());
 /// let input = Input::new()
 ///     .placeholder("Enter username")
-///     .on_change(|text, _ctx| println!("changed: {text}"))
-///     .on_submit(|text, _ctx| println!("submitted: {text}"));
+///     .value(text)
+///     .on_submit(|s, _ctx| println!("submitted: {s}"));
 /// ```
 type TextCallback = Box<dyn FnMut(&str, &mut EventContext)>;
 
 pub struct Input {
-    value: String,
+    /// Editable buffer. `RefCell` because [`Widget::paint`] takes `&self`
+    /// but may need to rebase the buffer from the bound `Signal<String>`.
+    value: RefCell<String>,
+    /// Cursor byte offset into `value`. `Cell` for the same reason —
+    /// paint-time sync may have to clamp it when the external signal
+    /// produces a shorter string than the local buffer.
+    cursor: Cell<usize>,
+    /// Optional external binding. When `Some`, every paint and event
+    /// rebases `value` from the signal if they differ, and every edit
+    /// writes the fresh buffer back.
+    source: Option<Signal<String>>,
     placeholder: String,
     font_size: Option<f32>,
     focused: bool,
-    cursor: usize,
     on_change: Option<TextCallback>,
     on_submit: Option<TextCallback>,
     // Colors (None = read from theme)
@@ -42,11 +65,12 @@ impl Input {
     /// Create a new empty input.
     pub fn new() -> Self {
         Self {
-            value: String::new(),
+            value: RefCell::new(String::new()),
+            cursor: Cell::new(0),
+            source: None,
             placeholder: String::new(),
             font_size: None,
             focused: false,
-            cursor: 0,
             on_change: None,
             on_submit: None,
             bg_color: None,
@@ -60,8 +84,27 @@ impl Input {
 
     /// Create an input with initial value.
     pub fn with_value(mut self, value: impl Into<String>) -> Self {
-        self.value = value.into();
-        self.cursor = self.value.len();
+        let v = value.into();
+        self.cursor.set(v.len());
+        self.value = RefCell::new(v);
+        self
+    }
+
+    /// Bind this input to a `Signal<String>` (bidirectional).
+    ///
+    /// On every paint and event, the widget rebases its buffer from the
+    /// signal if they differ (clamping the cursor). On every edit, the
+    /// widget writes the fresh buffer back to the signal. Callers can
+    /// therefore read the current text via `signal.get_clone()` and clear
+    /// the input with `signal.set(String::new())` — without needing a
+    /// subtree rebuild.
+    ///
+    /// The initial buffer seeds from the signal's current value.
+    pub fn value(mut self, signal: Signal<String>) -> Self {
+        let initial = signal.get_clone();
+        self.cursor.set(initial.len());
+        *self.value.borrow_mut() = initial;
+        self.source = Some(signal);
         self
     }
 
@@ -79,8 +122,10 @@ impl Input {
 
     /// Set a callback for when the text changes.
     ///
-    /// Receives the current value and the [`EventContext`] — ignore the
-    /// ctx with `|text, _ctx| { ... }` when tree mutations aren't needed.
+    /// Receives the current value and the [`EventContext`]. When the input
+    /// is bound via [`Input::value`], `on_change` fires *after* the bound
+    /// signal is updated, so handlers can read the same text from either
+    /// source.
     pub fn on_change(mut self, f: impl FnMut(&str, &mut EventContext) + 'static) -> Self {
         self.on_change = Some(Box::new(f));
         self
@@ -107,14 +152,14 @@ impl Input {
         self
     }
 
-    /// Get the current value.
-    pub fn value(&self) -> &str {
-        &self.value
+    /// Get a clone of the current value.
+    pub fn value_clone(&self) -> String {
+        self.value.borrow().clone()
     }
 
     /// Whether the input is empty.
     pub fn is_empty(&self) -> bool {
-        self.value.is_empty()
+        self.value.borrow().is_empty()
     }
 
     /// Whether this input currently has focus.
@@ -124,7 +169,7 @@ impl Input {
 
     /// Get cursor position (byte offset).
     pub fn cursor(&self) -> usize {
-        self.cursor
+        self.cursor.get()
     }
 
     fn resolve_bg(&self, colors: &shroud_core::Colors) -> Color {
@@ -145,28 +190,53 @@ impl Input {
         }
     }
 
-    /// Find the previous char boundary before `pos`.
-    fn prev_char_boundary(&self, pos: usize) -> usize {
+    /// Find the previous char boundary before `pos` in `s`.
+    fn prev_char_boundary(s: &str, pos: usize) -> usize {
         if pos == 0 {
             return 0;
         }
         let mut i = pos - 1;
-        while i > 0 && !self.value.is_char_boundary(i) {
+        while i > 0 && !s.is_char_boundary(i) {
             i -= 1;
         }
         i
     }
 
-    /// Find the next char boundary after `pos`.
-    fn next_char_boundary(&self, pos: usize) -> usize {
-        if pos >= self.value.len() {
-            return self.value.len();
+    /// Find the next char boundary after `pos` in `s`.
+    fn next_char_boundary(s: &str, pos: usize) -> usize {
+        if pos >= s.len() {
+            return s.len();
         }
         let mut i = pos + 1;
-        while i < self.value.len() && !self.value.is_char_boundary(i) {
+        while i < s.len() && !s.is_char_boundary(i) {
             i += 1;
         }
         i
+    }
+
+    /// Rebase the buffer from the bound signal if they differ. Clamps the
+    /// cursor to the new length. Called from both `paint` (via `&self`,
+    /// interior-mutable) and `event` (via `&mut self`, same path).
+    fn sync_from_source(&self) {
+        if let Some(src) = self.source.as_ref() {
+            let remote = src.get_clone();
+            let mut buf = self.value.borrow_mut();
+            if *buf != remote {
+                let new_len = remote.len();
+                *buf = remote;
+                if self.cursor.get() > new_len {
+                    self.cursor.set(new_len);
+                }
+            }
+        }
+    }
+
+    /// Push the current buffer back to the bound signal (if any). Called
+    /// after each edit.
+    fn push_to_source(&self) {
+        if let Some(src) = self.source.as_ref() {
+            src.set(self.value.borrow().clone());
+        }
     }
 }
 
@@ -183,6 +253,8 @@ impl Widget for Input {
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
+        self.sync_from_source();
+
         let font_size = self
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);
@@ -219,7 +291,8 @@ impl Widget for Input {
         let text_y = layout.origin.y + (layout.size.height - font_size) / 2.0;
         let max_width = layout.size.width - 16.0;
 
-        if self.value.is_empty() {
+        let value = self.value.borrow();
+        if value.is_empty() {
             // Placeholder
             if !self.placeholder.is_empty() {
                 let shaped = ctx.text_engine.shape_text(
@@ -247,12 +320,9 @@ impl Widget for Input {
             }
         } else {
             // Render actual text
-            let shaped = ctx.text_engine.shape_text(
-                &self.value,
-                font_size,
-                font_size * 1.2,
-                Some(max_width),
-            );
+            let shaped =
+                ctx.text_engine
+                    .shape_text(&value, font_size, font_size * 1.2, Some(max_width));
 
             for glyph in &shaped.glyphs {
                 if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
@@ -268,11 +338,11 @@ impl Widget for Input {
 
             // Cursor
             if self.focused {
-                // Approximate cursor position: shape text up to cursor byte offset
-                let cursor_x = if self.cursor == 0 {
+                let cursor = self.cursor.get();
+                let cursor_x = if cursor == 0 {
                     text_x
                 } else {
-                    let before_cursor = &self.value[..self.cursor];
+                    let before_cursor = &value[..cursor];
                     let shaped_before =
                         ctx.text_engine
                             .shape_text(before_cursor, font_size, font_size * 1.2, None);
@@ -284,11 +354,15 @@ impl Widget for Input {
     }
 
     fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
+        // Rebase from source before applying the edit so typing stays on
+        // top of any external write that landed since the last paint.
+        self.sync_from_source();
+
         match event {
             WidgetEvent::MouseDown { .. } => {
                 self.focused = true;
-                // Place cursor at end (precise position would need glyph metrics)
-                self.cursor = self.value.len();
+                // Place cursor at end (precise position would need glyph metrics).
+                self.cursor.set(self.value.borrow().len());
                 EventResult::Consumed
             }
 
@@ -299,10 +373,15 @@ impl Widget for Input {
 
             WidgetEvent::CharInput { ch } if self.focused => {
                 if !ch.is_control() {
-                    self.value.insert(self.cursor, *ch);
-                    self.cursor += ch.len_utf8();
-                    if let Some(handler) = &mut self.on_change {
-                        handler(&self.value, ctx);
+                    let ch_len = ch.len_utf8();
+                    let cursor = self.cursor.get();
+                    self.value.borrow_mut().insert(cursor, *ch);
+                    self.cursor.set(cursor + ch_len);
+
+                    self.push_to_source();
+                    if let Some(handler) = self.on_change.as_mut() {
+                        let snapshot = self.value.borrow().clone();
+                        handler(&snapshot, ctx);
                     }
                 }
                 EventResult::Consumed
@@ -310,49 +389,76 @@ impl Widget for Input {
 
             WidgetEvent::KeyDown { key } if self.focused => match key {
                 Key::Named(NamedKey::Backspace) => {
-                    if self.cursor > 0 {
-                        let prev = self.prev_char_boundary(self.cursor);
-                        self.value.drain(prev..self.cursor);
-                        self.cursor = prev;
-                        if let Some(handler) = &mut self.on_change {
-                            handler(&self.value, ctx);
+                    let cursor = self.cursor.get();
+                    if cursor > 0 {
+                        let prev = {
+                            let v = self.value.borrow();
+                            Self::prev_char_boundary(&v, cursor)
+                        };
+                        self.value.borrow_mut().drain(prev..cursor);
+                        self.cursor.set(prev);
+
+                        self.push_to_source();
+                        if let Some(handler) = self.on_change.as_mut() {
+                            let snapshot = self.value.borrow().clone();
+                            handler(&snapshot, ctx);
                         }
                     }
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Delete) => {
-                    if self.cursor < self.value.len() {
-                        let next = self.next_char_boundary(self.cursor);
-                        self.value.drain(self.cursor..next);
-                        if let Some(handler) = &mut self.on_change {
-                            handler(&self.value, ctx);
+                    let cursor = self.cursor.get();
+                    let len = self.value.borrow().len();
+                    if cursor < len {
+                        let next = {
+                            let v = self.value.borrow();
+                            Self::next_char_boundary(&v, cursor)
+                        };
+                        self.value.borrow_mut().drain(cursor..next);
+
+                        self.push_to_source();
+                        if let Some(handler) = self.on_change.as_mut() {
+                            let snapshot = self.value.borrow().clone();
+                            handler(&snapshot, ctx);
                         }
                     }
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowLeft) => {
-                    if self.cursor > 0 {
-                        self.cursor = self.prev_char_boundary(self.cursor);
+                    let cursor = self.cursor.get();
+                    if cursor > 0 {
+                        let prev = {
+                            let v = self.value.borrow();
+                            Self::prev_char_boundary(&v, cursor)
+                        };
+                        self.cursor.set(prev);
                     }
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowRight) => {
-                    if self.cursor < self.value.len() {
-                        self.cursor = self.next_char_boundary(self.cursor);
+                    let cursor = self.cursor.get();
+                    let len = self.value.borrow().len();
+                    if cursor < len {
+                        let next = {
+                            let v = self.value.borrow();
+                            Self::next_char_boundary(&v, cursor)
+                        };
+                        self.cursor.set(next);
                     }
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Home) => {
-                    self.cursor = 0;
+                    self.cursor.set(0);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::End) => {
-                    self.cursor = self.value.len();
+                    self.cursor.set(self.value.borrow().len());
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Enter) => {
-                    if let Some(handler) = &mut self.on_submit {
-                        handler(&self.value, ctx);
+                    if let Some(handler) = self.on_submit.as_mut() {
+                        let snapshot = self.value.borrow().clone();
+                        handler(&snapshot, ctx);
                     }
                     EventResult::Consumed
                 }

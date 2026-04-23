@@ -3,7 +3,19 @@
 //! Characters are pushed directly into a `SecureString` — no intermediate
 //! `String` buffer. Display renders masked characters (●). The `SecureString`
 //! is zeroized when the widget is dropped or the owning scope is disposed.
+//!
+//! ## Clearing (Phase 18d)
+//!
+//! There is deliberately no `Reactive<SecureString>` binding. Secrets don't
+//! belong in the reactive graph: `Reactive::Dynamic` clones on every read
+//! and `Signal<String>` would leak plaintext through `get_clone()`. Instead,
+//! callers bind a [`ClearTrigger`] via [`SecureInput::clear_on`] and call
+//! `trigger.bump()` when the widget should zeroize its buffer. The widget
+//! observes the version counter on its next paint/event and clears.
 
+use std::cell::{Cell, RefCell};
+
+use crate::clear_trigger::ClearTrigger;
 use crate::event::{EventContext, EventResult, Key, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
@@ -16,20 +28,27 @@ type SubmitHandler = Box<dyn FnMut(&SecureString, &mut EventContext)>;
 /// A secure text input field for passwords and sensitive data.
 ///
 /// Key security properties:
-/// - Characters go directly into `SecureString` (no `String` intermediary)
-/// - Renders masked characters — the actual text is never rendered
+/// - Characters go directly into `SecureString` (no `String` intermediary).
+/// - Renders masked characters — the actual text is never rendered.
 /// - `SecurityLevel::Protected` — inherits mlock, secure atlas, etc.
-/// - `SecureString` zeroizes on drop
+/// - `SecureString` zeroizes on drop.
 ///
 /// # Example (conceptual)
 /// ```ignore
+/// let clear = ClearTrigger::new();
 /// let input = SecureInput::new()
 ///     .placeholder("Enter password")
-///     .mask('●');
+///     .clear_on(clear)
+///     .on_submit(move |pw, _ctx| {
+///         unlock(pw);
+///         clear.bump(); // zeroize the buffer after submit
+///     });
 /// ```
 pub struct SecureInput {
-    /// The secure text content.
-    value: SecureString,
+    /// The secure text content. `RefCell` because [`Widget::paint`] takes
+    /// `&self` but may need to clear the buffer when the bound
+    /// `ClearTrigger`'s version has changed.
+    value: RefCell<SecureString>,
     /// Mask character to display.
     mask_char: char,
     /// Placeholder text (shown when empty).
@@ -38,11 +57,19 @@ pub struct SecureInput {
     font_size: Option<f32>,
     /// Whether this input has focus.
     focused: bool,
-    /// Cursor position (character index).
-    cursor: usize,
+    /// Cursor position (character index). `Cell` so paint-side clears can
+    /// reset it to 0.
+    cursor: Cell<usize>,
     /// Submit handler, fired on Enter. Receives `&SecureString` so callers
     /// can copy, hash, or consume the value without widening its exposure.
     on_submit: Option<SubmitHandler>,
+    /// Optional external clear signal. When `bump()`ed, the widget zeroizes
+    /// its buffer on the next paint/event.
+    clear_trigger: Option<ClearTrigger>,
+    /// Last version observed on `clear_trigger`. A change means we should
+    /// clear. Initialized to the trigger's current version at bind time so
+    /// binding never spuriously fires a clear.
+    last_clear_version: Cell<u32>,
     // Colors (None = read from theme)
     bg_color: Option<Color>,
     bg_focused_color: Option<Color>,
@@ -56,13 +83,15 @@ impl SecureInput {
     /// Create a new empty secure input.
     pub fn new() -> Self {
         Self {
-            value: SecureString::empty(),
+            value: RefCell::new(SecureString::empty()),
             mask_char: '●',
             placeholder: String::new(),
             font_size: None,
             focused: false,
-            cursor: 0,
+            cursor: Cell::new(0),
             on_submit: None,
+            clear_trigger: None,
+            last_clear_version: Cell::new(0),
             bg_color: None,
             bg_focused_color: None,
             text_color: None,
@@ -109,25 +138,40 @@ impl SecureInput {
     /// Also receives the current [`EventContext`], so handlers can
     /// transition the UI (`ctx.replace_screen(...)`) in response to an
     /// unlock attempt. The input is *not* cleared after submit; callers
-    /// who want that behavior should call `clear()` in their handler.
+    /// who want that behavior should attach a [`ClearTrigger`] via
+    /// [`clear_on`](Self::clear_on) and `bump()` it, or call `clear()` on
+    /// a direct `&mut SecureInput` reference.
     pub fn on_submit(mut self, f: impl FnMut(&SecureString, &mut EventContext) + 'static) -> Self {
         self.on_submit = Some(Box::new(f));
         self
     }
 
+    /// Bind a [`ClearTrigger`] that clears (zeroizes) this widget's buffer
+    /// whenever the caller invokes `trigger.bump()`.
+    ///
+    /// The clear is observed on the next paint or event. The initial
+    /// version is captured at bind time so merely attaching an
+    /// already-bumped trigger doesn't spuriously clear a fresh widget
+    /// (whose buffer is empty anyway).
+    pub fn clear_on(mut self, trigger: ClearTrigger) -> Self {
+        self.last_clear_version.set(trigger.version());
+        self.clear_trigger = Some(trigger);
+        self
+    }
+
     /// Access the secure value through a closure.
     pub fn expose<R>(&self, f: impl FnOnce(&str) -> R) -> R {
-        self.value.expose(f)
+        self.value.borrow().expose(f)
     }
 
     /// Get the number of characters entered.
     pub fn char_count(&self) -> usize {
-        self.value.char_count()
+        self.value.borrow().char_count()
     }
 
     /// Whether the input is empty.
     pub fn is_empty(&self) -> bool {
-        self.value.is_empty()
+        self.value.borrow().is_empty()
     }
 
     /// Whether this input currently has focus.
@@ -137,8 +181,8 @@ impl SecureInput {
 
     /// Clear the input, zeroizing the content.
     pub fn clear(&mut self) {
-        self.value.clear();
-        self.cursor = 0;
+        self.value.borrow_mut().clear();
+        self.cursor.set(0);
     }
 
     fn resolve_bg(&self, colors: &shroud_core::Colors) -> Color {
@@ -156,6 +200,20 @@ impl SecureInput {
                 .unwrap_or(colors.input_border_focused)
         } else {
             self.border_color.unwrap_or(colors.input_border)
+        }
+    }
+
+    /// Observe the clear trigger version and zeroize if it changed. Called
+    /// at the top of both paint and event so the clear is visible within
+    /// one frame of the `bump()`.
+    fn sync_clear(&self) {
+        if let Some(trigger) = self.clear_trigger.as_ref() {
+            let v = trigger.version();
+            if v != self.last_clear_version.get() {
+                self.value.borrow_mut().clear();
+                self.cursor.set(0);
+                self.last_clear_version.set(v);
+            }
         }
     }
 }
@@ -177,6 +235,8 @@ impl Widget for SecureInput {
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
+        self.sync_clear();
+
         let font_size = self
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);
@@ -213,7 +273,8 @@ impl Widget for SecureInput {
         let text_y = layout.origin.y + (layout.size.height - font_size) / 2.0;
         let max_width = layout.size.width - 16.0;
 
-        if self.value.is_empty() {
+        let value = self.value.borrow();
+        if value.is_empty() {
             // Show placeholder
             if !self.placeholder.is_empty() {
                 let shaped = ctx.text_engine.shape_text(
@@ -237,7 +298,7 @@ impl Widget for SecureInput {
         } else {
             // Render masked characters — never the actual text
             let mask_str: String =
-                std::iter::repeat_n(self.mask_char, self.value.char_count()).collect();
+                std::iter::repeat_n(self.mask_char, value.char_count()).collect();
 
             let shaped =
                 ctx.text_engine
@@ -255,7 +316,7 @@ impl Widget for SecureInput {
                 }
             }
 
-            // Cursor (simple blinking line when focused)
+            // Cursor (simple line when focused)
             if self.focused {
                 let cursor_x = if shaped.glyphs.is_empty() {
                     text_x
@@ -268,6 +329,10 @@ impl Widget for SecureInput {
     }
 
     fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
+        // Observe any queued clear before applying the event. A handler
+        // may have bumped the trigger earlier this dispatch cycle.
+        self.sync_clear();
+
         match event {
             WidgetEvent::MouseDown { .. } => {
                 self.focused = true;
@@ -282,17 +347,18 @@ impl Widget for SecureInput {
             WidgetEvent::CharInput { ch } if self.focused => {
                 // Push character directly into SecureString — no intermediary
                 if !ch.is_control() {
-                    self.value.push(*ch);
-                    self.cursor += 1;
+                    self.value.borrow_mut().push(*ch);
+                    self.cursor.set(self.cursor.get() + 1);
                 }
                 EventResult::Consumed
             }
 
             WidgetEvent::KeyDown { key } if self.focused => match key {
                 Key::Named(NamedKey::Backspace) => {
-                    if self.cursor > 0 {
-                        self.value.pop();
-                        self.cursor -= 1;
+                    let cursor = self.cursor.get();
+                    if cursor > 0 {
+                        self.value.borrow_mut().pop();
+                        self.cursor.set(cursor - 1);
                     }
                     EventResult::Consumed
                 }
@@ -301,9 +367,14 @@ impl Widget for SecureInput {
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Enter) => {
-                    if let Some(handler) = &mut self.on_submit {
-                        handler(&self.value, ctx);
+                    if let Some(handler) = self.on_submit.as_mut() {
+                        let value_ref = self.value.borrow();
+                        handler(&value_ref, ctx);
                     }
+                    // A typical handler bumps the clear trigger after
+                    // `add_entry` — re-observe here so the next paint
+                    // doesn't render masked characters for the stale value.
+                    self.sync_clear();
                     EventResult::Consumed
                 }
                 _ => EventResult::Ignored,

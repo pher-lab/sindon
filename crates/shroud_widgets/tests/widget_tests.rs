@@ -3,7 +3,7 @@ use shroud_reactive::Signal;
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::tree::WidgetTree;
 use shroud_widgets::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 // ── Widget tree basics ────────────────────────────────────────────
@@ -2175,4 +2175,304 @@ fn event_handler_rebuild_children_from_button_click() {
     assert!(tree.contains(btn));
     // root + list + button + 1 new row = 4
     assert_eq!(tree.len(), 4);
+}
+
+// ── Phase 18d: reactive value + ClearTrigger ──────────────────────
+
+#[test]
+fn input_value_seeds_buffer_from_signal() {
+    let sig = Signal::new(String::from("prefilled"));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let _idx = tree.add_child(root, Input::new().value(sig));
+    tree.compute_layout(400.0, 100.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    // If the signal's initial value didn't seed the buffer, the input
+    // would paint as empty (no glyphs) since there's no placeholder.
+    assert!(
+        !ctx.glyphs.is_empty(),
+        "bound input must render the signal's initial value"
+    );
+}
+
+#[test]
+fn input_typing_writes_back_to_bound_signal() {
+    let sig = Signal::new(String::new());
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().value(sig));
+    tree.compute_layout(400.0, 100.0);
+
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    for ch in ['h', 'i'] {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut event_ctx);
+    }
+
+    assert_eq!(
+        sig.get_clone(),
+        "hi",
+        "each keystroke should flush to the bound signal"
+    );
+}
+
+#[test]
+fn input_external_signal_set_rebases_buffer_by_next_paint() {
+    // Binds a signal, externally overwrites it, confirms the next paint
+    // renders the new value rather than the stale local buffer. Covers the
+    // "app sets signal → redraw → widget reflects it without an event" path.
+    let sig = Signal::new(String::from("old"));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let _idx = tree.add_child(root, Input::new().value(sig));
+    tree.compute_layout(400.0, 100.0);
+
+    // First paint — baseline that the widget rendered at all.
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    let first_glyphs = ctx.glyphs.len();
+    assert!(first_glyphs > 0);
+
+    // External write, then a fresh paint. The new value is longer, so the
+    // glyph count should grow even though no event dispatched in between.
+    sig.set("old_and_new".into());
+    let mut ctx2 = PaintContext::default();
+    tree.paint(&mut ctx2);
+    assert!(
+        ctx2.glyphs.len() > first_glyphs,
+        "paint must resync from the signal (first={} second={})",
+        first_glyphs,
+        ctx2.glyphs.len()
+    );
+}
+
+#[test]
+fn input_external_shorter_value_clamps_cursor() {
+    // Regression: if cursor pointed past the end of the new buffer, paint
+    // would slice `&value[..cursor]` and panic. Bind a signal with a long
+    // value, type at the end to push the cursor there, then shrink the
+    // signal and ensure paint succeeds.
+    let sig = Signal::new(String::from("longer value"));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().value(sig));
+    tree.compute_layout(400.0, 100.0);
+
+    // Focus so the cursor is drawn (which exercises the slice path).
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    // MouseDown placed cursor at end (byte len "longer value" = 12).
+    // Now shrink externally to 2 bytes.
+    sig.set("hi".into());
+
+    // Should not panic — cursor must be clamped to 2 before the paint-side
+    // `&value[..cursor]` slice runs.
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+}
+
+#[test]
+fn input_on_change_fires_after_signal_writeback() {
+    // Bound inputs should still deliver on_change with the fresh text.
+    // Regression guard for the ordering (write-back → on_change).
+    let seen = Rc::new(RefCell::new(String::new()));
+    let seen2 = Rc::clone(&seen);
+
+    let sig = Signal::new(String::new());
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(
+        root,
+        Input::new().value(sig).on_change(move |s, _ctx| {
+            *seen2.borrow_mut() = s.to_string();
+        }),
+    );
+    tree.compute_layout(400.0, 100.0);
+
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'x' }, &mut event_ctx);
+
+    assert_eq!(sig.get_clone(), "x");
+    assert_eq!(*seen.borrow(), "x");
+}
+
+#[test]
+fn secure_input_clear_on_zeroizes_after_bump() {
+    // Type a character, bump the trigger, verify the buffer is empty on
+    // the next event-driven sync. Uses a keyless event (Escape) so the
+    // test doesn't depend on any specific handler running.
+    let trigger = ClearTrigger::new();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, SecureInput::new().placeholder("pw").clear_on(trigger));
+    tree.compute_layout(400.0, 100.0);
+
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    for ch in ['s', 'e', 'c'] {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut event_ctx);
+    }
+
+    // Pre-bump: three characters are held in the SecureString. We paint
+    // (which also syncs clear) first to confirm the sync doesn't trigger
+    // without a bump.
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    // Bump the trigger. Next paint's sync should zeroize the buffer.
+    trigger.bump();
+    let mut ctx2 = PaintContext::default();
+    tree.paint(&mut ctx2);
+
+    // After clear, the widget renders the placeholder (not masked dots).
+    // We can't reach `value` directly from outside — instead, confirm
+    // that typing a fresh character now produces exactly one mask glyph
+    // on the next paint (cursor was reset to 0, char_count is 1).
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'a' }, &mut event_ctx);
+    let mut ctx3 = PaintContext::default();
+    tree.paint(&mut ctx3);
+
+    // Three chars would have produced 3 mask glyphs + cursor. After clear
+    // + one char, we expect 1 mask glyph + cursor. The exact glyph count
+    // depends on the font, but it should be strictly less than pre-clear.
+    let pre_clear_glyphs = ctx.glyphs.len();
+    let post_clear_plus_one_glyphs = ctx3.glyphs.len();
+    assert!(
+        post_clear_plus_one_glyphs < pre_clear_glyphs,
+        "clear_on must shrink the rendered glyph count (pre={} post={})",
+        pre_clear_glyphs,
+        post_clear_plus_one_glyphs
+    );
+}
+
+#[test]
+fn secure_input_clear_on_observed_without_any_event() {
+    // Paint-only path: no events dispatched between the bump and the
+    // observing paint. Ensures paint carries its own sync and the app
+    // doesn't have to fake an event to see the clear.
+    let trigger = ClearTrigger::new();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, SecureInput::new().placeholder("pw").clear_on(trigger));
+    tree.compute_layout(400.0, 100.0);
+
+    // Focus + type via events (the only way to add characters).
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    for ch in ['s', 'e', 'c', 'r', 'e', 't'] {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut event_ctx);
+    }
+
+    // Snapshot glyph count with 6 chars held.
+    let mut pre = PaintContext::default();
+    tree.paint(&mut pre);
+    let pre_count = pre.glyphs.len();
+    assert!(pre_count >= 6, "6 masked chars expected, got {}", pre_count);
+
+    // Bump and paint again — no events in between.
+    trigger.bump();
+    let mut post = PaintContext::default();
+    tree.paint(&mut post);
+
+    // Empty buffer → placeholder only, which is shorter than 6 dots.
+    assert!(
+        post.glyphs.len() < pre_count,
+        "paint-only sync should have zeroized the buffer (pre={} post={})",
+        pre_count,
+        post.glyphs.len()
+    );
+}
+
+#[test]
+fn secure_input_attaching_prebumped_trigger_does_not_spuriously_clear() {
+    // If bump() was called before the widget was even built, attaching the
+    // trigger must capture that version as the baseline — otherwise the
+    // widget would clear itself on first paint, defeating any typed value
+    // before the caller actually bumps post-attach.
+    let trigger = ClearTrigger::new();
+    trigger.bump();
+    trigger.bump();
+
+    // Deliberately no placeholder so an empty buffer renders zero glyphs —
+    // makes "was it cleared?" directly checkable from the outside.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, SecureInput::new().clear_on(trigger));
+    tree.compute_layout(400.0, 100.0);
+
+    // Type one char.
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'a' }, &mut event_ctx);
+
+    // Paint. No bump since clear_on → no clear. Glyphs should include the
+    // mask char. Would be 0 if the pre-bumped version had been treated as
+    // "fire a clear on first observation".
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert!(
+        !ctx.glyphs.is_empty(),
+        "typed char must survive a pre-bumped trigger attachment"
+    );
+
+    // Sanity: an explicit bump *after* attach still clears.
+    trigger.bump();
+    let mut after = PaintContext::default();
+    tree.paint(&mut after);
+    assert!(
+        after.glyphs.is_empty(),
+        "bump post-attach must zeroize — empty buffer → no glyphs (no placeholder)"
+    );
 }
