@@ -247,6 +247,10 @@ impl Default for Input {
 }
 
 impl Widget for Input {
+    fn focusable(&self) -> bool {
+        true
+    }
+
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
         FlexStyle::new().padding(8.0).min_height(font_size + 20.0)
@@ -360,10 +364,17 @@ impl Widget for Input {
 
         match event {
             WidgetEvent::MouseDown { .. } => {
-                self.focused = true;
-                // Place cursor at end (precise position would need glyph metrics).
+                // Focus is already set by WidgetTree's click-to-focus
+                // (dispatched FocusGained before this handler runs).
+                // Just move the cursor to end — precise positioning
+                // would need per-glyph metrics.
                 self.cursor.set(self.value.borrow().len());
                 EventResult::Consumed
+            }
+
+            WidgetEvent::FocusGained => {
+                self.focused = true;
+                EventResult::Ignored
             }
 
             WidgetEvent::FocusLost => {
@@ -460,10 +471,6 @@ impl Widget for Input {
                         let snapshot = self.value.borrow().clone();
                         handler(&snapshot, ctx);
                     }
-                    EventResult::Consumed
-                }
-                Key::Named(NamedKey::Escape) => {
-                    self.focused = false;
                     EventResult::Consumed
                 }
                 _ => EventResult::Ignored,

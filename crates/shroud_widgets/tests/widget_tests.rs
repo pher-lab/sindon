@@ -471,40 +471,6 @@ fn input_on_submit_fires() {
 }
 
 #[test]
-fn input_escape_unfocuses() {
-    let mut tree = WidgetTree::new();
-    let root = tree.set_root(Container::column().width(400.0).height(100.0));
-    let idx = tree.add_child(root, Input::new());
-    tree.compute_layout(400.0, 100.0);
-
-    let rect = tree.layout_rect(idx);
-    let mut event_ctx = EventContext::new();
-
-    // Focus
-    tree.dispatch_event(
-        &WidgetEvent::MouseDown {
-            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
-            button: MouseButton::Left,
-        },
-        &mut event_ctx,
-    );
-
-    // Type then Escape
-    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'a' }, &mut event_ctx);
-    let result = tree.dispatch_event(
-        &WidgetEvent::KeyDown {
-            key: Key::Named(NamedKey::Escape),
-        },
-        &mut event_ctx,
-    );
-    assert_eq!(result, EventResult::Consumed);
-
-    // After escape, char input should be ignored
-    let result = tree.dispatch_event(&WidgetEvent::CharInput { ch: 'b' }, &mut event_ctx);
-    assert_eq!(result, EventResult::Ignored);
-}
-
-#[test]
 fn input_click_outside_unfocuses() {
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(400.0).height(200.0));
@@ -2784,4 +2750,237 @@ fn advance_from_stale_focused_falls_back_to_first() {
     let landed = tree.advance_focus(FocusDirection::Forward, &mut ctx);
     assert_eq!(landed, Some(b));
     assert_eq!(*events.borrow(), vec!["b:gained"]);
+}
+
+// ── Phase 19a-2: click-to-focus + programmatic focus ──────────────
+
+/// Center point of a widget's layout rect — convenience for click-to-focus
+/// tests where the click has to land *inside* the target.
+fn center_of(tree: &WidgetTree, idx: usize) -> Point {
+    let rect = tree.layout_rect(idx);
+    Point::new(
+        rect.origin.x + rect.size.width / 2.0,
+        rect.origin.y + rect.size.height / 2.0,
+    )
+}
+
+#[test]
+fn mousedown_on_focusable_widget_focuses_it() {
+    // Click-to-focus: the tree hit-tests the cursor position, sees the
+    // widget is focusable, and promotes it via FocusManager before the
+    // widget's own MouseDown handler runs.
+    let (mut tree, events, a, _, _) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: center_of(&tree, a),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(tree.focused(), Some(a));
+    assert_eq!(*events.borrow(), vec!["a:gained"]);
+}
+
+#[test]
+fn mousedown_on_non_focusable_region_clears_focus() {
+    // Click outside every focusable (e.g. on the root container) must
+    // drop focus. Replaces the old broadcast_focus_lost behavior with
+    // a single targeted FocusLost to the previously-focused widget.
+    let (mut tree, events, _, _, _) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    // Seed focus on `a` (first focusable) via Tab so we have a clear
+    // start state before asserting on the click-to-clear behavior.
+    tree.advance_focus(FocusDirection::Forward, &mut ctx);
+    events.borrow_mut().clear();
+
+    // Click on an empty area of the root container. Root is non-focusable,
+    // and no probe sits at (150, 150) — hit_test lands on the container.
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(150.0, 150.0),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(tree.focused(), None);
+    assert_eq!(*events.borrow(), vec!["a:lost"]);
+}
+
+#[test]
+fn mousedown_transitions_focus_from_a_to_b() {
+    // Lost-before-gained ordering matters: a coordinator watching both
+    // events never sees two focused widgets simultaneously.
+    let (mut tree, events, a, b, _) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: center_of(&tree, a),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+    events.borrow_mut().clear();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: center_of(&tree, b),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(tree.focused(), Some(b));
+    assert_eq!(*events.borrow(), vec!["a:lost", "b:gained"]);
+}
+
+#[test]
+fn mousedown_on_already_focused_widget_is_noop() {
+    // Short-circuit: focus(Some(x)) when already x must not re-dispatch
+    // FocusGained. Widgets that do work on Gained (e.g. start a caret
+    // blink timer) would misbehave if we fired it repeatedly.
+    let (mut tree, events, a, _, _) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    tree.advance_focus(FocusDirection::Forward, &mut ctx);
+    events.borrow_mut().clear();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: center_of(&tree, a),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(tree.focused(), Some(a));
+    assert!(
+        events.borrow().is_empty(),
+        "clicking the already-focused widget must not re-fire focus events"
+    );
+}
+
+#[test]
+fn programmatic_focus_dispatches_gain_and_returns_prev() {
+    // The public tree.focus(...) entrypoint — apps call this to seed
+    // focus after a screen transition. Returns the previous focus so
+    // the caller can restore it (undo / cancel flow).
+    let (mut tree, events, a, b, _) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    let prev1 = tree.focus(Some(a), &mut ctx);
+    assert_eq!(prev1, None);
+    assert_eq!(tree.focused(), Some(a));
+
+    let prev2 = tree.focus(Some(b), &mut ctx);
+    assert_eq!(prev2, Some(a));
+    assert_eq!(tree.focused(), Some(b));
+    assert_eq!(*events.borrow(), vec!["a:gained", "a:lost", "b:gained"]);
+}
+
+#[test]
+fn programmatic_focus_none_blurs_current() {
+    // tree.focus(None) must blur the currently-focused widget without
+    // granting focus to anyone — symmetric with the click-on-blank-area
+    // path, but callable directly.
+    let (mut tree, events, a, _, _) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    tree.focus(Some(a), &mut ctx);
+    events.borrow_mut().clear();
+
+    let prev = tree.focus(None, &mut ctx);
+
+    assert_eq!(prev, Some(a));
+    assert_eq!(tree.focused(), None);
+    assert_eq!(*events.borrow(), vec!["a:lost"]);
+}
+
+#[test]
+fn mousedown_on_non_focusable_widget_clears_focus() {
+    // Distinct from the "missed all widgets" case: here the click *does*
+    // land on a widget, but that widget has `focusable() == false` — so
+    // focus should still drop rather than stick on the previous target.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(200.0));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let a = tree.add_child(root, FocusProbe::new("a", events.clone()));
+    let non_fc = tree.add_child(root, FocusProbe::new("x", events.clone()).non_focusable());
+    tree.compute_layout(200.0, 200.0);
+
+    let mut ctx = EventContext::new();
+    tree.advance_focus(FocusDirection::Forward, &mut ctx);
+    assert_eq!(tree.focused(), Some(a));
+    events.borrow_mut().clear();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: center_of(&tree, non_fc),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(tree.focused(), None);
+    assert_eq!(*events.borrow(), vec!["a:lost"]);
+}
+
+#[test]
+fn input_focused_state_is_tree_driven_after_click() {
+    // Real-widget integration: Input::focused must become `true` as a
+    // side effect of the tree's click-to-focus routing — *before* Input's
+    // own MouseDown handler runs, so the handler observes a consistent
+    // `focused` flag (i.e. FocusGained has already landed).
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new());
+    tree.compute_layout(400.0, 100.0);
+
+    let mut ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: center_of(&tree, idx),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(tree.focused(), Some(idx));
+    // Probe via typing — a non-focused Input ignores CharInput.
+    let result = tree.dispatch_event(&WidgetEvent::CharInput { ch: 'z' }, &mut ctx);
+    assert_eq!(result, EventResult::Consumed);
+}
+
+#[test]
+fn tab_then_click_releases_previous_focus() {
+    // Cross-modal transition: keyboard Tab focuses `a`, then a mouse
+    // click on `b` takes over. Focus management must be agnostic to
+    // which path set it — both funnel through the same FocusManager.
+    let (mut tree, events, a, b, _) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Tab),
+        },
+        &mut ctx,
+    );
+    assert_eq!(tree.focused(), Some(a));
+    events.borrow_mut().clear();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: center_of(&tree, b),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(tree.focused(), Some(b));
+    assert_eq!(*events.borrow(), vec!["a:lost", "b:gained"]);
 }

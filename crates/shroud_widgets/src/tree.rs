@@ -469,20 +469,28 @@ impl WidgetTree {
             };
             self.advance_focus(dir, event_ctx);
             EventResult::Consumed
-        } else if let Some(root) = self.root {
-            self.dispatch_to_node(root, event, event_ctx)
         } else {
-            EventResult::Ignored
-        };
+            // Click-to-focus: before the widget sees MouseDown, route
+            // focus to the hit focusable (or clear focus if the click
+            // missed every focusable). Matches browsers' focus → click
+            // event order, so a widget's MouseDown handler observes a
+            // consistent `focused` flag (populated by FocusGained).
+            if let WidgetEvent::MouseDown { position, .. } = event {
+                let hit = self.hit_test(*position);
+                let new_focus = hit.filter(|&idx| {
+                    self.node(idx)
+                        .map(|n| n.widget.focusable())
+                        .unwrap_or(false)
+                });
+                self.focus(new_focus, event_ctx);
+            }
 
-        // After a MouseDown, notify every widget the click *missed* so
-        // focusable widgets can drop focus on a click-outside. Broadcast
-        // happens post-dispatch but pre-command-drain: queued mutations
-        // from the MouseDown handler apply after FocusLost has visited the
-        // still-live tree.
-        if let WidgetEvent::MouseDown { position, .. } = event {
-            self.broadcast_focus_lost(*position, event_ctx);
-        }
+            if let Some(root) = self.root {
+                self.dispatch_to_node(root, event, event_ctx)
+            } else {
+                EventResult::Ignored
+            }
+        };
 
         // Drain tree-mutation commands queued by handlers. One pass is
         // enough — `apply_commands` itself does not invoke widget `event`
@@ -581,20 +589,29 @@ impl WidgetTree {
             }
         };
 
-        self.change_focus_to(Some(next), event_ctx);
+        self.focus(Some(next), event_ctx);
         Some(next)
     }
 
     /// Set focus to `new`, dispatching `FocusLost` to the previously
     /// focused widget (if any) and `FocusGained` to the new one.
     ///
-    /// Called from [`Self::advance_focus`] and (in later sub-phases)
-    /// from click coordination. Kept private — callers go through the
-    /// higher-level APIs that validate the target first.
-    fn change_focus_to(&mut self, new: Option<usize>, event_ctx: &mut EventContext) {
+    /// Returns the previously focused index, for callers that want to
+    /// chain restore / log / test-assert on the transition.
+    ///
+    /// This is the one-and-only focus-change entrypoint — both the
+    /// built-in Tab routing and click-to-focus path funnel through here,
+    /// and apps call it directly for programmatic focus (e.g. focusing
+    /// the first input after a screen transition).
+    ///
+    /// If the target equals the current focus, the call is a no-op and
+    /// no events fire. Passing an index that is tombstoned or out-of-range
+    /// silently skips dispatch for that side, which keeps the call safe
+    /// against races with a removal.
+    pub fn focus(&mut self, new: Option<usize>, event_ctx: &mut EventContext) -> Option<usize> {
         let prev = self.focus.set(new);
         if prev == new {
-            return;
+            return prev;
         }
 
         if let Some(p) = prev {
@@ -615,23 +632,8 @@ impl WidgetTree {
                 }
             }
         }
-    }
 
-    /// Deliver `FocusLost` to every live widget whose layout rect does not
-    /// contain `click_pos`. Widgets that don't track focus ignore it.
-    fn broadcast_focus_lost(&mut self, click_pos: Point, event_ctx: &mut EventContext) {
-        for i in 0..self.nodes.len() {
-            let rect = match self.node(i) {
-                Some(n) => self.layout.absolute_rect(n.layout_node),
-                None => continue,
-            };
-            if rect.contains(click_pos) {
-                continue;
-            }
-            if let Some(n) = self.node_mut(i) {
-                n.widget.event(&WidgetEvent::FocusLost, rect, event_ctx);
-            }
-        }
+        prev
     }
 
     /// Track which widget the cursor is over and generate Enter/Leave events.

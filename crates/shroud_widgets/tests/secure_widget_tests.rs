@@ -78,25 +78,17 @@ fn secure_input_char_input() {
     assert!(input.is_empty());
     assert_eq!(input.char_count(), 0);
 
-    // Simulate focus
+    // Phase 19a-2: `focused` is populated by FocusGained (normally fired
+    // by the tree's click-to-focus or Tab routing). These unit-level tests
+    // operate on a bare widget, so they synthesize the event directly.
     let mut ctx = EventContext::new();
-    input.event(
-        &WidgetEvent::MouseDown {
-            position: Point::new(10.0, 10.0),
-            button: MouseButton::Left,
-        },
-        shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0),
-        &mut ctx,
-    );
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
+    input.event(&WidgetEvent::FocusGained, rect, &mut ctx);
     assert!(input.is_focused());
 
     // Type characters
     for ch in "hunter2".chars() {
-        input.event(
-            &WidgetEvent::CharInput { ch },
-            shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0),
-            &mut ctx,
-        );
+        input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
     }
 
     assert_eq!(input.char_count(), 7);
@@ -107,24 +99,13 @@ fn secure_input_char_input() {
 fn secure_input_backspace() {
     let mut input = SecureInput::new();
     let mut ctx = EventContext::new();
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
 
-    // Focus
-    input.event(
-        &WidgetEvent::MouseDown {
-            position: Point::new(10.0, 10.0),
-            button: MouseButton::Left,
-        },
-        shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0),
-        &mut ctx,
-    );
+    input.event(&WidgetEvent::FocusGained, rect, &mut ctx);
 
     // Type "abc"
     for ch in "abc".chars() {
-        input.event(
-            &WidgetEvent::CharInput { ch },
-            shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0),
-            &mut ctx,
-        );
+        input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
     }
     assert_eq!(input.char_count(), 3);
 
@@ -133,7 +114,7 @@ fn secure_input_backspace() {
         &WidgetEvent::KeyDown {
             key: Key::Named(NamedKey::Backspace),
         },
-        shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0),
+        rect,
         &mut ctx,
     );
     assert_eq!(input.char_count(), 2);
@@ -141,30 +122,18 @@ fn secure_input_backspace() {
 }
 
 #[test]
-fn secure_input_escape_unfocuses() {
+fn secure_input_focus_lost_blurs() {
+    // Replaces `secure_input_escape_unfocuses` (19a-2 removed Escape-to-blur
+    // — policy now belongs to the app, not the widget). The migration target
+    // is FocusLost as the sole blur path, so assert on that directly.
     let mut input = SecureInput::new();
     let mut ctx = EventContext::new();
     let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
 
-    // Focus
-    input.event(
-        &WidgetEvent::MouseDown {
-            position: Point::new(10.0, 10.0),
-            button: MouseButton::Left,
-        },
-        rect,
-        &mut ctx,
-    );
+    input.event(&WidgetEvent::FocusGained, rect, &mut ctx);
     assert!(input.is_focused());
 
-    // Escape
-    input.event(
-        &WidgetEvent::KeyDown {
-            key: Key::Named(NamedKey::Escape),
-        },
-        rect,
-        &mut ctx,
-    );
+    input.event(&WidgetEvent::FocusLost, rect, &mut ctx);
     assert!(!input.is_focused());
 }
 
@@ -186,15 +155,7 @@ fn secure_input_clear_zeroizes() {
     let mut ctx = EventContext::new();
     let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
 
-    // Focus and type
-    input.event(
-        &WidgetEvent::MouseDown {
-            position: Point::new(10.0, 10.0),
-            button: MouseButton::Left,
-        },
-        rect,
-        &mut ctx,
-    );
+    input.event(&WidgetEvent::FocusGained, rect, &mut ctx);
     for ch in "secret".chars() {
         input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
     }

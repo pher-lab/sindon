@@ -25,22 +25,25 @@ pub enum WidgetEvent {
     MouseLeave,
     /// The widget has lost focus.
     ///
-    /// Two paths produce this event:
-    /// - **Click-outside broadcast**: after a `MouseDown`, every widget
-    ///   whose rect does not contain the click receives `FocusLost` so
-    ///   focusable widgets can drop their self-managed focus state.
-    /// - **Keyboard focus change**: when Tab/Shift+Tab moves focus away
-    ///   from a widget, the tree sends `FocusLost` to that single widget
-    ///   and `FocusGained` to the new one.
+    /// Dispatched to the widget that was the
+    /// [`FocusManager`](crate::focus::FocusManager)'s `focused` target
+    /// just before a focus change. Sources of focus change:
+    /// - **Tab / Shift+Tab**: tree's keyboard focus routing.
+    /// - **MouseDown**: click on a focusable widget (new target), or
+    ///   click on a non-focusable region (clears focus to `None`).
+    /// - **Programmatic**: `WidgetTree::focus(...)` from app code.
     ///
-    /// Handlers that do not track focus can ignore it.
+    /// Widgets that maintain a self-managed focus flag should flip it to
+    /// `false` here. Handlers that do not track focus can ignore it.
     FocusLost,
-    /// The widget has gained focus via keyboard navigation.
+    /// The widget has gained focus.
     ///
-    /// Emitted by the tree's Tab/Shift+Tab routing to the widget that
-    /// just became the [`FocusManager`](crate::focus::FocusManager)'s
-    /// `focused` target. Widgets that maintain a self-managed focus flag
-    /// should flip it to `true` here.
+    /// Dispatched to the widget that just became the
+    /// [`FocusManager`](crate::focus::FocusManager)'s `focused` target,
+    /// paired with a `FocusLost` to the previous one if any. Same sources
+    /// as [`FocusLost`](Self::FocusLost): Tab nav, click on a focusable
+    /// widget, and programmatic `WidgetTree::focus`. Widgets that
+    /// maintain a self-managed focus flag should flip it to `true` here.
     FocusGained,
     /// Keyboard key pressed. Modifier state at the time of the press is
     /// available via [`EventContext::modifiers`].

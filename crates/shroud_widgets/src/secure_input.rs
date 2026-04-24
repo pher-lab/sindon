@@ -229,6 +229,10 @@ impl Widget for SecureInput {
         SecurityLevel::Protected
     }
 
+    fn focusable(&self) -> bool {
+        true
+    }
+
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
         FlexStyle::new().padding(8.0).min_height(font_size + 20.0)
@@ -335,8 +339,15 @@ impl Widget for SecureInput {
 
         match event {
             WidgetEvent::MouseDown { .. } => {
-                self.focused = true;
+                // Focus is already set by WidgetTree's click-to-focus
+                // path (dispatched FocusGained before this handler runs),
+                // so there is nothing widget-specific to do here.
                 EventResult::Consumed
+            }
+
+            WidgetEvent::FocusGained => {
+                self.focused = true;
+                EventResult::Ignored
             }
 
             WidgetEvent::FocusLost => {
@@ -360,10 +371,6 @@ impl Widget for SecureInput {
                         self.value.borrow_mut().pop();
                         self.cursor.set(cursor - 1);
                     }
-                    EventResult::Consumed
-                }
-                Key::Named(NamedKey::Escape) => {
-                    self.focused = false;
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Enter) => {
