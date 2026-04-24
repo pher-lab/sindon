@@ -46,6 +46,21 @@ pub trait Widget {
         true
     }
 
+    /// Whether this widget can receive keyboard focus.
+    ///
+    /// Returning `true` enrolls the widget in Tab/Shift+Tab traversal
+    /// (see [`WidgetTree::advance_focus`](crate::tree::WidgetTree::advance_focus))
+    /// and makes it a valid target for programmatic focus via
+    /// [`WidgetTree::focus`](crate::tree::WidgetTree::focus). Default is
+    /// `false` — override in widgets that accept keyboard input
+    /// (`Input`, `SecureInput`, `Button`, `Checkbox`).
+    ///
+    /// Invisible widgets are skipped by traversal regardless of this
+    /// value, so an override can unconditionally return `true`.
+    fn focusable(&self) -> bool {
+        false
+    }
+
     /// Return the flex style for layout computation.
     fn style(&self) -> FlexStyle;
 

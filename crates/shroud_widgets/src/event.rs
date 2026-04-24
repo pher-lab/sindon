@@ -23,13 +23,27 @@ pub enum WidgetEvent {
     MouseEnter,
     /// Mouse left this widget's bounds.
     MouseLeave,
-    /// A `MouseDown` landed *outside* this widget's bounds — sent to every
-    /// widget the click did not hit, so focusable widgets (`Input`,
-    /// `SecureInput`) can drop their focus on a click-outside. The tree
-    /// broadcasts this after the normal `MouseDown` dispatch; handlers that
-    /// do not track focus can ignore it.
+    /// The widget has lost focus.
+    ///
+    /// Two paths produce this event:
+    /// - **Click-outside broadcast**: after a `MouseDown`, every widget
+    ///   whose rect does not contain the click receives `FocusLost` so
+    ///   focusable widgets can drop their self-managed focus state.
+    /// - **Keyboard focus change**: when Tab/Shift+Tab moves focus away
+    ///   from a widget, the tree sends `FocusLost` to that single widget
+    ///   and `FocusGained` to the new one.
+    ///
+    /// Handlers that do not track focus can ignore it.
     FocusLost,
-    /// Keyboard key pressed.
+    /// The widget has gained focus via keyboard navigation.
+    ///
+    /// Emitted by the tree's Tab/Shift+Tab routing to the widget that
+    /// just became the [`FocusManager`](crate::focus::FocusManager)'s
+    /// `focused` target. Widgets that maintain a self-managed focus flag
+    /// should flip it to `true` here.
+    FocusGained,
+    /// Keyboard key pressed. Modifier state at the time of the press is
+    /// available via [`EventContext::modifiers`].
     KeyDown { key: Key },
     /// Keyboard key released.
     KeyUp { key: Key },
@@ -123,16 +137,34 @@ pub(crate) enum TreeCommand {
     },
 }
 
+/// Keyboard modifier state at the time of an event.
+///
+/// Populated from winit's `ModifiersChanged` by the event loop and
+/// exposed on [`EventContext::modifiers`]. Widgets read the relevant
+/// flag inside their `event` handler — e.g. `ctx.modifiers.shift` to
+/// distinguish Tab from Shift+Tab.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    /// The "Super" / "Meta" / "Windows" / "Command" key.
+    pub logo: bool,
+}
+
 /// Context passed to widgets during event handling.
 ///
-/// Besides tracking focus, this is the sole route by which event handlers
-/// request tree mutations (add/remove/replace-root/replace-screen). Commands
-/// are queued and applied after the current dispatch finishes — an enqueued
-/// remove does not invalidate indices for handlers that run later in the
-/// same dispatch, which keeps traversal stable.
+/// Carries modifier state (populated by the event loop from winit's
+/// `ModifiersChanged`) and the deferred command queue used by handlers
+/// to request tree mutations (add/remove/replace-root/replace-screen).
+/// Commands are applied after the current dispatch finishes — an
+/// enqueued remove does not invalidate indices for handlers that run
+/// later in the same dispatch, which keeps traversal stable.
 pub struct EventContext {
-    /// The widget that currently has focus, if any.
-    pub focused: Option<usize>,
+    /// Current keyboard modifier state. Updated by the event loop on
+    /// `ModifiersChanged`; read by widgets (and by the tree's Tab
+    /// routing) during event handling.
+    pub modifiers: Modifiers,
     /// Deferred tree mutations queued during this dispatch. Drained by
     /// `WidgetTree::dispatch_event` once the walk completes.
     pub(crate) commands: Vec<TreeCommand>,
@@ -141,14 +173,9 @@ pub struct EventContext {
 impl EventContext {
     pub fn new() -> Self {
         Self {
-            focused: None,
+            modifiers: Modifiers::default(),
             commands: Vec::new(),
         }
-    }
-
-    /// Request focus for a widget (by index in the tree).
-    pub fn request_focus(&mut self, index: usize) {
-        self.focused = Some(index);
     }
 
     /// Queue a widget to be inserted as a child of `parent` after the

@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use crate::event::{EventContext, EventResult, TreeCommand, WidgetEvent};
+use crate::event::{EventContext, EventResult, Key, NamedKey, TreeCommand, WidgetEvent};
+use crate::focus::{FocusDirection, FocusManager};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Point, Rect, SecurityLevel, Size, Theme};
@@ -48,6 +49,10 @@ pub struct WidgetTree {
     layout: LayoutEngine,
     /// Index of the widget currently under the cursor (for MouseEnter/Leave).
     hovered: Option<usize>,
+    /// Tree-global keyboard focus tracker. Mutated by
+    /// [`Self::advance_focus`] (Tab/Shift+Tab) and invalidated by
+    /// [`Self::remove`] so a removed widget never stays focused.
+    focus: FocusManager,
 }
 
 impl WidgetTree {
@@ -57,6 +62,7 @@ impl WidgetTree {
             root: None,
             layout: LayoutEngine::new(),
             hovered: None,
+            focus: FocusManager::new(),
         }
     }
 
@@ -138,6 +144,17 @@ impl WidgetTree {
         if let Some(h) = self.hovered {
             if to_remove.contains(&h) {
                 self.hovered = None;
+            }
+        }
+
+        // Clear focus if it landed on something we're about to remove —
+        // otherwise a later `advance_focus` would find the current index
+        // not in the fresh tab order and jump to first/last, which looks
+        // fine but masks the bug of the focus pointer dangling on a
+        // tombstoned slot.
+        if let Some(f) = self.focus.focused() {
+            if to_remove.contains(&f) {
+                self.focus.set(None);
             }
         }
 
@@ -433,7 +450,26 @@ impl WidgetTree {
             self.update_hover(*position, event_ctx);
         }
 
-        let result = if let Some(root) = self.root {
+        // Tab / Shift+Tab: intercept before the normal walk. The tree
+        // rotates [`FocusManager`] to the next or previous focusable
+        // widget and dispatches `FocusLost` + `FocusGained` to the two
+        // affected widgets; no widget sees the raw Tab KeyDown. Shift
+        // state comes from the modifier snapshot maintained by the
+        // event loop on `ModifiersChanged`.
+        let result = if matches!(
+            event,
+            WidgetEvent::KeyDown {
+                key: Key::Named(NamedKey::Tab)
+            }
+        ) {
+            let dir = if event_ctx.modifiers.shift {
+                FocusDirection::Backward
+            } else {
+                FocusDirection::Forward
+            };
+            self.advance_focus(dir, event_ctx);
+            EventResult::Consumed
+        } else if let Some(root) = self.root {
             self.dispatch_to_node(root, event, event_ctx)
         } else {
             EventResult::Ignored
@@ -457,6 +493,128 @@ impl WidgetTree {
         }
 
         result
+    }
+
+    /// Index of the widget that currently has keyboard focus, if any.
+    ///
+    /// Updated by [`Self::advance_focus`] (Tab/Shift+Tab) and cleared
+    /// automatically when the focused widget is removed from the tree.
+    pub fn focused(&self) -> Option<usize> {
+        self.focus.focused()
+    }
+
+    /// Collect focusable widgets in tab order — DFS pre-order over the
+    /// root's subtree, skipping invisible branches.
+    ///
+    /// Invisible widgets collapse the entire subtree (matching
+    /// `display: none` layout semantics), so a focusable child inside a
+    /// hidden container is not reachable. Exposed for tests and for
+    /// callers that want to implement custom traversal on top of the
+    /// primitive set.
+    pub fn focusable_in_tab_order(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        if let Some(root) = self.root {
+            self.collect_focusable(root, &mut out);
+        }
+        out
+    }
+
+    fn collect_focusable(&self, idx: usize, out: &mut Vec<usize>) {
+        let Some(node) = self.node(idx) else { return };
+        if !node.widget.visible() {
+            return;
+        }
+        if node.widget.focusable() {
+            out.push(idx);
+        }
+        // Clone to avoid holding an immut borrow across the recursion;
+        // child lists are short enough that this is cheap.
+        let children: Vec<usize> = node.children.clone();
+        for c in children {
+            self.collect_focusable(c, out);
+        }
+    }
+
+    /// Move keyboard focus one step in `dir`, wrapping at the ends.
+    ///
+    /// Returns the newly focused widget index, or `None` if the tree
+    /// has no focusable widgets. Dispatches `FocusLost` to the
+    /// previously focused widget (if any) and `FocusGained` to the new
+    /// one; both events go through the same `event` path as input
+    /// events, so handlers can queue tree mutations via `event_ctx`.
+    ///
+    /// Invoked by the tree's own Tab routing — callers rarely need
+    /// this directly, but it is public so tests and custom shortcut
+    /// bindings can reuse the traversal policy.
+    pub fn advance_focus(
+        &mut self,
+        dir: FocusDirection,
+        event_ctx: &mut EventContext,
+    ) -> Option<usize> {
+        let order = self.focusable_in_tab_order();
+        if order.is_empty() {
+            return None;
+        }
+
+        let next = match (self.focus.focused(), dir) {
+            (None, FocusDirection::Forward) => order[0],
+            (None, FocusDirection::Backward) => *order.last().unwrap(),
+            (Some(cur), dir) => {
+                // Look up `cur` in the fresh order: it may not appear
+                // if the widget was hidden or marked non-focusable
+                // since the last traversal. In that case fall back to
+                // the direction's end so Tab still advances.
+                match order.iter().position(|&i| i == cur) {
+                    Some(pos) => {
+                        let n = order.len();
+                        let step = match dir {
+                            FocusDirection::Forward => (pos + 1) % n,
+                            FocusDirection::Backward => (pos + n - 1) % n,
+                        };
+                        order[step]
+                    }
+                    None => match dir {
+                        FocusDirection::Forward => order[0],
+                        FocusDirection::Backward => *order.last().unwrap(),
+                    },
+                }
+            }
+        };
+
+        self.change_focus_to(Some(next), event_ctx);
+        Some(next)
+    }
+
+    /// Set focus to `new`, dispatching `FocusLost` to the previously
+    /// focused widget (if any) and `FocusGained` to the new one.
+    ///
+    /// Called from [`Self::advance_focus`] and (in later sub-phases)
+    /// from click coordination. Kept private — callers go through the
+    /// higher-level APIs that validate the target first.
+    fn change_focus_to(&mut self, new: Option<usize>, event_ctx: &mut EventContext) {
+        let prev = self.focus.set(new);
+        if prev == new {
+            return;
+        }
+
+        if let Some(p) = prev {
+            if let Some(n) = self.node(p) {
+                let rect = self.layout.absolute_rect(n.layout_node);
+                if let Some(node) = self.node_mut(p) {
+                    node.widget.event(&WidgetEvent::FocusLost, rect, event_ctx);
+                }
+            }
+        }
+
+        if let Some(n) = new {
+            if let Some(nd) = self.node(n) {
+                let rect = self.layout.absolute_rect(nd.layout_node);
+                if let Some(node) = self.node_mut(n) {
+                    node.widget
+                        .event(&WidgetEvent::FocusGained, rect, event_ctx);
+                }
+            }
+        }
     }
 
     /// Deliver `FocusLost` to every live widget whose layout rect does not

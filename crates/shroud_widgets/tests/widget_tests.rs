@@ -2476,3 +2476,312 @@ fn secure_input_attaching_prebumped_trigger_does_not_spuriously_clear() {
         "bump post-attach must zeroize — empty buffer → no glyphs (no placeholder)"
     );
 }
+
+// ── Phase 19a-1: focus primitive & Tab routing ────────────────────
+
+/// Test widget that (a) opts into focus via `focusable()`, (b) can be
+/// hidden to exercise visibility-skipping in tab order, and (c) records
+/// every `FocusGained` / `FocusLost` it receives so tests can assert on
+/// the dispatch sequence.
+struct FocusProbe {
+    focusable: bool,
+    visible: bool,
+    events: Rc<RefCell<Vec<String>>>,
+    tag: &'static str,
+}
+
+impl FocusProbe {
+    fn new(tag: &'static str, events: Rc<RefCell<Vec<String>>>) -> Self {
+        Self {
+            focusable: true,
+            visible: true,
+            events,
+            tag,
+        }
+    }
+
+    fn non_focusable(mut self) -> Self {
+        self.focusable = false;
+        self
+    }
+
+    fn hidden(mut self) -> Self {
+        self.visible = false;
+        self
+    }
+}
+
+impl shroud_widgets::Widget for FocusProbe {
+    fn focusable(&self) -> bool {
+        self.focusable
+    }
+    fn visible(&self) -> bool {
+        self.visible
+    }
+    fn style(&self) -> shroud_layout::FlexStyle {
+        shroud_layout::FlexStyle::new().width(10.0).height(10.0)
+    }
+    fn paint(&self, _: shroud_core::Rect, _: &mut PaintContext) {}
+    fn event(
+        &mut self,
+        event: &WidgetEvent,
+        _: shroud_core::Rect,
+        _: &mut EventContext,
+    ) -> EventResult {
+        match event {
+            WidgetEvent::FocusGained => {
+                self.events
+                    .borrow_mut()
+                    .push(format!("{}:gained", self.tag));
+                EventResult::Consumed
+            }
+            WidgetEvent::FocusLost => {
+                self.events.borrow_mut().push(format!("{}:lost", self.tag));
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+}
+
+/// Three focusable probes under a plain container root — the standard
+/// harness for tab-order assertions.
+fn three_probe_tree() -> (WidgetTree, Rc<RefCell<Vec<String>>>, usize, usize, usize) {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(200.0));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let a = tree.add_child(root, FocusProbe::new("a", events.clone()));
+    let b = tree.add_child(root, FocusProbe::new("b", events.clone()));
+    let c = tree.add_child(root, FocusProbe::new("c", events.clone()));
+    tree.compute_layout(200.0, 200.0);
+    (tree, events, a, b, c)
+}
+
+#[test]
+fn widget_focusable_default_false() {
+    // Sanity: a plain `Container` (no override) must not participate in
+    // tab order. Regressing this would drop Tab on containers first.
+    let mut tree = WidgetTree::new();
+    tree.set_root(Container::column().width(100.0).height(100.0));
+    tree.compute_layout(100.0, 100.0);
+
+    assert_eq!(tree.focusable_in_tab_order(), Vec::<usize>::new());
+}
+
+#[test]
+fn tab_order_is_dfs_preorder_over_focusables() {
+    let (tree, _events, a, b, c) = three_probe_tree();
+
+    // Root container is non-focusable, so it must not appear. Children
+    // follow their insertion order (DFS pre-order of a flat parent).
+    assert_eq!(tree.focusable_in_tab_order(), vec![a, b, c]);
+}
+
+#[test]
+fn tab_order_skips_non_focusable_widgets() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(200.0));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let a = tree.add_child(root, FocusProbe::new("a", events.clone()));
+    let _skip = tree.add_child(root, FocusProbe::new("x", events.clone()).non_focusable());
+    let c = tree.add_child(root, FocusProbe::new("c", events));
+    tree.compute_layout(200.0, 200.0);
+
+    assert_eq!(tree.focusable_in_tab_order(), vec![a, c]);
+}
+
+#[test]
+fn tab_order_skips_self_invisible_focusable() {
+    // Distinct from "invisible parent hides focusable child": here the
+    // focusable widget itself is hidden. Catches a regression where the
+    // visibility check is only on ancestors, not on the widget being
+    // evaluated.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(200.0));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let a = tree.add_child(root, FocusProbe::new("a", events.clone()));
+    let _hidden = tree.add_child(root, FocusProbe::new("hidden", events.clone()).hidden());
+    let c = tree.add_child(root, FocusProbe::new("c", events));
+    tree.compute_layout(200.0, 200.0);
+
+    assert_eq!(tree.focusable_in_tab_order(), vec![a, c]);
+}
+
+#[test]
+fn tab_order_skips_invisible_subtrees() {
+    // An invisible parent must hide its focusable children — matches
+    // `display: none` collapse semantics from Phase 18b.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(200.0));
+    let events = Rc::new(RefCell::new(Vec::new()));
+
+    let hidden_parent = tree.add_child(
+        root,
+        Container::column().visible(shroud_reactive::Reactive::from(false)),
+    );
+    let _buried = tree.add_child(hidden_parent, FocusProbe::new("buried", events.clone()));
+
+    let visible_sibling = tree.add_child(root, FocusProbe::new("sib", events));
+    tree.compute_layout(200.0, 200.0);
+
+    assert_eq!(tree.focusable_in_tab_order(), vec![visible_sibling]);
+}
+
+#[test]
+fn advance_forward_from_none_focuses_first() {
+    let (mut tree, events, a, _, _) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    let landed = tree.advance_focus(FocusDirection::Forward, &mut ctx);
+
+    assert_eq!(landed, Some(a));
+    assert_eq!(tree.focused(), Some(a));
+    assert_eq!(*events.borrow(), vec!["a:gained"]);
+}
+
+#[test]
+fn advance_backward_from_none_focuses_last() {
+    let (mut tree, events, _, _, c) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    let landed = tree.advance_focus(FocusDirection::Backward, &mut ctx);
+
+    assert_eq!(landed, Some(c));
+    assert_eq!(tree.focused(), Some(c));
+    assert_eq!(*events.borrow(), vec!["c:gained"]);
+}
+
+#[test]
+fn advance_forward_wraps_from_last_to_first() {
+    let (mut tree, events, a, _, c) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    // Seed focus on `c` via a forward-from-none + two forward steps is
+    // tedious; use two backwards from none to land on the tail instead.
+    tree.advance_focus(FocusDirection::Backward, &mut ctx);
+    assert_eq!(tree.focused(), Some(c));
+    events.borrow_mut().clear();
+
+    let landed = tree.advance_focus(FocusDirection::Forward, &mut ctx);
+
+    assert_eq!(landed, Some(a), "forward from last must wrap to first");
+    assert_eq!(tree.focused(), Some(a));
+    // Old focused (c) gets FocusLost, new (a) gets FocusGained. Order
+    // matters: lost-before-gained keeps any cross-widget coordinator
+    // code seeing a consistent "exactly one focused" invariant.
+    assert_eq!(*events.borrow(), vec!["c:lost", "a:gained"]);
+}
+
+#[test]
+fn advance_backward_wraps_from_first_to_last() {
+    let (mut tree, events, a, _, c) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    tree.advance_focus(FocusDirection::Forward, &mut ctx);
+    assert_eq!(tree.focused(), Some(a));
+    events.borrow_mut().clear();
+
+    let landed = tree.advance_focus(FocusDirection::Backward, &mut ctx);
+
+    assert_eq!(landed, Some(c), "backward from first must wrap to last");
+    assert_eq!(*events.borrow(), vec!["a:lost", "c:gained"]);
+}
+
+#[test]
+fn advance_focus_returns_none_when_no_focusables() {
+    let mut tree = WidgetTree::new();
+    tree.set_root(Container::column().width(100.0).height(100.0));
+    tree.compute_layout(100.0, 100.0);
+    let mut ctx = EventContext::new();
+
+    let landed = tree.advance_focus(FocusDirection::Forward, &mut ctx);
+
+    assert_eq!(landed, None);
+    assert_eq!(tree.focused(), None);
+}
+
+#[test]
+fn tab_keydown_advances_focus_forward() {
+    // The tree intercepts Tab at dispatch_event and routes it to
+    // advance_focus. Widgets must never see the raw Tab KeyDown, so
+    // their event handlers cannot misinterpret it as a literal input.
+    let (mut tree, events, a, _, _) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    let result = tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Tab),
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(result, EventResult::Consumed);
+    assert_eq!(tree.focused(), Some(a));
+    assert_eq!(*events.borrow(), vec!["a:gained"]);
+}
+
+#[test]
+fn shift_tab_keydown_advances_focus_backward() {
+    // Shift is read from EventContext::modifiers (populated by the
+    // event loop on ModifiersChanged). The tree's Tab interception
+    // flips direction based on that snapshot.
+    let (mut tree, events, _, _, c) = three_probe_tree();
+    let mut ctx = EventContext::new();
+    ctx.modifiers.shift = true;
+
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Tab),
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(tree.focused(), Some(c));
+    assert_eq!(*events.borrow(), vec!["c:gained"]);
+}
+
+#[test]
+fn removed_focused_widget_clears_focus() {
+    // Focus must not dangle on a tombstoned index — the next Tab would
+    // otherwise see a stale pointer, fail the `order.contains` lookup,
+    // and fall back to first/last. Catch this at the remove boundary.
+    let (mut tree, _events, a, _, _) = three_probe_tree();
+    let mut ctx = EventContext::new();
+
+    tree.advance_focus(FocusDirection::Forward, &mut ctx);
+    assert_eq!(tree.focused(), Some(a));
+
+    tree.remove(a);
+
+    assert_eq!(tree.focused(), None);
+}
+
+#[test]
+fn advance_from_stale_focused_falls_back_to_first() {
+    // If focus is somehow set to a widget that disappears from tab
+    // order (hidden mid-session without going through remove), the
+    // next advance should still do something sensible instead of
+    // panicking or getting stuck.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(200.0));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let a = tree.add_child(root, FocusProbe::new("a", events.clone()));
+    let b = tree.add_child(root, FocusProbe::new("b", events.clone()));
+    tree.compute_layout(200.0, 200.0);
+
+    let mut ctx = EventContext::new();
+    tree.advance_focus(FocusDirection::Forward, &mut ctx);
+    assert_eq!(tree.focused(), Some(a));
+
+    // Remove `a` via an event-queued command routed through a Tab dispatch
+    // would be the realistic path, but the simple route is direct removal
+    // — focus clears, so re-seed manually via another advance starting
+    // from the survivor.
+    let _ = b;
+    tree.remove(a);
+    events.borrow_mut().clear();
+
+    let landed = tree.advance_focus(FocusDirection::Forward, &mut ctx);
+    assert_eq!(landed, Some(b));
+    assert_eq!(*events.borrow(), vec!["b:gained"]);
+}

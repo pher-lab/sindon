@@ -5,7 +5,7 @@ use shroud_core::{Point, Theme};
 use shroud_platform::PlatformWindow;
 use shroud_render::renderer::Renderer;
 use shroud_security::hardening;
-use shroud_widgets::event::{EventContext, Key, MouseButton, NamedKey, WidgetEvent};
+use shroud_widgets::event::{EventContext, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::tree::WidgetTree;
 use winit::application::ApplicationHandler;
@@ -414,6 +414,20 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
+            }
+
+            // Keep EventContext's modifier snapshot current so widgets
+            // (and the tree's Tab routing) see the right state on the
+            // next key event. winit fires this eagerly whenever any
+            // modifier state flips.
+            WindowEvent::ModifiersChanged(mods) => {
+                let state = mods.state();
+                self.event_ctx.modifiers = Modifiers {
+                    shift: state.shift_key(),
+                    ctrl: state.control_key(),
+                    alt: state.alt_key(),
+                    logo: state.super_key(),
+                };
             }
 
             WindowEvent::Resized(size) => {
