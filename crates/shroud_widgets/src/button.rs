@@ -1,6 +1,6 @@
 //! Button widget — clickable container with text label.
 
-use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
+use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Rect, Size};
@@ -25,6 +25,7 @@ pub struct Button {
     // Visual state
     hovered: bool,
     pressed: bool,
+    focused: bool,
     // Colors (None = read from theme)
     normal_bg: Option<Reactive<Color>>,
     hover_bg: Option<Reactive<Color>>,
@@ -46,6 +47,7 @@ impl Button {
             on_click: None,
             hovered: false,
             pressed: false,
+            focused: false,
             normal_bg: None,
             hover_bg: None,
             press_bg: None,
@@ -66,6 +68,7 @@ impl Button {
             on_click: None,
             hovered: false,
             pressed: false,
+            focused: false,
             normal_bg: None,
             hover_bg: None,
             press_bg: None,
@@ -128,9 +131,18 @@ impl Button {
         self.visible = v.into();
         self
     }
+
+    /// Whether this button currently has keyboard focus.
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
 }
 
 impl Widget for Button {
+    fn focusable(&self) -> bool {
+        true
+    }
+
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
         FlexStyle::new()
@@ -273,6 +285,32 @@ impl Widget for Button {
                 } else {
                     EventResult::Ignored
                 }
+            }
+            WidgetEvent::FocusGained => {
+                self.focused = true;
+                EventResult::Ignored
+            }
+            WidgetEvent::FocusLost => {
+                self.focused = false;
+                EventResult::Ignored
+            }
+            // Keyboard activation: Enter triggers click while focused.
+            // Browser parity — both Enter and Space activate a button, but
+            // Space arrives as `CharInput { ch: ' ' }` (winit routes it
+            // through the character pipeline alongside other printable keys).
+            WidgetEvent::KeyDown {
+                key: Key::Named(NamedKey::Enter),
+            } if self.focused => {
+                if let Some(handler) = &mut self.on_click {
+                    handler(ctx);
+                }
+                EventResult::Consumed
+            }
+            WidgetEvent::CharInput { ch: ' ' } if self.focused => {
+                if let Some(handler) = &mut self.on_click {
+                    handler(ctx);
+                }
+                EventResult::Consumed
             }
             _ => EventResult::Ignored,
         }

@@ -2984,3 +2984,185 @@ fn tab_then_click_releases_previous_focus() {
     assert_eq!(tree.focused(), Some(b));
     assert_eq!(*events.borrow(), vec!["a:lost", "b:gained"]);
 }
+
+// ── Phase 19a-3: Button / Checkbox focus & keyboard activation ────
+
+#[test]
+fn button_is_focusable_by_default() {
+    // Sanity check on the trait override — without this, Tab routing
+    // would skip Buttons and the keyboard-activation arms below would
+    // never be reachable in a real app.
+    let btn = Button::new("OK");
+    assert!(<Button as shroud_widgets::Widget>::focusable(&btn));
+}
+
+#[test]
+fn checkbox_is_focusable_by_default() {
+    let cb = Checkbox::new("Accept");
+    assert!(<Checkbox as shroud_widgets::Widget>::focusable(&cb));
+}
+
+#[test]
+fn button_enter_triggers_click_when_focused() {
+    // Browser parity: Enter on a focused button activates it. Probed via
+    // the click counter rather than `is_focused()` so the assertion proves
+    // the activation path actually invoked the handler, not just that the
+    // focus flag flipped.
+    let clicks = Rc::new(Cell::new(0u32));
+    let clicks_in = clicks.clone();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(100.0));
+    let btn = tree.add_child(
+        root,
+        Button::new("Go").on_click(move |_ctx| {
+            clicks_in.set(clicks_in.get() + 1);
+        }),
+    );
+    tree.compute_layout(200.0, 100.0);
+
+    let mut ctx = EventContext::new();
+    tree.focus(Some(btn), &mut ctx);
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Enter),
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(
+        clicks.get(),
+        1,
+        "Enter on focused Button must fire on_click"
+    );
+}
+
+#[test]
+fn button_space_triggers_click_when_focused() {
+    // Space arrives via CharInput (winit routes the spacebar through the
+    // character pipeline alongside other printable keys), so this is a
+    // separate code path from Enter.
+    let clicks = Rc::new(Cell::new(0u32));
+    let clicks_in = clicks.clone();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(100.0));
+    let btn = tree.add_child(
+        root,
+        Button::new("Go").on_click(move |_ctx| {
+            clicks_in.set(clicks_in.get() + 1);
+        }),
+    );
+    tree.compute_layout(200.0, 100.0);
+
+    let mut ctx = EventContext::new();
+    tree.focus(Some(btn), &mut ctx);
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: ' ' }, &mut ctx);
+
+    assert_eq!(
+        clicks.get(),
+        1,
+        "Space on focused Button must fire on_click"
+    );
+}
+
+#[test]
+fn button_enter_does_nothing_when_not_focused() {
+    // Without focus, Enter must not stray into a Button's handler — every
+    // Button in the tree sees the event during dispatch, but only the
+    // focused one (none here) is allowed to act.
+    let clicks = Rc::new(Cell::new(0u32));
+    let clicks_in = clicks.clone();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(100.0));
+    tree.add_child(
+        root,
+        Button::new("Go").on_click(move |_ctx| {
+            clicks_in.set(clicks_in.get() + 1);
+        }),
+    );
+    tree.compute_layout(200.0, 100.0);
+
+    let mut ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Enter),
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(clicks.get(), 0, "Unfocused Button must ignore Enter");
+}
+
+#[test]
+fn checkbox_space_toggles_when_focused() {
+    let toggles = Rc::new(RefCell::new(Vec::<bool>::new()));
+    let toggles_in = toggles.clone();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(100.0));
+    let cb = tree.add_child(
+        root,
+        Checkbox::new("Remember").on_change(move |checked, _ctx| {
+            toggles_in.borrow_mut().push(checked);
+        }),
+    );
+    tree.compute_layout(200.0, 100.0);
+
+    let mut ctx = EventContext::new();
+    tree.focus(Some(cb), &mut ctx);
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: ' ' }, &mut ctx);
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: ' ' }, &mut ctx);
+
+    assert_eq!(*toggles.borrow(), vec![true, false], "Space must toggle");
+}
+
+#[test]
+fn checkbox_enter_does_not_toggle_when_focused() {
+    // Browser convention: Enter on a checkbox is a form-submit, not a
+    // toggle. Locking this in keeps Enter free for the surrounding screen
+    // (e.g. a dialog's default action) when a checkbox happens to hold
+    // focus.
+    let toggles = Rc::new(RefCell::new(Vec::<bool>::new()));
+    let toggles_in = toggles.clone();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(100.0));
+    let cb = tree.add_child(
+        root,
+        Checkbox::new("Remember").on_change(move |checked, _ctx| {
+            toggles_in.borrow_mut().push(checked);
+        }),
+    );
+    tree.compute_layout(200.0, 100.0);
+
+    let mut ctx = EventContext::new();
+    tree.focus(Some(cb), &mut ctx);
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Enter),
+        },
+        &mut ctx,
+    );
+
+    assert!(
+        toggles.borrow().is_empty(),
+        "Enter must not toggle Checkbox"
+    );
+}
+
+#[test]
+fn tab_order_includes_button_and_checkbox() {
+    // Real-widget integration: Input + Button + Checkbox under one root.
+    // Verifies the focusable() override on Button/Checkbox actually lands
+    // them in the tab cycle (not just that the trait bit is set).
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let input = tree.add_child(root, Input::new());
+    let button = tree.add_child(root, Button::new("Go"));
+    let checkbox = tree.add_child(root, Checkbox::new("Yes"));
+    tree.compute_layout(400.0, 300.0);
+
+    assert_eq!(tree.focusable_in_tab_order(), vec![input, button, checkbox]);
+}

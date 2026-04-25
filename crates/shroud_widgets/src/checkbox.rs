@@ -23,6 +23,7 @@ pub struct Checkbox {
     font_size: Option<f32>,
     on_change: Option<ChangeHandler>,
     hovered: bool,
+    focused: bool,
     // Colors (None = read from theme)
     check_color: Option<Color>,
     box_bg: Option<Color>,
@@ -39,6 +40,7 @@ impl Checkbox {
             font_size: None,
             on_change: None,
             hovered: false,
+            focused: false,
             check_color: None,
             box_bg: None,
             box_border: None,
@@ -84,6 +86,11 @@ impl Checkbox {
         self.checked
     }
 
+    /// Whether this checkbox currently has keyboard focus.
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
     /// Box size based on font size.
     fn box_size(&self, font_size: f32) -> f32 {
         font_size + 2.0
@@ -91,6 +98,10 @@ impl Checkbox {
 }
 
 impl Widget for Checkbox {
+    fn focusable(&self) -> bool {
+        true
+    }
+
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
         FlexStyle::new()
@@ -215,6 +226,25 @@ impl Widget for Checkbox {
                 button: MouseButton::Left,
                 ..
             } => {
+                self.checked = !self.checked;
+                if let Some(handler) = &mut self.on_change {
+                    handler(self.checked, ctx);
+                }
+                EventResult::Consumed
+            }
+            WidgetEvent::FocusGained => {
+                self.focused = true;
+                EventResult::Ignored
+            }
+            WidgetEvent::FocusLost => {
+                self.focused = false;
+                EventResult::Ignored
+            }
+            // Space toggles when focused — browser parity. Enter is
+            // intentionally a no-op (browsers reserve it for form-submit,
+            // not checkbox toggle), so leave it for the surrounding screen
+            // to interpret.
+            WidgetEvent::CharInput { ch: ' ' } if self.focused => {
                 self.checked = !self.checked;
                 if let Some(handler) = &mut self.on_change {
                     handler(self.checked, ctx);
