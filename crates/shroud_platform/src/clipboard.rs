@@ -7,6 +7,7 @@
 
 use shroud_security::SecureString;
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 /// Default auto-clear duration (10 seconds).
 pub const DEFAULT_AUTO_CLEAR_SECS: u64 = 10;
@@ -58,25 +59,15 @@ impl SecureClipboard {
 
     /// Read clipboard text into a SecureString.
     ///
-    /// The clipboard content is read directly into a SecureString
-    /// without exposing it as a plain `String` to the caller.
+    /// `arboard::get_text` returns a plain `String`, so plaintext exists
+    /// briefly on the heap. We wrap it in `Zeroizing` so the buffer is
+    /// wiped on drop. The pre-realloc capacity of the `String` is what we
+    /// can guarantee; if `arboard` resized internally before returning,
+    /// older buffers are out of our reach.
     pub fn read_secure(&self) -> Result<SecureString, ClipboardError> {
         let mut board = arboard::Clipboard::new().map_err(|_| ClipboardError::Unavailable)?;
-        let text = board.get_text().map_err(|_| ClipboardError::ReadFailed)?;
-        let secure = SecureString::new(&text);
-        // Zeroize the intermediate String — `drop` will handle it since
-        // String doesn't implement Zeroize. We do our best:
-        let mut text = text;
-        // Overwrite the bytes before dropping
-        // SAFETY: we own the String and are about to drop it
-        unsafe {
-            let bytes = text.as_bytes_mut();
-            for b in bytes.iter_mut() {
-                std::ptr::write_volatile(b, 0);
-            }
-        }
-        drop(text);
-        Ok(secure)
+        let text = Zeroizing::new(board.get_text().map_err(|_| ClipboardError::ReadFailed)?);
+        Ok(SecureString::new(&text))
     }
 
     /// Read clipboard as plain text.
