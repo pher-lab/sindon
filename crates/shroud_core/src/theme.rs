@@ -11,6 +11,25 @@ pub struct Theme {
     pub colors: Colors,
     pub typography: Typography,
     pub spacing: Spacing,
+    pub focus: FocusStyle,
+}
+
+/// Visual tokens for the keyboard-focus ring.
+///
+/// Focusable widgets (`Input`, `SecureInput`, `Button`, `Checkbox`) read
+/// these defaults from the active theme during paint. The ring is drawn
+/// just *outside* the widget rect — `ring_offset` is the gap between the
+/// widget edge and the ring's inner edge — so it complements (rather
+/// than replaces) any existing border, mirroring browsers' `outline`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusStyle {
+    /// Stroke color for the ring.
+    pub ring_color: Color,
+    /// Stroke thickness in px.
+    pub ring_width: f32,
+    /// Distance in px between the widget rect and the inner edge of the
+    /// ring. `0.0` paints the ring flush against the widget edge.
+    pub ring_offset: f32,
 }
 
 /// Color tokens organized by semantic role.
@@ -142,6 +161,11 @@ impl Theme {
                 lg: 24.0,
                 xl: 32.0,
             },
+            focus: FocusStyle {
+                ring_color: Color::rgb(0.5, 0.65, 1.0),
+                ring_width: 2.0,
+                ring_offset: 2.0,
+            },
         }
     }
 
@@ -196,6 +220,11 @@ impl Theme {
                 md: 16.0,
                 lg: 24.0,
                 xl: 32.0,
+            },
+            focus: FocusStyle {
+                ring_color: Color::rgb(0.2, 0.45, 0.95),
+                ring_width: 2.0,
+                ring_offset: 2.0,
             },
         }
     }

@@ -260,6 +260,29 @@ fn secure_input_builder() {
 }
 
 #[test]
+fn secure_input_focus_ring_paints() {
+    // Phase 19b smoke test: focusing a SecureInput emits the same 4 ring
+    // rects as the non-secure widgets. Probed in this test crate so a
+    // regression that drops the paint_focus_ring call from SecureInput
+    // (rather than Input) gets caught here, not by the parallel test in
+    // widget_tests.rs.
+    use shroud_core::Theme;
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let idx = tree.add_child(root, SecureInput::new());
+    tree.compute_layout(200.0, 60.0);
+
+    let mut ev = EventContext::new();
+    tree.focus(Some(idx), &mut ev);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    let ring = Theme::default().focus.ring_color;
+    let n = ctx.rects.iter().filter(|r| r.color == ring).count();
+    assert_eq!(n, 4, "SecureInput focus ring should render 4 rects");
+}
+
+#[test]
 fn secure_text_builder() {
     let _text = SecureText::new(SecureString::new("secret"))
         .font_size(20.0)

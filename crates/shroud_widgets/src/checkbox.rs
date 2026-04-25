@@ -29,6 +29,7 @@ pub struct Checkbox {
     box_bg: Option<Color>,
     box_border: Option<Color>,
     label_color: Option<Color>,
+    focus_ring_color: Option<Color>,
 }
 
 impl Checkbox {
@@ -45,6 +46,7 @@ impl Checkbox {
             box_bg: None,
             box_border: None,
             label_color: None,
+            focus_ring_color: None,
         }
     }
 
@@ -78,6 +80,13 @@ impl Checkbox {
     /// Set the label text color.
     pub fn label_color(mut self, color: Color) -> Self {
         self.label_color = Some(color);
+        self
+    }
+
+    /// Override the keyboard-focus ring color. `None` (the default) reads
+    /// `theme.focus.ring_color` each frame.
+    pub fn focus_ring_color(mut self, color: Color) -> Self {
+        self.focus_ring_color = Some(color);
         self
     }
 
@@ -209,6 +218,12 @@ impl Widget for Checkbox {
                     }
                 }
             }
+        }
+
+        // Ring follows the full layout rect (the entire row is the click
+        // target, so the focus affordance matches what the user can hit).
+        if self.focused {
+            ctx.paint_focus_ring(layout, self.focus_ring_color);
         }
     }
 

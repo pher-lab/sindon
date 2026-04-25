@@ -77,6 +77,7 @@ pub struct SecureInput {
     placeholder_color: Option<Color>,
     border_color: Option<Color>,
     border_focused_color: Option<Color>,
+    focus_ring_color: Option<Color>,
 }
 
 impl SecureInput {
@@ -98,6 +99,7 @@ impl SecureInput {
             placeholder_color: None,
             border_color: None,
             border_focused_color: None,
+            focus_ring_color: None,
         }
     }
 
@@ -128,6 +130,13 @@ impl SecureInput {
     /// Set the text color.
     pub fn text_color(mut self, color: Color) -> Self {
         self.text_color = Some(color);
+        self
+    }
+
+    /// Override the keyboard-focus ring color. `None` (the default) reads
+    /// `theme.focus.ring_color` each frame.
+    pub fn focus_ring_color(mut self, color: Color) -> Self {
+        self.focus_ring_color = Some(color);
         self
     }
 
@@ -329,6 +338,10 @@ impl Widget for SecureInput {
                 };
                 ctx.fill_rect(Rect::new(cursor_x, text_y, 2.0, font_size), text_color);
             }
+        }
+
+        if self.focused {
+            ctx.paint_focus_ring(layout, self.focus_ring_color);
         }
     }
 

@@ -31,6 +31,7 @@ pub struct Button {
     hover_bg: Option<Reactive<Color>>,
     press_bg: Option<Reactive<Color>>,
     text_color: Option<Reactive<Color>>,
+    focus_ring_color: Option<Reactive<Color>>,
     visible: Reactive<bool>,
 }
 
@@ -52,6 +53,7 @@ impl Button {
             hover_bg: None,
             press_bg: None,
             text_color: None,
+            focus_ring_color: None,
             visible: Reactive::Static(true),
         }
     }
@@ -73,6 +75,7 @@ impl Button {
             hover_bg: None,
             press_bg: None,
             text_color: None,
+            focus_ring_color: None,
             visible: Reactive::Static(true),
         }
     }
@@ -118,6 +121,14 @@ impl Button {
     /// Set text color.
     pub fn text_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
         self.text_color = Some(color.into());
+        self
+    }
+
+    /// Override the keyboard-focus ring color. `None` (the default) reads
+    /// `theme.focus.ring_color` each frame. Reactive to match the rest of
+    /// `Button`'s color setters.
+    pub fn focus_ring_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
+        self.focus_ring_color = Some(color.into());
         self
     }
 
@@ -251,6 +262,11 @@ impl Widget for Button {
                     );
                 }
             }
+        }
+
+        if self.focused {
+            let override_color = self.focus_ring_color.as_ref().map(|c| c.get());
+            ctx.paint_focus_ring(layout, override_color);
         }
     }
 

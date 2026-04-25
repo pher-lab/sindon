@@ -130,6 +130,32 @@ impl PaintContext {
         });
     }
 
+    /// Paint a keyboard-focus ring around `widget_rect`.
+    ///
+    /// The ring sits outside the widget rect with a `theme.focus.ring_offset`
+    /// gap before its inner edge, and is `theme.focus.ring_width` thick.
+    /// Pass `override_color = None` to use `theme.focus.ring_color`, or
+    /// `Some(c)` for a per-widget accent.
+    ///
+    /// Implemented as four `fill_rect` calls (top / bottom / left / right
+    /// strokes) so the active clip and offset stacks are honored — a
+    /// focused widget that has scrolled partly out of a `ScrollView` has
+    /// its ring clipped consistently with the widget itself.
+    pub fn paint_focus_ring(&mut self, widget_rect: Rect, override_color: Option<Color>) {
+        let style = self.theme.focus;
+        let color = override_color.unwrap_or(style.ring_color);
+        let w = style.ring_width;
+        let outer_off = style.ring_offset + w;
+        let ox = widget_rect.origin.x - outer_off;
+        let oy = widget_rect.origin.y - outer_off;
+        let width = widget_rect.size.width + 2.0 * outer_off;
+        let height = widget_rect.size.height + 2.0 * outer_off;
+        self.fill_rect(Rect::new(ox, oy, width, w), color);
+        self.fill_rect(Rect::new(ox, oy + height - w, width, w), color);
+        self.fill_rect(Rect::new(ox, oy, w, height), color);
+        self.fill_rect(Rect::new(ox + width - w, oy, w, height), color);
+    }
+
     /// Clear all accumulated commands.
     pub fn clear(&mut self) {
         self.rects.clear();

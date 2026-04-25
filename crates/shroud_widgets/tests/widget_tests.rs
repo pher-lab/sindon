@@ -3166,3 +3166,151 @@ fn tab_order_includes_button_and_checkbox() {
 
     assert_eq!(tree.focusable_in_tab_order(), vec![input, button, checkbox]);
 }
+
+// ── Phase 19b: focus ring rendering ───────────────────────────────
+
+#[test]
+fn focus_ring_appears_when_button_focused_with_theme_color() {
+    // Two paint snapshots — once unfocused, once focused — and the diff
+    // must be exactly 4 rects in the theme's focus ring color (top, bottom,
+    // left, right strokes). Button has no other paint that varies with
+    // focus, so the +4 delta is a tight assertion.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let btn = tree.add_child(root, Button::new("Go"));
+    tree.compute_layout(200.0, 60.0);
+
+    let mut unfocused = PaintContext::default();
+    tree.paint(&mut unfocused);
+    let baseline = unfocused.rects.len();
+
+    let mut ev = EventContext::new();
+    tree.focus(Some(btn), &mut ev);
+    let mut focused = PaintContext::default();
+    tree.paint(&mut focused);
+
+    assert_eq!(
+        focused.rects.len() - baseline,
+        4,
+        "focused Button must add exactly 4 ring rects"
+    );
+
+    let ring = Theme::default().focus.ring_color;
+    let ring_rect_count = focused.rects.iter().filter(|r| r.color == ring).count();
+    assert_eq!(
+        ring_rect_count, 4,
+        "all 4 added rects should use theme.focus.ring_color"
+    );
+}
+
+#[test]
+fn focus_ring_absent_without_focus() {
+    // Companion test to the above: no widget focused → no rect should
+    // bear the focus ring color. Catches a regression where the ring
+    // paints unconditionally.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    tree.add_child(root, Button::new("Go"));
+    tree.compute_layout(200.0, 60.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    let ring = Theme::default().focus.ring_color;
+    assert!(
+        !ctx.rects.iter().any(|r| r.color == ring),
+        "no rect should use the focus ring color when nothing is focused"
+    );
+}
+
+#[test]
+fn focus_ring_color_override_takes_precedence() {
+    let custom = Color::rgb(1.0, 0.0, 0.0);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let btn = tree.add_child(root, Button::new("Go").focus_ring_color(custom));
+    tree.compute_layout(200.0, 60.0);
+
+    let mut ev = EventContext::new();
+    tree.focus(Some(btn), &mut ev);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    let n = ctx.rects.iter().filter(|r| r.color == custom).count();
+    assert_eq!(n, 4, "all 4 ring rects should use the override color");
+}
+
+#[test]
+fn focus_ring_sits_outside_widget_rect() {
+    // Geometry contract: with offset=2 and width=2 (defaults), the ring's
+    // outer edge sits 4px beyond each widget edge. Probes via the top
+    // stroke — it has the smallest y of the four ring rects, and its
+    // y-coord must equal widget_y - (offset + width).
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(80.0));
+    let btn = tree.add_child(root, Button::new("X"));
+    tree.compute_layout(200.0, 80.0);
+    let widget_rect = tree.layout_rect(btn);
+
+    let mut ev = EventContext::new();
+    tree.focus(Some(btn), &mut ev);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    let theme = Theme::default();
+    let ring_rects: Vec<_> = ctx
+        .rects
+        .iter()
+        .filter(|r| r.color == theme.focus.ring_color)
+        .collect();
+    assert_eq!(ring_rects.len(), 4);
+
+    let top = ring_rects
+        .iter()
+        .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
+        .unwrap();
+    let expected = widget_rect.origin.y - (theme.focus.ring_offset + theme.focus.ring_width);
+    assert!(
+        (top.y - expected).abs() < 0.01,
+        "top stroke y={} should equal widget_y - (offset + width) = {expected}",
+        top.y
+    );
+}
+
+#[test]
+fn focus_ring_paints_for_input() {
+    // Smoke test: focusing an Input emits 4 ring rects. Catches a
+    // regression where someone removes the paint_focus_ring call from
+    // Input's paint method specifically.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let idx = tree.add_child(root, Input::new());
+    tree.compute_layout(200.0, 60.0);
+
+    let mut ev = EventContext::new();
+    tree.focus(Some(idx), &mut ev);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    let ring = Theme::default().focus.ring_color;
+    let n = ctx.rects.iter().filter(|r| r.color == ring).count();
+    assert_eq!(n, 4, "Input focus ring should render 4 rects");
+}
+
+#[test]
+fn focus_ring_paints_for_checkbox() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let idx = tree.add_child(root, Checkbox::new("Yes"));
+    tree.compute_layout(200.0, 60.0);
+
+    let mut ev = EventContext::new();
+    tree.focus(Some(idx), &mut ev);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    let ring = Theme::default().focus.ring_color;
+    let n = ctx.rects.iter().filter(|r| r.color == ring).count();
+    assert_eq!(n, 4);
+}
