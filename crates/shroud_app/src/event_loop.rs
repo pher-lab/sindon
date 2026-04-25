@@ -309,6 +309,58 @@ impl Default for App {
     }
 }
 
+/// Translate a winit named key into the corresponding shroud event.
+///
+/// Most named keys become a `KeyDown { key }`, but Space is a deliberate
+/// exception — it is a printable character semantically (Input/SecureInput
+/// insert ' ' into their buffer; Button/Checkbox use it for activation),
+/// so we route it through `CharInput` instead. Without this case, winit
+/// drops Space on the floor (it doesn't arrive as `Character`), which
+/// silently broke space typing in inputs from day one and meant the
+/// 19a-3 Button/Checkbox space activation only ever worked in tests.
+///
+/// Returns `None` for unmapped named keys (modifiers, function keys,
+/// etc.) — those simply don't reach widgets today.
+fn translate_named_key(named: &WinitNamedKey) -> Option<WidgetEvent> {
+    match named {
+        WinitNamedKey::Space => Some(WidgetEvent::CharInput { ch: ' ' }),
+        WinitNamedKey::Enter => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Enter),
+        }),
+        WinitNamedKey::Escape => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Escape),
+        }),
+        WinitNamedKey::Tab => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Tab),
+        }),
+        WinitNamedKey::Backspace => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Backspace),
+        }),
+        WinitNamedKey::Delete => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Delete),
+        }),
+        WinitNamedKey::ArrowLeft => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::ArrowLeft),
+        }),
+        WinitNamedKey::ArrowRight => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::ArrowRight),
+        }),
+        WinitNamedKey::ArrowUp => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::ArrowUp),
+        }),
+        WinitNamedKey::ArrowDown => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::ArrowDown),
+        }),
+        WinitNamedKey::Home => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Home),
+        }),
+        WinitNamedKey::End => Some(WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::End),
+        }),
+        _ => None,
+    }
+}
+
 struct ShroudEventLoop {
     config: AppConfig,
     #[allow(dead_code)] // retained so user clones stay valid; future phases may read it
@@ -516,29 +568,13 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                         self.request_redraw();
                     }
 
-                    // Named keys → KeyDown event
+                    // Named keys → either a KeyDown event (most named
+                    // keys) or, for Space, a CharInput so the rest of the
+                    // pipeline treats it as a printable character.
                     WinitKey::Named(named) => {
-                        let key = match named {
-                            WinitNamedKey::Enter => Some(Key::Named(NamedKey::Enter)),
-                            WinitNamedKey::Escape => Some(Key::Named(NamedKey::Escape)),
-                            WinitNamedKey::Tab => Some(Key::Named(NamedKey::Tab)),
-                            WinitNamedKey::Backspace => Some(Key::Named(NamedKey::Backspace)),
-                            WinitNamedKey::Delete => Some(Key::Named(NamedKey::Delete)),
-                            WinitNamedKey::ArrowLeft => Some(Key::Named(NamedKey::ArrowLeft)),
-                            WinitNamedKey::ArrowRight => Some(Key::Named(NamedKey::ArrowRight)),
-                            WinitNamedKey::ArrowUp => Some(Key::Named(NamedKey::ArrowUp)),
-                            WinitNamedKey::ArrowDown => Some(Key::Named(NamedKey::ArrowDown)),
-                            WinitNamedKey::Home => Some(Key::Named(NamedKey::Home)),
-                            WinitNamedKey::End => Some(Key::Named(NamedKey::End)),
-                            _ => None,
-                        };
-
-                        if let Some(key) = key {
+                        if let Some(event) = translate_named_key(named) {
                             if let Some(tree) = &mut self.tree {
-                                tree.dispatch_event(
-                                    &WidgetEvent::KeyDown { key },
-                                    &mut self.event_ctx,
-                                );
+                                tree.dispatch_event(&event, &mut self.event_ctx);
                                 self.request_redraw();
                             }
                         }
@@ -587,5 +623,45 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
 
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_named_key_routes_to_char_input() {
+        // Regression for the silent Space drop: winit reports Space as
+        // a named key, not a Character, so Input/SecureInput/Button/
+        // Checkbox would never see it pre-fix. translate_named_key must
+        // turn it into a CharInput { ch: ' ' } so the rest of the
+        // pipeline treats it as a printable character.
+        let event = translate_named_key(&WinitNamedKey::Space);
+        assert!(
+            matches!(event, Some(WidgetEvent::CharInput { ch: ' ' })),
+            "Space must translate to CharInput {{ ch: ' ' }}, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn enter_named_key_routes_to_key_down() {
+        // Companion test: every other named key still goes through
+        // KeyDown — only Space is special-cased.
+        let event = translate_named_key(&WinitNamedKey::Enter);
+        assert!(matches!(
+            event,
+            Some(WidgetEvent::KeyDown {
+                key: Key::Named(NamedKey::Enter)
+            })
+        ));
+    }
+
+    #[test]
+    fn unmapped_named_key_returns_none() {
+        // Modifier and function keys are intentionally unmapped — they
+        // should pass straight through without spurious events.
+        assert!(translate_named_key(&WinitNamedKey::Shift).is_none());
+        assert!(translate_named_key(&WinitNamedKey::F1).is_none());
     }
 }

@@ -52,13 +52,16 @@ pub struct Input {
     focused: bool,
     on_change: Option<TextCallback>,
     on_submit: Option<TextCallback>,
-    // Colors (None = read from theme)
+    // Colors (None = read from theme).
+    //
+    // The focus ring (Phase 19b) is now the canonical signal that this
+    // input has keyboard focus, so the bg/border do not change with
+    // focus state — the ring is the single source of "I'm focused".
+    // Apps that want extra emphasis can supply their own theme overrides.
     bg_color: Option<Color>,
-    bg_focused_color: Option<Color>,
     text_color: Option<Color>,
     placeholder_color: Option<Color>,
     border_color: Option<Color>,
-    border_focused_color: Option<Color>,
     focus_ring_color: Option<Color>,
 }
 
@@ -75,11 +78,9 @@ impl Input {
             on_change: None,
             on_submit: None,
             bg_color: None,
-            bg_focused_color: None,
             text_color: None,
             placeholder_color: None,
             border_color: None,
-            border_focused_color: None,
             focus_ring_color: None,
         }
     }
@@ -182,21 +183,11 @@ impl Input {
     }
 
     fn resolve_bg(&self, colors: &shroud_core::Colors) -> Color {
-        if self.focused {
-            self.bg_focused_color
-                .unwrap_or(colors.input_background_focused)
-        } else {
-            self.bg_color.unwrap_or(colors.input_background)
-        }
+        self.bg_color.unwrap_or(colors.input_background)
     }
 
     fn resolve_border(&self, colors: &shroud_core::Colors) -> Color {
-        if self.focused {
-            self.border_focused_color
-                .unwrap_or(colors.input_border_focused)
-        } else {
-            self.border_color.unwrap_or(colors.input_border)
-        }
+        self.border_color.unwrap_or(colors.input_border)
     }
 
     /// Find the previous char boundary before `pos` in `s`.

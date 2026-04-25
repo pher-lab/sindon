@@ -70,13 +70,14 @@ pub struct SecureInput {
     /// clear. Initialized to the trigger's current version at bind time so
     /// binding never spuriously fires a clear.
     last_clear_version: Cell<u32>,
-    // Colors (None = read from theme)
+    // Colors (None = read from theme).
+    //
+    // Mirrors `Input`: the focus ring (Phase 19b) is the canonical
+    // signal, so bg/border do not change with focus state.
     bg_color: Option<Color>,
-    bg_focused_color: Option<Color>,
     text_color: Option<Color>,
     placeholder_color: Option<Color>,
     border_color: Option<Color>,
-    border_focused_color: Option<Color>,
     focus_ring_color: Option<Color>,
 }
 
@@ -94,11 +95,9 @@ impl SecureInput {
             clear_trigger: None,
             last_clear_version: Cell::new(0),
             bg_color: None,
-            bg_focused_color: None,
             text_color: None,
             placeholder_color: None,
             border_color: None,
-            border_focused_color: None,
             focus_ring_color: None,
         }
     }
@@ -195,21 +194,11 @@ impl SecureInput {
     }
 
     fn resolve_bg(&self, colors: &shroud_core::Colors) -> Color {
-        if self.focused {
-            self.bg_focused_color
-                .unwrap_or(colors.input_background_focused)
-        } else {
-            self.bg_color.unwrap_or(colors.input_background)
-        }
+        self.bg_color.unwrap_or(colors.input_background)
     }
 
     fn resolve_border(&self, colors: &shroud_core::Colors) -> Color {
-        if self.focused {
-            self.border_focused_color
-                .unwrap_or(colors.input_border_focused)
-        } else {
-            self.border_color.unwrap_or(colors.input_border)
-        }
+        self.border_color.unwrap_or(colors.input_border)
     }
 
     /// Observe the clear trigger version and zeroize if it changed. Called
