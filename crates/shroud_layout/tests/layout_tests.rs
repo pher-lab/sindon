@@ -165,3 +165,63 @@ fn style_builder_chaining() {
     assert_eq!(style.align_items, Some(AlignItems::Center));
     assert_eq!(style.justify_content, Some(JustifyContent::Center));
 }
+
+#[test]
+fn justify_center_does_not_collapse_cross_axis() {
+    // Column container with only main-axis centering: each child should keep
+    // its natural width (Stretch default), and the group should be centered
+    // vertically inside the parent. This is the failure mode that motivated
+    // the new helper — `.center()` would collapse `width_full()` children to
+    // min-content and break text wrapping.
+    let mut engine = LayoutEngine::new();
+    let c1 = engine.add_leaf(FlexStyle::new().width_full().height(40.0));
+    let c2 = engine.add_leaf(FlexStyle::new().width_full().height(60.0));
+    let root = engine.add_container(
+        FlexStyle::new()
+            .column()
+            .width(400.0)
+            .height(300.0)
+            .justify_center(),
+        &[c1, c2],
+    );
+
+    engine.compute(root, 800.0, 600.0);
+
+    let r1 = engine.layout(c1);
+    let r2 = engine.layout(c2);
+
+    // Children retain their full parent width — not collapsed by Center.
+    assert_eq!(r1.size.width, 400.0);
+    assert_eq!(r2.size.width, 400.0);
+    // Combined child height = 100; parent height = 300 → 100 px of free
+    // space, half above (50) and half below.
+    assert_eq!(r1.origin.y, 100.0);
+    assert_eq!(r2.origin.y, 140.0);
+}
+
+#[test]
+fn max_width_clamps_growth() {
+    // Inner column declares `width_full().max_width(200)`. Even though the
+    // parent offers 800 px of horizontal space, the inner node should stop
+    // at 200 px.
+    let mut engine = LayoutEngine::new();
+    let inner = engine.add_container(FlexStyle::new().column().width_full().max_width(200.0), &[]);
+    let root = engine.add_container(FlexStyle::new().row().width(800.0).height(100.0), &[inner]);
+
+    engine.compute(root, 1000.0, 600.0);
+
+    assert_eq!(engine.layout(inner).size.width, 200.0);
+}
+
+#[test]
+fn max_width_does_not_force_growth() {
+    // max_width is a clamp, not a target — a fixed-width child stays at its
+    // declared width even when the clamp is larger.
+    let mut engine = LayoutEngine::new();
+    let inner = engine.add_leaf(FlexStyle::new().width(120.0).max_width(400.0).height(20.0));
+    let root = engine.add_container(FlexStyle::new().row().width(800.0).height(100.0), &[inner]);
+
+    engine.compute(root, 1000.0, 600.0);
+
+    assert_eq!(engine.layout(inner).size.width, 120.0);
+}

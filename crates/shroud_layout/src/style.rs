@@ -81,6 +81,22 @@ impl FlexStyle {
         self
     }
 
+    /// Maximum width in pixels. Acts as a clamp: the node grows up to this
+    /// width and no further, even when its parent offers more space. Useful
+    /// for typography (`max_width(640.0)` for readable line length) and for
+    /// constraining a centered card on a wide window (Tailwind `max-w-md` ≈
+    /// 448 px).
+    pub fn max_width(mut self, px: f32) -> Self {
+        self.style.max_size.width = length(px);
+        self
+    }
+
+    /// Maximum height in pixels.
+    pub fn max_height(mut self, px: f32) -> Self {
+        self.style.max_size.height = length(px);
+        self
+    }
+
     /// Uniform padding on all sides.
     pub fn padding(mut self, px: f32) -> Self {
         let val = length(px);
@@ -142,7 +158,20 @@ impl FlexStyle {
         self.align_items(AlignItems::Center)
     }
 
-    /// Center items on both axes.
+    /// Center items on the main axis only (column → vertical, row →
+    /// horizontal). Unlike [`Self::center`], this leaves cross-axis alignment
+    /// at the default `Stretch`, so children retain their natural width in a
+    /// column. Use this when you want vertical centering without collapsing
+    /// children to min-content.
+    pub fn justify_center(self) -> Self {
+        self.justify_content(JustifyContent::Center)
+    }
+
+    /// Center items on both axes. Note that `align_items: Center` shrinks
+    /// each child to its min-content size on the cross axis — for a column
+    /// container, this collapses child width and can cause text to wrap
+    /// per-glyph. Use [`Self::justify_center`] (with explicit child sizing or
+    /// [`Self::max_width`]) when you only want main-axis centering.
     pub fn center(self) -> Self {
         self.align_items(AlignItems::Center)
             .justify_content(JustifyContent::Center)

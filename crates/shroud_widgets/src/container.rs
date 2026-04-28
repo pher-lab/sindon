@@ -97,9 +97,33 @@ impl Container {
         self
     }
 
-    /// Center children on both axes.
+    /// Center children on both axes. See [`FlexStyle::center`] — note that
+    /// this collapses children to min-content on the cross axis. For
+    /// vertical-only centering in a column without collapsing child width,
+    /// use [`Container::justify_center`] instead.
     pub fn center(mut self) -> Self {
         self.style = self.style.center();
+        self
+    }
+
+    /// Center children on the main axis only. In a column container this
+    /// gives vertical centering while leaving children at their natural
+    /// width; pair with [`Container::max_width`] for a centered card layout.
+    pub fn justify_center(mut self) -> Self {
+        self.style = self.style.justify_center();
+        self
+    }
+
+    /// Clamp the container's width. Combined with `width_full()` this yields
+    /// the common "fluid up to N px" pattern (Tailwind `max-w-md` etc.).
+    pub fn max_width(mut self, px: f32) -> Self {
+        self.style = self.style.max_width(px);
+        self
+    }
+
+    /// Clamp the container's height.
+    pub fn max_height(mut self, px: f32) -> Self {
+        self.style = self.style.max_height(px);
         self
     }
 
