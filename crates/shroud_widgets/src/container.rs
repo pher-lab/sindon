@@ -114,6 +114,16 @@ impl Container {
         self
     }
 
+    /// Center children on the cross axis only. In a column container this
+    /// gives horizontal centering. Note the same caveat as [`Container::center`]:
+    /// children without explicit cross-axis sizing collapse to min-content,
+    /// so combine with [`Container::max_width`] (which acts as a size hint
+    /// when set together with `width_full`) or an explicit child width.
+    pub fn align_center(mut self) -> Self {
+        self.style = self.style.align_center();
+        self
+    }
+
     /// Clamp the container's width. Combined with `width_full()` this yields
     /// the common "fluid up to N px" pattern (Tailwind `max-w-md` etc.).
     pub fn max_width(mut self, px: f32) -> Self {

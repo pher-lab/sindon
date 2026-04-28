@@ -181,32 +181,39 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         }
     }
 
-    // NOTE: `.center()` would set both `align_items: Center` and
-    // `justify_content: Center`. The former shrinks each child to its
-    // min-content width (~1 char), which makes cosmic-text wrap at every
-    // glyph. So we leave the default `align_items: Stretch` and accept a
-    // top-aligned lock screen for the spike. A real lock UI wants vertical
-    // centering without horizontal min-content collapse — that needs either
-    // explicit child widths (`max-w-md` analogue, currently missing) or a
-    // separate `justify_center_only` helper.
+    // Centered card layout. Outer container vertically centers via
+    // `justify_center` (main axis only — leaves cross axis at Stretch so
+    // children are not collapsed to min-content). The inner card declares
+    // `width_full().max_width(448)` so it stays readable on wide windows
+    // and fluid on narrow ones, mirroring Tailwind's `w-full max-w-md`.
     let root = tree.set_root(
         Container::column()
             .width_full()
             .height_full()
-            .padding(48.0)
+            .padding(24.0)
+            .justify_center()
+            .align_center(),
+    );
+
+    let card = tree.add_child(
+        root,
+        Container::column()
+            .width_full()
+            .max_width(448.0)
+            .padding(32.0)
             .gap(16.0),
     );
 
-    tree.add_child(root, TextWidget::new("Knot").font_size(40.0));
-    tree.add_child(root, TextWidget::new("A knot only you can untie."));
+    tree.add_child(card, TextWidget::new("Knot").font_size(40.0));
+    tree.add_child(card, TextWidget::new("A knot only you can untie."));
     tree.add_child(
-        root,
+        card,
         TextWidget::new(format!("Master password (hint: {}):", DEMO_PASSWORD)),
     );
 
     let unlock_state = Rc::clone(&state);
     tree.add_child(
-        root,
+        card,
         SecureInput::new()
             .placeholder("Enter master password, press Enter to unlock")
             .on_submit(move |master, ctx| {
@@ -221,7 +228,7 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
 
     let status_state = Rc::clone(&state);
     tree.add_child(
-        root,
+        card,
         TextWidget::reactive(move || match &status_state.borrow().phase {
             AppPhase::Locked => "Locked.".into(),
             AppPhase::Error(e) => format!("Locked \u{2014} {}", e),
