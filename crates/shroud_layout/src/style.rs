@@ -21,13 +21,26 @@ impl FlexStyle {
         }
     }
 
-    /// Column direction (vertical stacking).
+    /// Column direction (vertical stacking). Cross axis is horizontal.
+    ///
+    /// Default cross-axis alignment is `Stretch`, which makes children fill
+    /// the column's width. Use [`Self::align_center`] for horizontal centering
+    /// (note: this collapses children to min-content width — see
+    /// [`Self::align_center`] for the workaround).
     pub fn column(mut self) -> Self {
         self.style.flex_direction = FlexDirection::Column;
         self
     }
 
-    /// Row direction (horizontal, default).
+    /// Row direction (horizontal, default). Cross axis is vertical.
+    ///
+    /// Default cross-axis alignment is `Stretch`, which makes every child
+    /// expand to the height of the tallest sibling — fine for equal-height
+    /// cards, but visually awkward when mixing different-height widgets in a
+    /// header (e.g. a 28pt title next to a button: the button's box stretches
+    /// to title height and its label appears off-center). Apply
+    /// [`Self::align_center`] on the row to size each child to its own height
+    /// and vertically center them instead.
     pub fn row(mut self) -> Self {
         self.style.flex_direction = FlexDirection::Row;
         self

@@ -920,6 +920,80 @@ fn scroll_view_hit_test_respects_scroll_offset() {
     assert!(clicked.get(), "scrolled button should receive click");
 }
 
+#[test]
+fn scroll_view_reserves_gutter_for_scrollbar() {
+    // With `show_scrollbar` on, the ScrollView's content area must stop short
+    // of the right edge so children (especially `width_full` ones with
+    // unbreakable text) do not draw under the scrollbar track. Concretely,
+    // a 200 px wide ScrollView with a `width_full` child should give the
+    // child a width strictly less than 200.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        ScrollView::new()
+            .width(200.0)
+            .height(300.0)
+            .content_height(1000.0),
+    );
+    let child = tree.add_child(root, Container::column().width_full().height(50.0));
+    tree.compute_layout(400.0, 400.0);
+
+    let child_rect = tree.layout_rect(child);
+    assert!(
+        child_rect.size.width < 200.0,
+        "child should not span full ScrollView width when scrollbar is reserved (got {})",
+        child_rect.size.width
+    );
+    // Sanity bound: gutter is small (≤ ~16 px), so the child should still
+    // claim most of the viewport.
+    assert!(child_rect.size.width >= 180.0);
+}
+
+#[test]
+fn scroll_view_no_gutter_when_scrollbar_hidden() {
+    // With `show_scrollbar(false)` the gutter is not reserved; a `width_full`
+    // child should reach the full viewport width.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        ScrollView::new()
+            .width(200.0)
+            .height(300.0)
+            .content_height(1000.0)
+            .show_scrollbar(false),
+    );
+    let child = tree.add_child(root, Container::column().width_full().height(50.0));
+    tree.compute_layout(400.0, 400.0);
+
+    assert_eq!(tree.layout_rect(child).size.width, 200.0);
+}
+
+#[test]
+fn scroll_view_gutter_composes_with_user_padding() {
+    // Caller-supplied padding still applies on the left, top, bottom; the
+    // right side gets `padding + gutter`. A `width_full` child in a 200 px
+    // viewport with 10 px user padding sees `200 - 10 (left) - (10 + gutter)
+    // (right)` of horizontal space — strictly less than `200 - 20`.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        ScrollView::new()
+            .width(200.0)
+            .height(300.0)
+            .content_height(1000.0)
+            .padding(10.0),
+    );
+    let child = tree.add_child(root, Container::column().width_full().height(50.0));
+    tree.compute_layout(400.0, 400.0);
+
+    let child_rect = tree.layout_rect(child);
+    assert!(
+        child_rect.size.width < 180.0,
+        "user padding on left+right plus right-side gutter should make child width < 180, got {}",
+        child_rect.size.width
+    );
+    // Left edge sits at user padding (10 px), unchanged by the gutter.
+    let root_rect = tree.layout_rect(root);
+    assert_eq!(child_rect.origin.x, root_rect.origin.x + 10.0);
+}
+
 // ── Reactive TextWidget ───────────────────────────────────────────
 
 #[test]

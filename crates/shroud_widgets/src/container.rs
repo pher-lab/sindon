@@ -22,7 +22,9 @@ pub struct Container {
 }
 
 impl Container {
-    /// Create a column container (vertical stacking).
+    /// Create a column container (vertical stacking). Cross axis is horizontal;
+    /// children stretch to the column's full width by default — see
+    /// [`FlexStyle::column`] for the cross-axis story.
     pub fn column() -> Self {
         Self {
             style: FlexStyle::new().column(),
@@ -31,7 +33,12 @@ impl Container {
         }
     }
 
-    /// Create a row container (horizontal stacking).
+    /// Create a row container (horizontal stacking). Cross axis is vertical;
+    /// the default `Stretch` makes every child grow to the tallest sibling's
+    /// height. For a header that mixes different-height widgets (e.g. a large
+    /// title next to a button), chain [`Self::align_center`] to size each
+    /// child to its own height and vertically center them — the button's
+    /// label will then sit on the same visual baseline as the title.
     pub fn row() -> Self {
         Self {
             style: FlexStyle::new().row(),

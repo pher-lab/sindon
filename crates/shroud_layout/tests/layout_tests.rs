@@ -225,3 +225,38 @@ fn max_width_does_not_force_growth() {
 
     assert_eq!(engine.layout(inner).size.width, 120.0);
 }
+
+#[test]
+fn row_align_center_keeps_children_at_natural_height() {
+    // Row-direction container with two children of different heights. Default
+    // cross-axis alignment (Stretch) would make the shorter child grow to the
+    // taller one's height — visually awkward for a header (button stretching
+    // to title height). `align_center` should:
+    //   1. size each child to its own declared height
+    //   2. center them vertically on the row
+    let mut engine = LayoutEngine::new();
+    let title = engine.add_leaf(FlexStyle::new().width(120.0).height(40.0));
+    let button = engine.add_leaf(FlexStyle::new().width(80.0).height(20.0));
+    let header = engine.add_container(
+        FlexStyle::new()
+            .row()
+            .width(400.0)
+            .height(60.0)
+            .align_center(),
+        &[title, button],
+    );
+
+    engine.compute(header, 800.0, 200.0);
+
+    let title_rect = engine.layout(title);
+    let button_rect = engine.layout(button);
+
+    // Heights stay at the declared values — Stretch did not kick in.
+    assert_eq!(title_rect.size.height, 40.0);
+    assert_eq!(button_rect.size.height, 20.0);
+
+    // Both children sit centered on the 60 px row: title (40 h) at y=10,
+    // button (20 h) at y=20.
+    assert_eq!(title_rect.origin.y, 10.0);
+    assert_eq!(button_rect.origin.y, 20.0);
+}

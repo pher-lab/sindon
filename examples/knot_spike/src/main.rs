@@ -19,8 +19,8 @@ use std::rc::Rc;
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
-    aead::{rand_core::RngCore, Aead, KeyInit, OsRng},
     XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit, OsRng, rand_core::RngCore},
 };
 use zeroize::Zeroizing;
 
@@ -249,8 +249,11 @@ fn build_note_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .gap(12.0),
     );
 
-    // Header: title + Lock button.
-    let header = tree.add_child(root, Container::row().gap(12.0));
+    // Header: title + Lock button. `align_center` sizes each child to its
+    // own height and centers them on the cross (vertical) axis — without it,
+    // the row's default `Stretch` would extend the button to the title's
+    // 28 pt height and the label would visually drift below the title baseline.
+    let header = tree.add_child(root, Container::row().gap(12.0).align_center());
 
     let title_state = Rc::clone(&state);
     tree.add_child(

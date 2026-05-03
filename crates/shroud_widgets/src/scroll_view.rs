@@ -28,6 +28,11 @@ pub struct ScrollView {
     content_height: f32,
     style: FlexStyle,
     show_scrollbar: bool,
+    /// User-supplied uniform padding (set via [`Self::padding`]). Stored
+    /// separately so [`Widget::style`] can re-emit padding with the scrollbar
+    /// gutter added to the right side without needing to read padding back
+    /// out of Taffy's opaque `LengthPercentage`.
+    base_padding: f32,
     // Colors (None = theme fallback)
     background: Option<Color>,
     track_color: Option<Color>,
@@ -42,6 +47,7 @@ impl ScrollView {
             content_height: 0.0,
             style: FlexStyle::new().column(),
             show_scrollbar: true,
+            base_padding: 0.0,
             background: None,
             track_color: None,
             thumb_color: None,
@@ -82,9 +88,11 @@ impl ScrollView {
         self
     }
 
-    /// Set uniform padding on the viewport.
+    /// Set uniform padding on the viewport. The right side may receive
+    /// additional padding for the scrollbar gutter — see [`Widget::style`].
     pub fn padding(mut self, px: f32) -> Self {
         self.style = self.style.padding(px);
+        self.base_padding = px;
         self
     }
 
@@ -135,10 +143,33 @@ const SCROLLBAR_WIDTH: f32 = 6.0;
 const SCROLLBAR_INSET: f32 = 2.0;
 /// Minimum height of the scrollbar thumb.
 const SCROLLBAR_THUMB_MIN: f32 = 16.0;
+/// Total horizontal space reserved on the right for the scrollbar.
+///
+/// Equals scrollbar width + edge inset + a small breathing margin so children
+/// do not visually crowd the track. The reservation is unconditional whenever
+/// `show_scrollbar` is true (cf. CSS `scrollbar-gutter: stable`) — it avoids
+/// horizontal reflow at the moment content starts overflowing and is the fix
+/// for the bug where unbreakable strings (e.g. long `AAAAAA…`) drew under the
+/// scrollbar track.
+const SCROLLBAR_GUTTER: f32 = SCROLLBAR_WIDTH + SCROLLBAR_INSET + 4.0;
 
 impl Widget for ScrollView {
+    /// Returns the layout style with the scrollbar gutter folded into the
+    /// right padding when [`Self::show_scrollbar`] is on. Children laid out
+    /// inside this padded box never overlap the scrollbar track, even when
+    /// they declare `width_full` and the content overflows. Cleared by
+    /// `show_scrollbar(false)`.
     fn style(&self) -> FlexStyle {
-        self.style.clone()
+        if self.show_scrollbar {
+            self.style.clone().padding_trbl(
+                self.base_padding,
+                self.base_padding + SCROLLBAR_GUTTER,
+                self.base_padding,
+                self.base_padding,
+            )
+        } else {
+            self.style.clone()
+        }
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
