@@ -138,6 +138,13 @@ pub(crate) enum TreeCommand {
         parent: usize,
         build: RebuildBuilder,
     },
+    /// Programmatic focus change. `Some(idx)` focuses that widget,
+    /// `None` clears focus. Dispatched through `WidgetTree::focus`, so
+    /// `FocusLost`/`FocusGained` fire on the affected widgets and any
+    /// commands those handlers enqueue are drained on the next pass.
+    Focus {
+        target: Option<usize>,
+    },
 }
 
 /// Keyboard modifier state at the time of an event.
@@ -255,6 +262,24 @@ impl EventContext {
             parent,
             build: Box::new(build),
         });
+    }
+
+    /// Queue a focus change to land after the current dispatch finishes.
+    ///
+    /// `idx` becomes the new focused widget. The previously focused widget
+    /// (if any) receives `FocusLost`; `idx` receives `FocusGained` — same
+    /// path as Tab routing and click-to-focus.
+    ///
+    /// Silently dropped if `idx` is tombstoned by the time commands drain.
+    /// Use [`Self::blur`] to clear focus instead.
+    pub fn focus(&mut self, idx: usize) {
+        self.commands.push(TreeCommand::Focus { target: Some(idx) });
+    }
+
+    /// Queue a focus clear. The currently focused widget (if any) receives
+    /// `FocusLost`; no widget gains focus afterwards.
+    pub fn blur(&mut self) {
+        self.commands.push(TreeCommand::Focus { target: None });
     }
 
     /// Drain queued commands. Intended for `WidgetTree` to call after a

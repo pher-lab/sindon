@@ -212,7 +212,7 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     );
 
     let unlock_state = Rc::clone(&state);
-    tree.add_child(
+    let input_idx = tree.add_child(
         card,
         SecureInput::new()
             .placeholder("Enter master password, press Enter to unlock")
@@ -225,6 +225,12 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
                 }
             }),
     );
+    // Auto-focus the master-password field so the user can type immediately
+    // — Knot React parity (`<input autoFocus>`) plus the same parity after
+    // bouncing back from the note screen via Lock. The build path has no
+    // EventContext, so the focus has to be queued and applied by the event
+    // loop on the first redraw.
+    tree.focus_initially(input_idx);
 
     let status_state = Rc::clone(&state);
     tree.add_child(

@@ -53,6 +53,12 @@ pub struct WidgetTree {
     /// [`Self::advance_focus`] (Tab/Shift+Tab) and invalidated by
     /// [`Self::remove`] so a removed widget never stays focused.
     focus: FocusManager,
+    /// Deferred initial focus queued by [`Self::focus_initially`]. Consumed
+    /// by [`Self::flush_pending_focus`] — typically called once per redraw
+    /// by the event loop. One-shot: the field is taken and cleared on flush,
+    /// so re-arming requires another `focus_initially` call (e.g. inside a
+    /// `replace_screen` build closure).
+    pending_initial_focus: Option<usize>,
 }
 
 impl WidgetTree {
@@ -63,7 +69,47 @@ impl WidgetTree {
             layout: LayoutEngine::new(),
             hovered: None,
             focus: FocusManager::new(),
+            pending_initial_focus: None,
         }
+    }
+
+    /// Queue a focus target to apply on the next [`Self::flush_pending_focus`].
+    ///
+    /// Built for the boot path and screen transitions: callsites that build
+    /// the widget hierarchy do not have an [`EventContext`] and so cannot
+    /// dispatch `FocusGained` directly via [`Self::focus`]. They call
+    /// `focus_initially(idx)` after the widget is in the tree; the event
+    /// loop applies it before the first paint of the new tree.
+    ///
+    /// One-shot — overwrites any prior pending target. After flush, the
+    /// pending field is cleared and a subsequent call is needed to re-arm
+    /// (e.g. inside a `replace_screen` build closure that wants to focus
+    /// the first input on the new screen).
+    pub fn focus_initially(&mut self, idx: usize) {
+        self.pending_initial_focus = Some(idx);
+    }
+
+    /// Apply any pending initial focus from [`Self::focus_initially`].
+    ///
+    /// Called by the event loop at the top of each redraw. Cheap when
+    /// nothing is pending (single field check). When a target is pending,
+    /// dispatches `FocusLost`/`FocusGained` through [`Self::focus`], and
+    /// drains any commands those handlers enqueue so the focus change
+    /// settles before paint.
+    pub fn flush_pending_focus(&mut self, event_ctx: &mut EventContext) {
+        let Some(target) = self.pending_initial_focus.take() else {
+            return;
+        };
+        // Race: target tombstoned between `focus_initially` and flush. Skip
+        // the focus call entirely — `WidgetTree::focus` would still update
+        // the FocusManager pointer to a tombstoned slot otherwise (it only
+        // guards the FocusGained dispatch, not the pointer set). One-shot
+        // semantics still hold because `take()` cleared the pending field.
+        if !self.contains(target) {
+            return;
+        }
+        self.focus(Some(target), event_ctx);
+        self.drain_commands(event_ctx);
     }
 
     /// Add a widget as the root of the tree.
@@ -248,9 +294,12 @@ impl WidgetTree {
 
     /// Apply queued tree commands from an event context.
     ///
-    /// Called by [`Self::dispatch_event`] after the walk returns. Kept
-    /// crate-private because the command enum itself is internal.
-    fn apply_commands(&mut self, commands: Vec<TreeCommand>) {
+    /// Called by [`Self::dispatch_event`] (via [`Self::drain_commands`])
+    /// after the walk returns. Kept crate-private because the command enum
+    /// itself is internal. `event_ctx` is threaded through because
+    /// `TreeCommand::Focus` re-enters [`Self::focus`], which dispatches
+    /// `FocusLost`/`FocusGained`.
+    fn apply_commands(&mut self, commands: Vec<TreeCommand>, event_ctx: &mut EventContext) {
         for cmd in commands {
             match cmd {
                 TreeCommand::AddChild { parent, widget } => {
@@ -290,7 +339,54 @@ impl WidgetTree {
                     }
                     build(self, parent);
                 }
+                TreeCommand::Focus { target } => {
+                    // Skip the call entirely if the target was tombstoned
+                    // between `EventContext::focus(idx)` and this drain —
+                    // `WidgetTree::focus` only guards the FocusGained
+                    // dispatch, not the FocusManager pointer set. `None`
+                    // (= blur) always passes through. FocusGained handlers
+                    // may enqueue further commands; `drain_commands` keeps
+                    // draining until the queue settles.
+                    if let Some(idx) = target {
+                        if !self.contains(idx) {
+                            continue;
+                        }
+                    }
+                    self.focus(target, event_ctx);
+                }
             }
+        }
+    }
+
+    /// Drain the command queue until empty, applying each batch.
+    ///
+    /// Handlers (notably `FocusGained`/`FocusLost` via `TreeCommand::Focus`,
+    /// and any user code that enqueues commands inside a screen-rebuild
+    /// closure) can themselves enqueue more commands. The drain loop keeps
+    /// going until no new commands arrive or a hard cap fires — the cap
+    /// exists only as a safety belt against pathological cycles; well-formed
+    /// handlers settle in 1–2 iterations.
+    fn drain_commands(&mut self, event_ctx: &mut EventContext) {
+        const MAX_ITERATIONS: usize = 64;
+        let mut iterations = 0;
+        loop {
+            let commands = event_ctx.take_commands();
+            if commands.is_empty() {
+                return;
+            }
+            iterations += 1;
+            // Cycle protection. Debug build trips the assert so tests catch
+            // it; release build silently drops the residual queue. No `log`
+            // dep here — keeps the widget crate's deps minimal.
+            debug_assert!(
+                iterations <= MAX_ITERATIONS,
+                "WidgetTree::drain_commands exceeded {} iterations \u{2014} likely a focus/event cycle in a handler",
+                MAX_ITERATIONS,
+            );
+            if iterations > MAX_ITERATIONS {
+                return;
+            }
+            self.apply_commands(commands, event_ctx);
         }
     }
 
@@ -492,13 +588,11 @@ impl WidgetTree {
             }
         };
 
-        // Drain tree-mutation commands queued by handlers. One pass is
-        // enough — `apply_commands` itself does not invoke widget `event`
-        // methods, so it cannot enqueue more commands.
-        let commands = event_ctx.take_commands();
-        if !commands.is_empty() {
-            self.apply_commands(commands);
-        }
+        // Drain tree-mutation commands queued by handlers. Loops because
+        // `TreeCommand::Focus` re-enters `Widget::event` (FocusLost/Gained)
+        // and those handlers can themselves enqueue more commands —
+        // `drain_commands` keeps going until the queue settles.
+        self.drain_commands(event_ctx);
 
         result
     }

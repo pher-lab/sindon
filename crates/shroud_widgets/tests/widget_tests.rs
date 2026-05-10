@@ -3388,3 +3388,144 @@ fn focus_ring_paints_for_checkbox() {
     let n = ctx.rects.iter().filter(|r| r.color == ring).count();
     assert_eq!(n, 4);
 }
+
+// ── Knot gap 3: focus_initially + EventContext::focus ─────────────
+
+#[test]
+fn focus_initially_dispatches_on_flush() {
+    // The build path has no EventContext, so it can only enqueue a
+    // pending focus. The event loop calls flush_pending_focus before
+    // first paint — that's where FocusGained must actually fire.
+    let (mut tree, events, _a, b, _c) = three_probe_tree();
+
+    tree.focus_initially(b);
+    assert_eq!(
+        events.borrow().len(),
+        0,
+        "focus_initially must not dispatch — only enqueue"
+    );
+
+    let mut ctx = EventContext::new();
+    tree.flush_pending_focus(&mut ctx);
+
+    assert_eq!(tree.focused(), Some(b));
+    assert_eq!(*events.borrow(), vec!["b:gained".to_string()]);
+}
+
+#[test]
+fn flush_pending_focus_is_one_shot() {
+    // After the pending target is consumed, a second flush is a no-op.
+    // Catches a regression where the field stays armed and refires every
+    // redraw (would re-fire FocusGained on every paint frame).
+    let (mut tree, events, a, _b, _c) = three_probe_tree();
+
+    tree.focus_initially(a);
+    let mut ctx = EventContext::new();
+    tree.flush_pending_focus(&mut ctx);
+    events.borrow_mut().clear();
+
+    tree.flush_pending_focus(&mut ctx);
+    assert!(events.borrow().is_empty());
+    // Focus stays put — flush is a no-op, not a clear.
+    assert_eq!(tree.focused(), Some(a));
+}
+
+#[test]
+fn flush_pending_focus_no_op_when_unset() {
+    // Cheapest path: nothing pending. Must not touch focus or fire any
+    // event. Event loop calls this on every redraw, so the no-op path
+    // has to stay free.
+    let (mut tree, events, _a, _b, _c) = three_probe_tree();
+    let mut ctx = EventContext::new();
+    tree.flush_pending_focus(&mut ctx);
+    assert_eq!(tree.focused(), None);
+    assert!(events.borrow().is_empty());
+}
+
+#[test]
+fn focus_initially_overwrites_prior_pending() {
+    // Two `focus_initially` calls before any flush — the second one
+    // wins. Models the common case: a build closure that conditionally
+    // re-targets focus before returning.
+    let (mut tree, events, a, _b, c) = three_probe_tree();
+
+    tree.focus_initially(a);
+    tree.focus_initially(c);
+    let mut ctx = EventContext::new();
+    tree.flush_pending_focus(&mut ctx);
+
+    assert_eq!(tree.focused(), Some(c));
+    assert_eq!(*events.borrow(), vec!["c:gained".to_string()]);
+}
+
+#[test]
+fn focus_initially_skips_silently_when_target_tombstoned() {
+    // Race: build closure stashes index, then a different command
+    // tombstones it before flush. Must not panic; pending field still
+    // clears (one-shot semantics) so the next redraw is clean.
+    let (mut tree, events, a, _b, _c) = three_probe_tree();
+
+    tree.focus_initially(a);
+    tree.remove(a);
+
+    let mut ctx = EventContext::new();
+    tree.flush_pending_focus(&mut ctx);
+
+    assert_eq!(tree.focused(), None);
+    // Removed widget cannot receive FocusGained.
+    assert!(events.borrow().is_empty());
+    // Re-flush also a no-op — the pending field was cleared even though
+    // the dispatch skipped.
+    tree.flush_pending_focus(&mut ctx);
+    assert!(events.borrow().is_empty());
+}
+
+#[test]
+fn event_context_focus_command_dispatches_on_drain() {
+    // EventContext::focus enqueues TreeCommand::Focus; the drain loop
+    // after dispatch must apply it via tree.focus, firing FocusGained
+    // on the new target.
+    let (mut tree, events, _a, b, _c) = three_probe_tree();
+
+    let mut ctx = EventContext::new();
+    ctx.focus(b);
+    // Empty MouseMove dispatch — the only purpose is to trigger the
+    // command-drain at the end of dispatch_event.
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: shroud_core::Point::new(-1.0, -1.0),
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(tree.focused(), Some(b));
+    assert_eq!(*events.borrow(), vec!["b:gained".to_string()]);
+}
+
+#[test]
+fn event_context_blur_clears_focus_via_drain() {
+    let (mut tree, events, a, _b, _c) = three_probe_tree();
+
+    // Seed focus via the deferred path so we exercise the same plumbing.
+    let mut ctx = EventContext::new();
+    ctx.focus(a);
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: shroud_core::Point::new(-1.0, -1.0),
+        },
+        &mut ctx,
+    );
+    assert_eq!(tree.focused(), Some(a));
+    events.borrow_mut().clear();
+
+    ctx.blur();
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: shroud_core::Point::new(-1.0, -1.0),
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(tree.focused(), None);
+    assert_eq!(*events.borrow(), vec!["a:lost".to_string()]);
+}

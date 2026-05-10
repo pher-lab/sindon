@@ -594,6 +594,14 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 let tree = self.tree.as_mut().unwrap();
                 let paint_ctx = self.paint_ctx.as_mut().unwrap();
 
+                // Apply any deferred initial focus before layout so widget
+                // state set by FocusGained (cursor visibility, focus ring)
+                // is reflected in this very first paint of the new tree.
+                // Cheap when nothing is pending; covers both the boot path
+                // and screen transitions whose build closure called
+                // `tree.focus_initially(...)`.
+                tree.flush_pending_focus(&mut self.event_ctx);
+
                 // Layout pass — widgets report intrinsic size via their
                 // `measure()` so `.center()` / gap / grow work without a
                 // fixed-width wrapper around leaves.
