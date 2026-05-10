@@ -75,8 +75,18 @@ impl PaintContext {
         self.clip_stack.last().copied()
     }
 
-    /// Draw a filled rectangle.
+    /// Draw a filled rectangle with sharp corners.
     pub fn fill_rect(&mut self, rect: Rect, color: Color) {
+        self.fill_rect_rounded(rect, color, 0.0);
+    }
+
+    /// Draw a filled rectangle with rounded corners.
+    ///
+    /// `radius` is in pixels. Values `<= 0.0` produce sharp corners and
+    /// short-circuit the SDF in the rect shader. The radius is clamped
+    /// downstream to half of the smaller side, so callers don't need to
+    /// validate against the rect's dimensions.
+    pub fn fill_rect_rounded(&mut self, rect: Rect, color: Color, radius: f32) {
         let (ox, oy) = self.current_offset();
         self.rects.push(DrawRect {
             x: rect.origin.x + ox,
@@ -84,6 +94,7 @@ impl PaintContext {
             width: rect.size.width,
             height: rect.size.height,
             color,
+            radius,
             clip_rect: self.current_clip(),
         });
     }

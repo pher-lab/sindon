@@ -7,13 +7,23 @@ use shroud_text::GlyphImage;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-// ── Rect vertex (position + color) ───────────────────────────────
+// ── Rect vertex (position + color + SDF data for rounded corners) ─
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 2],
     color: [f32; 4],
+    /// Per-vertex offset from the rect center, in pixels. Linearly
+    /// interpolated to give the fragment shader its position relative
+    /// to the rect for SDF evaluation.
+    local_pos: [f32; 2],
+    /// Half-width / half-height of the rect in pixels. Same value at
+    /// every vertex of a given rect — interpolated `flat` so the
+    /// fragment sees the rect's true extent.
+    half_size: [f32; 2],
+    /// Corner radius in pixels. `0.0` short-circuits the SDF in fs_main.
+    radius: f32,
 }
 
 impl Vertex {
@@ -30,6 +40,21 @@ impl Vertex {
                 offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
                 shader_location: 1,
                 format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: std::mem::size_of::<[f32; 10]>() as wgpu::BufferAddress,
+                shader_location: 4,
+                format: wgpu::VertexFormat::Float32,
             },
         ],
     };
@@ -86,12 +111,18 @@ pub struct DrawGlyph {
 }
 
 /// A colored rectangle to draw.
+///
+/// `radius` enables rounded corners via an SDF in the rect fragment shader.
+/// `0.0` (the default for `fill_rect` callers) gives sharp corners and
+/// short-circuits the SDF math. The radius is clamped per-fragment to half
+/// of the smaller side so callers don't need to validate it themselves.
 pub struct DrawRect {
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
     pub color: Color,
+    pub radius: f32,
     /// Scissor region in screen pixels; `None` means no clipping.
     pub clip_rect: Option<Rect>,
 }
@@ -627,22 +658,41 @@ impl Renderer {
             let y1 = 1.0 - ((rect.y + rect.height) / h) * 2.0;
 
             let c = rect.color.to_array();
+            let hw = rect.width * 0.5;
+            let hh = rect.height * 0.5;
+            // Clamp radius to half the shorter side; the SDF degenerates
+            // (length(max(q, 0)) becomes negative inside the shrunk box) if
+            // r exceeds min(hw, hh), which would produce a black corner.
+            let r = rect.radius.max(0.0).min(hw.min(hh));
+            let half = [hw, hh];
 
             vertices.push(Vertex {
                 position: [x0, y0],
                 color: c,
+                local_pos: [-hw, -hh],
+                half_size: half,
+                radius: r,
             });
             vertices.push(Vertex {
                 position: [x1, y0],
                 color: c,
+                local_pos: [hw, -hh],
+                half_size: half,
+                radius: r,
             });
             vertices.push(Vertex {
                 position: [x1, y1],
                 color: c,
+                local_pos: [hw, hh],
+                half_size: half,
+                radius: r,
             });
             vertices.push(Vertex {
                 position: [x0, y1],
                 color: c,
+                local_pos: [-hw, hh],
+                half_size: half,
+                radius: r,
             });
 
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -773,11 +823,17 @@ const RECT_SHADER: &str = r#"
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) local_pos: vec2<f32>,
+    @location(3) half_size: vec2<f32>,
+    @location(4) radius: f32,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) local_pos: vec2<f32>,
+    @location(2) @interpolate(flat) half_size: vec2<f32>,
+    @location(3) @interpolate(flat) radius: f32,
 };
 
 @vertex
@@ -785,12 +841,29 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = vec4<f32>(in.position, 0.0, 1.0);
     out.color = in.color;
+    out.local_pos = in.local_pos;
+    out.half_size = in.half_size;
+    out.radius = in.radius;
     return out;
+}
+
+// Standard 2D rounded-rect signed distance function (Inigo Quilez).
+// Returns negative inside, positive outside, zero on the edge.
+fn sdf_rounded_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
+    let q = abs(p) - (half - vec2<f32>(r));
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+    if (in.radius <= 0.0) {
+        return in.color;
+    }
+    let d = sdf_rounded_rect(in.local_pos, in.half_size, in.radius);
+    // Antialiased edge: 1 px transition. clamp(0.5 - d) gives full coverage
+    // for d <= -0.5, full transparency for d >= 0.5, smooth in between.
+    let alpha = clamp(0.5 - d, 0.0, 1.0);
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }
 "#;
 

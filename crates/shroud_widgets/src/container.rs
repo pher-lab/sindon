@@ -18,6 +18,7 @@ use shroud_reactive::Reactive;
 pub struct Container {
     style: FlexStyle,
     background: Option<Reactive<Color>>,
+    radius: f32,
     visible: Reactive<bool>,
 }
 
@@ -29,6 +30,7 @@ impl Container {
         Self {
             style: FlexStyle::new().column(),
             background: None,
+            radius: 0.0,
             visible: Reactive::Static(true),
         }
     }
@@ -43,6 +45,7 @@ impl Container {
         Self {
             style: FlexStyle::new().row(),
             background: None,
+            radius: 0.0,
             visible: Reactive::Static(true),
         }
     }
@@ -65,6 +68,16 @@ impl Container {
     /// `Reactive::derive(...)`.
     pub fn background(mut self, color: impl Into<Reactive<Color>>) -> Self {
         self.background = Some(color.into());
+        self
+    }
+
+    /// Round the corners of the background fill by `px`. No effect when no
+    /// `background` is set, since rounding only applies to the painted rect.
+    /// Negative values are clamped to `0.0`; values larger than half of the
+    /// shorter side are clamped per-frame in the renderer (no need for the
+    /// caller to know the final size).
+    pub fn radius(mut self, px: f32) -> Self {
+        self.radius = px.max(0.0);
         self
     }
 
@@ -162,7 +175,7 @@ impl Widget for Container {
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
         if let Some(bg) = &self.background {
-            ctx.fill_rect(layout, bg.get());
+            ctx.fill_rect_rounded(layout, bg.get(), self.radius);
         }
     }
 }

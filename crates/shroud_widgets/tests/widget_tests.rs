@@ -201,6 +201,107 @@ fn button_builder() {
         .text_color(Color::WHITE);
 }
 
+// ── Rounded corners ───────────────────────────────────────────────
+
+#[test]
+fn fill_rect_emits_zero_radius() {
+    use shroud_core::Rect;
+    let mut ctx = PaintContext::default();
+    ctx.fill_rect(Rect::new(0.0, 0.0, 10.0, 10.0), Color::WHITE);
+    assert_eq!(ctx.rects.len(), 1);
+    assert_eq!(
+        ctx.rects[0].radius, 0.0,
+        "fill_rect must default to sharp corners (radius=0)"
+    );
+}
+
+#[test]
+fn fill_rect_rounded_carries_radius() {
+    use shroud_core::Rect;
+    let mut ctx = PaintContext::default();
+    ctx.fill_rect_rounded(Rect::new(0.0, 0.0, 100.0, 50.0), Color::WHITE, 8.0);
+    assert_eq!(ctx.rects.len(), 1);
+    assert_eq!(ctx.rects[0].radius, 8.0);
+}
+
+#[test]
+fn container_radius_propagates_to_drawrect() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::column()
+            .width(120.0)
+            .height(80.0)
+            .background(Color::rgb(0.2, 0.4, 0.8))
+            .radius(12.0),
+    );
+    let _ = root;
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(ctx.rects.len(), 1);
+    assert_eq!(ctx.rects[0].radius, 12.0);
+}
+
+#[test]
+fn container_default_radius_is_zero() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::column()
+            .width(50.0)
+            .height(50.0)
+            .background(Color::WHITE),
+    );
+    let _ = root;
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(ctx.rects.len(), 1);
+    assert_eq!(ctx.rects[0].radius, 0.0);
+}
+
+#[test]
+fn container_negative_radius_clamps_to_zero() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::column()
+            .width(40.0)
+            .height(40.0)
+            .background(Color::WHITE)
+            .radius(-5.0),
+    );
+    let _ = root;
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(ctx.rects[0].radius, 0.0);
+}
+
+#[test]
+fn button_radius_propagates_to_drawrect() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(80.0));
+    tree.add_child(root, Button::new("Click").radius(6.0));
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    // Button paints exactly one bg rect (focus ring is 4 rects, but the
+    // button isn't focused here).
+    assert_eq!(ctx.rects.len(), 1);
+    assert_eq!(ctx.rects[0].radius, 6.0);
+}
+
+#[test]
+fn button_default_radius_is_zero() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(80.0));
+    tree.add_child(root, Button::new("Plain"));
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(ctx.rects.len(), 1);
+    assert_eq!(ctx.rects[0].radius, 0.0);
+}
+
 // ── Theme ────────────────────────────────────────────────────────
 
 #[test]

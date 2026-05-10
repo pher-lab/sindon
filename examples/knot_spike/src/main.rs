@@ -201,7 +201,9 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .width_full()
             .max_width(448.0)
             .padding(32.0)
-            .gap(16.0),
+            .gap(16.0)
+            .background(shroud::core::Color::rgb(0.12, 0.12, 0.18))
+            .radius(16.0),
     );
 
     tree.add_child(card, TextWidget::new("Knot").font_size(40.0));
@@ -274,7 +276,7 @@ fn build_note_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let lock_state = Rc::clone(&state);
     tree.add_child(
         header,
-        Button::new("Lock").on_click(move |ctx| {
+        Button::new("Lock").radius(8.0).on_click(move |ctx| {
             // Drop decrypted body + key first to keep the
             // "secret-in-memory after lock-pressed" window minimal.
             {

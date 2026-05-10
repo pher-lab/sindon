@@ -32,6 +32,7 @@ pub struct Button {
     press_bg: Option<Reactive<Color>>,
     text_color: Option<Reactive<Color>>,
     focus_ring_color: Option<Reactive<Color>>,
+    radius: f32,
     visible: Reactive<bool>,
 }
 
@@ -54,6 +55,7 @@ impl Button {
             press_bg: None,
             text_color: None,
             focus_ring_color: None,
+            radius: 0.0,
             visible: Reactive::Static(true),
         }
     }
@@ -76,6 +78,7 @@ impl Button {
             press_bg: None,
             text_color: None,
             focus_ring_color: None,
+            radius: 0.0,
             visible: Reactive::Static(true),
         }
     }
@@ -129,6 +132,16 @@ impl Button {
     /// `Button`'s color setters.
     pub fn focus_ring_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
         self.focus_ring_color = Some(color.into());
+        self
+    }
+
+    /// Round the button's corners by `px`. Applies to all visual states
+    /// (normal / hover / press) — they share one rect. The focus ring
+    /// stays rectangular for predictability; rounding the ring as well
+    /// would require either a stroked SDF or four arc segments per state.
+    /// Negative values are clamped to `0.0`.
+    pub fn radius(mut self, px: f32) -> Self {
+        self.radius = px.max(0.0);
         self
     }
 
@@ -235,7 +248,7 @@ impl Widget for Button {
         };
 
         // Background
-        ctx.fill_rect(layout, bg);
+        ctx.fill_rect_rounded(layout, bg, self.radius);
 
         // Label text (centered within the button)
         let label = self.label.get();
