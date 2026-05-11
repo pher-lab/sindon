@@ -23,6 +23,14 @@ use shroud_core::{Color, Rect, SecurityLevel};
 use shroud_layout::FlexStyle;
 use shroud_security::SecureString;
 
+/// Default maximum length (in bytes) of a `SecureInput` buffer.
+///
+/// Sized to cover typical passwords, API keys, and master keys without
+/// triggering a heap realloc on every keystroke (which would leak the
+/// previous buffer's bytes onto a freed page). Override per-widget with
+/// [`SecureInput::max_bytes`].
+pub const DEFAULT_SECURE_INPUT_MAX_BYTES: usize = 256;
+
 type SubmitHandler = Box<dyn FnMut(&SecureString, &mut EventContext)>;
 
 /// A secure text input field for passwords and sensitive data.
@@ -48,6 +56,10 @@ pub struct SecureInput {
     /// The secure text content. `RefCell` because [`Widget::paint`] takes
     /// `&self` but may need to clear the buffer when the bound
     /// `ClearTrigger`'s version has changed.
+    ///
+    /// The inner `SecureString` is sized at construction (see
+    /// [`max_bytes`](Self::max_bytes)) and never grows. Keystrokes past
+    /// the cap are dropped silently.
     value: RefCell<SecureString>,
     /// Mask character to display.
     mask_char: char,
@@ -82,10 +94,17 @@ pub struct SecureInput {
 }
 
 impl SecureInput {
-    /// Create a new empty secure input.
+    /// Create a new empty secure input with the default capacity
+    /// ([`DEFAULT_SECURE_INPUT_MAX_BYTES`]). Use
+    /// [`max_bytes`](Self::max_bytes) to override.
     pub fn new() -> Self {
+        Self::with_max_bytes(DEFAULT_SECURE_INPUT_MAX_BYTES)
+    }
+
+    /// Create a new empty secure input with the given byte capacity.
+    pub fn with_max_bytes(max_bytes: usize) -> Self {
         Self {
-            value: RefCell::new(SecureString::empty()),
+            value: RefCell::new(SecureString::with_capacity(max_bytes)),
             mask_char: '●',
             placeholder: String::new(),
             font_size: None,
@@ -100,6 +119,21 @@ impl SecureInput {
             border_color: None,
             focus_ring_color: None,
         }
+    }
+
+    /// Set the maximum number of bytes this input will accept.
+    ///
+    /// The underlying `SecureString` is replaced with a fresh buffer of
+    /// the given capacity; any previously typed bytes are zeroized. Call
+    /// this as a builder step before the widget receives input.
+    ///
+    /// Keystrokes that would push the buffer past `max_bytes` are
+    /// silently dropped (no panic, no audible feedback).
+    pub fn max_bytes(mut self, max_bytes: usize) -> Self {
+        // Replace the inner SecureString; the old one zeroizes on drop.
+        self.value = RefCell::new(SecureString::with_capacity(max_bytes));
+        self.cursor.set(0);
+        self
     }
 
     /// Set the placeholder text.
@@ -358,10 +392,18 @@ impl Widget for SecureInput {
             }
 
             WidgetEvent::CharInput { ch } if self.focused => {
-                // Push character directly into SecureString — no intermediary
+                // Push character directly into SecureString — no intermediary.
+                // Drop the keystroke if it would overflow the fixed capacity
+                // (which would panic on push()). This is the line that
+                // enforces the no-realloc invariant: see Phase 20 audit
+                // response (H-1).
                 if !ch.is_control() {
-                    self.value.borrow_mut().push(*ch);
-                    self.cursor.set(self.cursor.get() + 1);
+                    let mut value = self.value.borrow_mut();
+                    if value.remaining_capacity() >= ch.len_utf8() {
+                        value.push(*ch);
+                        drop(value);
+                        self.cursor.set(self.cursor.get() + 1);
+                    }
                 }
                 EventResult::Consumed
             }

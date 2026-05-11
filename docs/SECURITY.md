@@ -28,6 +28,20 @@ break, that is a bug.
   comparison (`subtle::ConstantTimeEq`).
 - `Debug` prints `[REDACTED]`.
 
+### Capacity is fixed at construction (no realloc residue)
+
+- `SecureString` and `SecureBuffer` are sized at construction. Any
+  mutator (`push`, `push_str`, `insert`, `replace`) that would exceed
+  capacity panics. There is no `expose_mut(&mut String)` /
+  `expose_mut(&mut Vec<u8>)` escape hatch; `SecureBuffer` exposes only
+  a fixed-length `&mut [u8]` for in-place edits.
+- This rules out the "amortized growth leaves stale bytes on a freed
+  heap page" failure mode that bare `String` / `Vec<u8>` exhibit.
+- `SecureInput` defaults its buffer to
+  `DEFAULT_SECURE_INPUT_MAX_BYTES` (256 bytes); keystrokes past the
+  cap are silently dropped. Override per-widget with
+  `.max_bytes(n)`.
+
 ### mlock'd arena for reactive secrets
 
 - `SecureSignal<T>` / `SecureMemo<T>` live inside `SecureArena`, a
@@ -103,27 +117,31 @@ This is a documentation-and-review boundary, not a compile-time one.
 We do not see a way to close it without giving up `T: Clone` ergonomics
 for the whole reactive system.
 
-### `String` / `Vec<u8>` reallocations leave un-zeroized residue
+### Realloc residue is closed at the type level (Phase 20)
 
-`SecureString` wraps `String`. When `push` exceeds the current
-capacity, `String` allocates a larger buffer, copies the contents in,
-and frees the old buffer **without zeroization**. `zeroize` only ever
-touches the *current* buffer. The old buffer's bytes sit on the heap
-until the allocator overwrites them.
+Earlier versions of `SecureString` wrapped `String` directly, so any
+`push` past the current capacity caused `String` to allocate a larger
+buffer, copy the contents, and free the old buffer **without
+zeroization**. That residue could sit on the heap until the allocator
+overwrote it. `SecureBuffer` had the same shape with `Vec<u8>`.
 
-The same applies to `SecureBuffer` (wraps `Vec<u8>`).
+The current type design rules this out by construction:
 
-**Mitigation today:**
+- Capacity is fixed at construction. The wrapped `String` /
+  `Vec<u8>` is allocated once via `with_capacity` and never resized.
+- All mutators (`push`, `push_str`, `insert`, `replace`) check the
+  pending length against the immutable `capacity` field and panic
+  rather than letting the inner buffer reallocate.
+- There is no `expose_mut(&mut String)` or `expose_mut(&mut Vec<u8>)`;
+  `SecureBuffer::expose_bytes_mut` yields a fixed-length `&mut [u8]`
+  for in-place editing.
+- `SecureInput` allocates its buffer once at widget construction
+  (default 256 bytes; override with `.max_bytes(n)`) and drops
+  keystrokes that would overflow.
 
-- Pre-size with `SecureString::with_capacity(n)` when the maximum
-  length is known up front (e.g., a master password input bounded by
-  the form). This is what `SecureInput` does.
-- Avoid growing a `SecureString` past its initial capacity in any
-  code path that touches a secret already inside it.
-
-**Possible future work (see roadmap):** an arena-backed `SecureString`
-variant that allocates from `SecureArena`'s fixed size classes, where
-"realloc" is impossible by construction.
+The cost is that callers must pick a sensible upper bound up front.
+For shroud's target use cases — passwords, API keys, master secrets —
+this matches how the data is sized in practice anyway.
 
 ### Clipboard plaintext lives outside the framework
 

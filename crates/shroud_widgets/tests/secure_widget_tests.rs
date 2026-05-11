@@ -150,6 +150,51 @@ fn secure_input_ignores_input_when_unfocused() {
 }
 
 #[test]
+fn secure_input_drops_keystrokes_past_max_bytes() {
+    // Phase 20 (H-1): once the bounded SecureString fills up, further
+    // CharInput events are silently dropped — the widget must NOT panic
+    // and must NOT trigger a realloc. The buffer length must stay at the
+    // cap.
+    let mut input = SecureInput::new().max_bytes(4);
+    let mut ctx = EventContext::new();
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
+
+    input.event(&WidgetEvent::FocusGained, rect, &mut ctx);
+
+    for ch in "abcdefgh".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
+    }
+
+    assert_eq!(input.char_count(), 4);
+    input.expose(|s| assert_eq!(s, "abcd"));
+}
+
+#[test]
+fn secure_input_drops_keystrokes_past_default_cap_unicode() {
+    // Multi-byte char that wouldn't fit in remaining capacity must be
+    // dropped even if there's room for shorter ASCII chars after it.
+    let mut input = SecureInput::new().max_bytes(4);
+    let mut ctx = EventContext::new();
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
+
+    input.event(&WidgetEvent::FocusGained, rect, &mut ctx);
+
+    // 'a' = 1 byte; 'ア' = 3 bytes (katakana, UTF-8). Total = 4 bytes, fits.
+    input.event(&WidgetEvent::CharInput { ch: 'a' }, rect, &mut ctx);
+    input.event(&WidgetEvent::CharInput { ch: 'ア' }, rect, &mut ctx);
+    assert_eq!(input.char_count(), 2);
+
+    // Another 'ア' (3 bytes) would push to 7 bytes — dropped.
+    input.event(&WidgetEvent::CharInput { ch: 'ア' }, rect, &mut ctx);
+    assert_eq!(input.char_count(), 2);
+
+    // But a 1-byte char would not fit either (4 + 1 > 4) — dropped.
+    input.event(&WidgetEvent::CharInput { ch: 'z' }, rect, &mut ctx);
+    assert_eq!(input.char_count(), 2);
+    input.expose(|s| assert_eq!(s, "aア"));
+}
+
+#[test]
 fn secure_input_clear_zeroizes() {
     let mut input = SecureInput::new();
     let mut ctx = EventContext::new();

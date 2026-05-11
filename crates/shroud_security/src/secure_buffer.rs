@@ -8,8 +8,18 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// Like `SecureString`, access is closure-based to make exposure explicit.
 ///
 /// Does NOT implement `Clone`, `Deref`, or `AsRef<[u8]>`.
+///
+/// # Capacity is fixed at construction
+///
+/// To prevent realloc residue (a freed heap buffer keeping the previous
+/// secret bytes after `Vec` amortized growth), the buffer is sized at
+/// construction and never grows. Any mutator that would exceed `capacity`
+/// panics. [`expose_bytes_mut`](Self::expose_bytes_mut) yields a
+/// fixed-length `&mut [u8]` so in-place edits (decryption, RNG fill) stay
+/// safe without exposing growth APIs.
 pub struct SecureBuffer {
     inner: Vec<u8>,
+    capacity: usize,
 }
 
 impl Drop for SecureBuffer {
@@ -22,23 +32,30 @@ impl ZeroizeOnDrop for SecureBuffer {}
 
 impl SecureBuffer {
     /// Create a new `SecureBuffer` from a byte slice.
+    /// The buffer is sized exactly to fit `data` and cannot grow.
     pub fn new(data: &[u8]) -> Self {
-        Self {
-            inner: data.to_vec(),
-        }
+        let capacity = data.len();
+        let mut inner = Vec::with_capacity(capacity);
+        inner.extend_from_slice(data);
+        Self { inner, capacity }
     }
 
-    /// Create a buffer pre-filled with zeros.
+    /// Create a buffer pre-filled with zeros. `len` becomes both the
+    /// initial length and the maximum capacity.
     pub fn zeroed(len: usize) -> Self {
         Self {
             inner: vec![0u8; len],
+            capacity: len,
         }
     }
 
-    /// Create an empty buffer with pre-allocated capacity.
+    /// Create an empty buffer with the given capacity in bytes.
+    ///
+    /// The buffer never grows beyond `capacity`; pushing past it panics.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: Vec::with_capacity(capacity),
+            capacity,
         }
     }
 
@@ -50,12 +67,44 @@ impl SecureBuffer {
         f(&self.inner)
     }
 
-    /// Mutably access the buffer contents through a closure.
-    pub fn expose_mut<F, R>(&mut self, f: F) -> R
+    /// Mutably access the buffer contents as a fixed-length slice.
+    ///
+    /// The slice covers the current `len()` bytes; callers can edit
+    /// individual bytes in place (e.g. for decryption-in-place or RNG
+    /// fill) but cannot grow or reallocate the buffer.
+    pub fn expose_bytes_mut<F, R>(&mut self, f: F) -> R
     where
-        F: FnOnce(&mut Vec<u8>) -> R,
+        F: FnOnce(&mut [u8]) -> R,
     {
         f(&mut self.inner)
+    }
+
+    /// Append a byte.
+    ///
+    /// # Panics
+    /// If `self.len() == self.capacity()`.
+    pub fn push(&mut self, byte: u8) {
+        assert!(
+            self.inner.len() < self.capacity,
+            "SecureBuffer::push would exceed capacity ({})",
+            self.capacity
+        );
+        self.inner.push(byte);
+    }
+
+    /// Append a byte slice.
+    ///
+    /// # Panics
+    /// If `self.len() + data.len() > self.capacity()`.
+    pub fn push_slice(&mut self, data: &[u8]) {
+        let needed = self.inner.len() + data.len();
+        assert!(
+            needed <= self.capacity,
+            "SecureBuffer::push_slice would exceed capacity ({} > {})",
+            needed,
+            self.capacity
+        );
+        self.inner.extend_from_slice(data);
     }
 
     /// Length in bytes.
@@ -68,13 +117,27 @@ impl SecureBuffer {
         self.inner.is_empty()
     }
 
-    /// Zeroize and clear the buffer.
+    /// Maximum byte length this buffer can hold. Fixed at construction.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Zeroize and clear the buffer. Capacity is preserved.
     pub fn clear(&mut self) {
         self.inner.zeroize();
     }
 
     /// Zeroize and replace with new data.
+    ///
+    /// # Panics
+    /// If `new_data.len() > self.capacity()`.
     pub fn replace(&mut self, new_data: &[u8]) {
+        assert!(
+            new_data.len() <= self.capacity,
+            "SecureBuffer::replace would exceed capacity ({} > {})",
+            new_data.len(),
+            self.capacity
+        );
         self.inner.zeroize();
         self.inner.extend_from_slice(new_data);
     }
@@ -121,9 +184,9 @@ mod tests {
     }
 
     #[test]
-    fn expose_mut_access() {
+    fn expose_bytes_mut_in_place_edit() {
         let mut buf = SecureBuffer::zeroed(4);
-        buf.expose_mut(|data| {
+        buf.expose_bytes_mut(|data| {
             data[0] = 0xDE;
             data[1] = 0xAD;
         });
@@ -131,6 +194,38 @@ mod tests {
             assert_eq!(data[0], 0xDE);
             assert_eq!(data[1], 0xAD);
         });
+    }
+
+    #[test]
+    fn push_within_capacity() {
+        let mut buf = SecureBuffer::with_capacity(4);
+        buf.push(1);
+        buf.push(2);
+        buf.push_slice(&[3, 4]);
+        buf.expose(|data| assert_eq!(data, &[1, 2, 3, 4]));
+    }
+
+    #[test]
+    #[should_panic(expected = "SecureBuffer::push would exceed capacity")]
+    fn push_panics_on_overflow() {
+        let mut buf = SecureBuffer::with_capacity(2);
+        buf.push(1);
+        buf.push(2);
+        buf.push(3);
+    }
+
+    #[test]
+    #[should_panic(expected = "SecureBuffer::push_slice would exceed capacity")]
+    fn push_slice_panics_on_overflow() {
+        let mut buf = SecureBuffer::with_capacity(2);
+        buf.push_slice(&[1, 2, 3]);
+    }
+
+    #[test]
+    #[should_panic(expected = "SecureBuffer::replace would exceed capacity")]
+    fn replace_panics_on_overflow() {
+        let mut buf = SecureBuffer::with_capacity(2);
+        buf.replace(&[1, 2, 3]);
     }
 
     #[test]
@@ -153,8 +248,29 @@ mod tests {
 
     #[test]
     fn replace_clears_old() {
-        let mut buf = SecureBuffer::new(b"old_data");
+        let mut buf = SecureBuffer::with_capacity(16);
+        buf.push_slice(b"old_data");
         buf.replace(b"new_data");
         buf.expose(|data| assert_eq!(data, b"new_data"));
+    }
+
+    #[test]
+    fn capacity_invariant_no_realloc() {
+        let mut buf = SecureBuffer::with_capacity(32);
+        let initial_ptr = buf.expose(|d| d.as_ptr());
+        buf.push_slice(b"hello world");
+        buf.push(b'!');
+        buf.replace(b"new_value");
+        assert_eq!(buf.expose(|d| d.as_ptr()), initial_ptr);
+    }
+
+    #[test]
+    fn clear_preserves_capacity() {
+        let mut buf = SecureBuffer::with_capacity(16);
+        buf.push_slice(b"hello");
+        buf.clear();
+        assert_eq!(buf.capacity(), 16);
+        buf.push_slice(b"world");
+        buf.expose(|d| assert_eq!(d, b"world"));
     }
 }
