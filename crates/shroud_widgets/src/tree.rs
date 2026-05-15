@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::event::{EventContext, EventResult, Key, NamedKey, TreeCommand, WidgetEvent};
 use crate::focus::{FocusDirection, FocusManager};
-use crate::layer::{LayerAnchor, LayerEntry, LayerOptions};
+use crate::layer::{LayerAnchor, LayerEntry, LayerOptions, Placement};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Point, Rect, SecurityLevel, Size, Theme};
@@ -69,6 +69,60 @@ pub struct WidgetTree {
     /// dispatch can place layer roots relative to it without threading a
     /// size through every call site. `(0, 0)` until the first layout.
     viewport: (f32, f32),
+}
+
+/// Resolve a [`LayerAnchor`] against the freshly-measured layer size and the
+/// current viewport, returning the layer's top-left offset in screen
+/// coordinates.
+///
+/// - [`LayerAnchor::ViewportCenter`]: classic centered placement; clamps to
+///   `(0, 0)` if the layer is larger than the viewport (the overflow is
+///   clipped on the right/bottom).
+/// - [`LayerAnchor::AnchorRect`]: places the layer immediately below the
+///   trigger rect (or above, per [`Placement`]). The x-coordinate aligns
+///   with `rect.x` and is clamped so the layer stays inside the viewport.
+///   [`Placement::Auto`] flips above when below would overflow the
+///   viewport bottom *and* above would fit; otherwise it falls back to
+///   below and the overflow is clipped.
+fn place_layer(anchor: LayerAnchor, size: Size, viewport: (f32, f32)) -> (f32, f32) {
+    let (vw, vh) = viewport;
+    match anchor {
+        LayerAnchor::ViewportCenter => (
+            ((vw - size.width) * 0.5).max(0.0),
+            ((vh - size.height) * 0.5).max(0.0),
+        ),
+        LayerAnchor::AnchorRect { rect, prefer } => {
+            // Horizontal: align left edge to the trigger, then clamp so the
+            // popover does not run off either side. `max(0)` after `min(...)`
+            // handles the degenerate case where the popover is wider than
+            // the viewport — pin to the left and let the right edge clip.
+            let x = rect.origin.x.min(vw - size.width).max(0.0);
+
+            let below_y = rect.origin.y + rect.size.height;
+            let above_y = rect.origin.y - size.height;
+            let y = match prefer {
+                Placement::Below => below_y,
+                Placement::Above => above_y,
+                Placement::Auto => {
+                    // Flip only when below overflows AND above fits.
+                    // If neither fits we still prefer below — clamping
+                    // below moves the popover up over the trigger, which
+                    // is the lesser evil compared to clamping above (which
+                    // would push the popover *below* the trigger again).
+                    let below_fits = below_y + size.height <= vh;
+                    let above_fits = above_y >= 0.0;
+                    if !below_fits && above_fits {
+                        above_y
+                    } else {
+                        below_y
+                    }
+                }
+            };
+            // Vertical clamp so a too-tall popover stays on screen.
+            let y = y.min(vh - size.height).max(0.0);
+            (x, y)
+        }
+    }
 }
 
 impl WidgetTree {
@@ -208,6 +262,28 @@ impl WidgetTree {
     /// Index of the topmost layer's root, or `None` if no layer is active.
     pub fn top_layer_root(&self) -> Option<usize> {
         self.layers.last().map(|l| l.root)
+    }
+
+    /// Viewport-space offset of the topmost layer's root, computed by the
+    /// last layout pass. `None` when no layer is active.
+    ///
+    /// The layer's child rects (via [`Self::layout_rect`]) are reported in
+    /// the layer's local Taffy frame; add this offset to translate them
+    /// into viewport coordinates (matching what paint and event dispatch
+    /// see).
+    pub fn top_layer_offset(&self) -> Option<(f32, f32)> {
+        self.layers.last().map(|l| l.offset)
+    }
+
+    /// Children of `idx` as a fresh `Vec`. Empty when the slot is
+    /// tombstoned or has no children.
+    ///
+    /// Returns a clone of the internal child list to keep the borrow
+    /// shape simple for callers that want to traverse on a `&WidgetTree`.
+    pub fn children(&self, idx: usize) -> Vec<usize> {
+        self.node(idx)
+            .map(|n| n.children.clone())
+            .unwrap_or_default()
     }
 
     /// Remove `idx` and every descendant from the tree.
@@ -552,7 +628,12 @@ impl WidgetTree {
         let layer_root_nodes: Vec<(usize, LayoutNodeId)> = self
             .layers
             .iter()
-            .map(|l| (l.root, self.node(l.root).expect("live layer root").layout_node))
+            .map(|l| {
+                (
+                    l.root,
+                    self.node(l.root).expect("live layer root").layout_node,
+                )
+            })
             .collect();
         for (_, root_node) in &layer_root_nodes {
             self.layout.compute(*root_node, width, height);
@@ -560,12 +641,7 @@ impl WidgetTree {
         for (i, (root, root_node)) in layer_root_nodes.iter().enumerate() {
             let layout_rect = self.layout.absolute_rect(*root_node);
             let size = layout_rect.size;
-            let offset = match self.layers[i].options.anchor {
-                LayerAnchor::ViewportCenter => (
-                    ((width - size.width) * 0.5).max(0.0),
-                    ((height - size.height) * 0.5).max(0.0),
-                ),
-            };
+            let offset = place_layer(self.layers[i].options.anchor, size, (width, height));
             self.layers[i].measured_size = size;
             self.layers[i].offset = offset;
             let _ = root;
@@ -637,14 +713,16 @@ impl WidgetTree {
 
         // Collect Taffy roots up front so the immut `&self.nodes` borrow
         // can drop before we call `&mut self.layout` for compute.
-        let main_root_node = self
-            .root
-            .and_then(|r| self.node(r))
-            .map(|n| n.layout_node);
+        let main_root_node = self.root.and_then(|r| self.node(r)).map(|n| n.layout_node);
         let layer_root_nodes: Vec<(usize, LayoutNodeId)> = self
             .layers
             .iter()
-            .map(|l| (l.root, self.node(l.root).expect("live layer root").layout_node))
+            .map(|l| {
+                (
+                    l.root,
+                    self.node(l.root).expect("live layer root").layout_node,
+                )
+            })
             .collect();
 
         if let Some(root_node) = main_root_node {
@@ -672,16 +750,9 @@ impl WidgetTree {
         for (i, (root, root_node)) in layer_root_nodes.iter().enumerate() {
             let layout_rect = self.layout.absolute_rect(*root_node);
             let size = layout_rect.size;
-            let offset = match self.layers[i].options.anchor {
-                LayerAnchor::ViewportCenter => (
-                    ((width - size.width) * 0.5).max(0.0),
-                    ((height - size.height) * 0.5).max(0.0),
-                ),
-            };
+            let offset = place_layer(self.layers[i].options.anchor, size, (width, height));
             self.layers[i].measured_size = size;
             self.layers[i].offset = offset;
-            // Silence the lint until we wire AnchorRect — we keep `root`
-            // bound for future variants that need the layer-root index.
             let _ = root;
         }
     }
@@ -1047,12 +1118,7 @@ impl WidgetTree {
     /// area but missed every visible widget (e.g. on a layer's scrim or
     /// padding), in which case any previously hovered widget receives a
     /// final `MouseLeave` and the pointer clears.
-    fn update_hover_in(
-        &mut self,
-        subtree_root: usize,
-        pos: Point,
-        event_ctx: &mut EventContext,
-    ) {
+    fn update_hover_in(&mut self, subtree_root: usize, pos: Point, event_ctx: &mut EventContext) {
         let new_hover = self.hit_test_in(subtree_root, pos);
 
         if new_hover == self.hovered {

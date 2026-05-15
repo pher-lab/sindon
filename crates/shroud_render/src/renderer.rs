@@ -484,8 +484,11 @@ impl Renderer {
         // → secure text in turn, so a layer's content never gets
         // overdrawn by the main tree's glyphs (which would happen if
         // every rect drew before every glyph globally).
-        let mut batch_ranges: Vec<(std::ops::Range<usize>, std::ops::Range<usize>, std::ops::Range<usize>)> =
-            Vec::with_capacity(layer_starts.len() + 1);
+        let mut batch_ranges: Vec<(
+            std::ops::Range<usize>,
+            std::ops::Range<usize>,
+            std::ops::Range<usize>,
+        )> = Vec::with_capacity(layer_starts.len() + 1);
         let mut prev = (0usize, 0usize, 0usize);
         for &(r, g, s) in layer_starts {
             batch_ranges.push((prev.0..r, prev.1..g, prev.2..s));

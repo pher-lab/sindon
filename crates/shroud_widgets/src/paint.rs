@@ -54,8 +54,11 @@ impl PaintContext {
     /// batch. Called by [`WidgetTree::paint`](crate::tree::WidgetTree::paint)
     /// once per layer; widget code does not invoke this directly.
     pub fn begin_layer(&mut self) {
-        self.layer_starts
-            .push((self.rects.len(), self.glyphs.len(), self.secure_glyphs.len()));
+        self.layer_starts.push((
+            self.rects.len(),
+            self.glyphs.len(),
+            self.secure_glyphs.len(),
+        ));
     }
 
     /// Read the recorded layer-batch boundaries. Renderer-facing —

@@ -9,22 +9,52 @@
 //! `push_layer` / `pop_layer` primitives; from event handlers, see
 //! [`EventContext::push_layer`](crate::event::EventContext::push_layer).
 //!
-//! Today only the [`LayerAnchor::ViewportCenter`] anchor is implemented —
-//! the variant is `#[non_exhaustive]` so anchors for popovers (rect-relative)
-//! and context menus (absolute) can be added later without a breaking change.
+//! Two anchors are implemented:
+//!
+//! - [`LayerAnchor::ViewportCenter`] — modal dialogs.
+//! - [`LayerAnchor::AnchorRect`] — popovers attached to a trigger rect
+//!   (dropdowns, context menus). The variant is `#[non_exhaustive]` so
+//!   absolute-positioned anchors can be added later without a break.
 
-use shroud_core::Color;
+use shroud_core::{Color, Rect};
+
+/// Preferred vertical placement of an [`LayerAnchor::AnchorRect`] popover.
+///
+/// The actual placement may flip when the preferred side does not fit in
+/// the viewport — see the placement math in
+/// [`WidgetTree::compute_layout_with_measure`](crate::tree::WidgetTree::compute_layout_with_measure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Placement {
+    /// Place the popover directly below the trigger rect (top edge meets
+    /// the trigger's bottom edge). The default — matches dropdown UX.
+    #[default]
+    Below,
+    /// Place the popover directly above the trigger rect (bottom edge
+    /// meets the trigger's top edge).
+    Above,
+    /// Try [`Self::Below`] first; flip to [`Self::Above`] if the popover
+    /// would overflow the viewport bottom. Identical to `Below` when there
+    /// is room either way.
+    Auto,
+}
 
 /// Where a layer is placed relative to the viewport or another widget.
-///
-/// Only [`Self::ViewportCenter`] is implemented today; further variants will
-/// land alongside the widgets that need them (dropdown / context menu).
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum LayerAnchor {
     /// Center the layer's natural-size root inside the viewport. The
     /// standard modal-dialog placement.
     ViewportCenter,
+    /// Anchor the layer to a trigger rect (screen coordinates). The
+    /// layer's left edge aligns with `rect.x`; vertical placement follows
+    /// `prefer`, with `Auto` flipping above when below would overflow.
+    /// The x-coordinate is clamped so the popover stays inside the
+    /// viewport.
+    ///
+    /// Typical use: a [`Dropdown`](crate::Dropdown) reads its own layout
+    /// rect inside its click handler and pushes a popover layer with this
+    /// anchor variant.
+    AnchorRect { rect: Rect, prefer: Placement },
 }
 
 /// Configuration for a pushed layer.

@@ -25,9 +25,10 @@ use chacha20poly1305::{
 use zeroize::Zeroizing;
 
 use shroud::app::App;
+use shroud::reactive::{Reactive, Signal};
 use shroud::security::SecureString;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, ScrollView, SecureInput, TextWidget};
+use shroud::widgets::{Button, Container, Dropdown, ScrollView, SecureInput, TextWidget};
 
 const DEMO_PASSWORD: &str = "knot-demo-2026";
 const DEMO_NOTE_TITLE: &str = "Welcome to Knot";
@@ -195,6 +196,17 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .align_center(),
     );
 
+    // Card-tint picker (Phase 22 dogfood): the dropdown writes to this
+    // signal, the card's background reads it via Reactive::derive — live
+    // re-tint on every option click without rebuilding the screen.
+    let tint = Signal::new(0_usize);
+    let card_bg = Reactive::derive(move || match tint.get() {
+        1 => shroud::core::Color::rgb(0.10, 0.16, 0.20), // teal
+        2 => shroud::core::Color::rgb(0.18, 0.12, 0.20), // plum
+        3 => shroud::core::Color::rgb(0.10, 0.18, 0.12), // forest
+        _ => shroud::core::Color::rgb(0.12, 0.12, 0.18), // default
+    });
+
     let card = tree.add_child(
         root,
         Container::column()
@@ -202,12 +214,31 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .max_width(448.0)
             .padding(32.0)
             .gap(16.0)
-            .background(shroud::core::Color::rgb(0.12, 0.12, 0.18))
+            .background(card_bg)
             .radius(16.0),
     );
 
     tree.add_child(card, TextWidget::new("Knot").font_size(40.0));
     tree.add_child(card, TextWidget::new("A knot only you can untie."));
+
+    // Card tint dropdown — placed near the top so its popover has room to
+    // expand below. Selection lives only as long as this screen build.
+    let tint_row = tree.add_child(card, Container::row().gap(12.0).align_center());
+    tree.add_child(tint_row, TextWidget::new("Card tint:"));
+    tree.add_child(
+        tint_row,
+        Dropdown::new(
+            vec![
+                "Indigo (default)".into(),
+                "Teal".into(),
+                "Plum".into(),
+                "Forest".into(),
+            ],
+            tint,
+        )
+        .radius(6.0),
+    );
+
     tree.add_child(
         card,
         TextWidget::new(format!("Master password (hint: {}):", DEMO_PASSWORD)),

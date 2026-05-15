@@ -320,8 +320,12 @@ impl EventContext {
     /// The command is enqueued and runs after the current dispatch
     /// completes; the topmost layer is the one most recently pushed when
     /// the drain settles.
-    pub fn push_layer<F>(&mut self, options: LayerOptions, root_widget: impl Widget + 'static, populate: F)
-    where
+    pub fn push_layer<F>(
+        &mut self,
+        options: LayerOptions,
+        root_widget: impl Widget + 'static,
+        populate: F,
+    ) where
         F: FnOnce(&mut WidgetTree, usize) + 'static,
     {
         self.commands.push(TreeCommand::PushLayer {

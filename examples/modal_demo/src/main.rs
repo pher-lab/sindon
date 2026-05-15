@@ -74,10 +74,8 @@ fn main() {
                                     .color(Color::rgb(0.7, 0.72, 0.78)),
                                 );
 
-                                let buttons = tree.add_child(
-                                    dialog,
-                                    Container::row().gap(12.0).justify_center(),
-                                );
+                                let buttons = tree
+                                    .add_child(dialog, Container::row().gap(12.0).justify_center());
                                 tree.add_child(
                                     buttons,
                                     Button::new("Cancel")

@@ -10,13 +10,14 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use shroud_core::Rect;
 use shroud_core::{Color, Point, Theme};
+use shroud_reactive::Signal;
 use shroud_text::TextEngine;
 use shroud_widgets::event::{EventContext, Key, MouseButton, NamedKey, WidgetEvent};
-use shroud_widgets::layer::{LayerAnchor, LayerOptions};
+use shroud_widgets::layer::{LayerAnchor, LayerOptions, Placement};
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::tree::WidgetTree;
-use shroud_reactive::Signal;
 use shroud_widgets::{Button, Container, Input, TextWidget};
 
 /// Run layout with measure so leaf widgets (Button, TextWidget) get an
@@ -149,8 +150,16 @@ fn viewport_center_positions_layer_at_center() {
     // The layer's own rect is the last one — its top-left equals the
     // computed anchor offset (800-200)/2 = 300, (600-100)/2 = 250.
     let last = ctx.rects.last().unwrap();
-    assert!((last.x - 300.0).abs() < 0.5, "layer x = {}, want ~300", last.x);
-    assert!((last.y - 250.0).abs() < 0.5, "layer y = {}, want ~250", last.y);
+    assert!(
+        (last.x - 300.0).abs() < 0.5,
+        "layer x = {}, want ~300",
+        last.x
+    );
+    assert!(
+        (last.y - 250.0).abs() < 0.5,
+        "layer y = {}, want ~250",
+        last.y
+    );
     assert_eq!(last.width, 200.0);
     assert_eq!(last.height, 100.0);
 }
@@ -191,6 +200,122 @@ fn popover_paints_no_scrim() {
     assert!(!has_scrim, "popover preset must not paint a scrim");
 }
 
+/// Push a layer with the given anchor on top of a fixed-size main tree.
+/// Returns (tree, layer_root); the layer is a fixed 150x80 container so
+/// placement math is easy to check.
+fn tree_with_anchored_layer(anchor: LayerAnchor) -> (WidgetTree, usize) {
+    let mut tree = WidgetTree::new();
+    tree.set_root(Container::column().width(800.0).height(600.0));
+    let layer = tree.push_layer(
+        LayerOptions::popover().anchor(anchor),
+        Container::column()
+            .width(150.0)
+            .height(80.0)
+            .background(Color::rgb(0.3, 0.3, 0.4)),
+    );
+    (tree, layer)
+}
+
+/// Return the (x, y) of the rect painted for the 150x80 layer container.
+fn layer_paint_xy(tree: &mut WidgetTree) -> (f32, f32) {
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    let r = ctx
+        .rects
+        .iter()
+        .find(|r| (r.width - 150.0).abs() < 0.5 && (r.height - 80.0).abs() < 0.5)
+        .expect("layer rect present");
+    (r.x, r.y)
+}
+
+#[test]
+fn anchor_rect_below_places_under_trigger() {
+    // Trigger at (100, 200) sized 80x32 → popover top-left should be
+    // (100, 232).
+    let trigger = Rect::new(100.0, 200.0, 80.0, 32.0);
+    let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
+        rect: trigger,
+        prefer: Placement::Below,
+    });
+    tree.compute_layout(800.0, 600.0);
+    let (x, y) = layer_paint_xy(&mut tree);
+    assert!((x - 100.0).abs() < 0.5, "x = {}, want 100", x);
+    assert!((y - 232.0).abs() < 0.5, "y = {}, want 232", y);
+}
+
+#[test]
+fn anchor_rect_above_places_over_trigger() {
+    // Trigger at (50, 300) sized 80x32 → popover (80 tall) sits with its
+    // bottom edge at y=300, so top-left = (50, 220).
+    let trigger = Rect::new(50.0, 300.0, 80.0, 32.0);
+    let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
+        rect: trigger,
+        prefer: Placement::Above,
+    });
+    tree.compute_layout(800.0, 600.0);
+    let (x, y) = layer_paint_xy(&mut tree);
+    assert!((x - 50.0).abs() < 0.5, "x = {}, want 50", x);
+    assert!((y - 220.0).abs() < 0.5, "y = {}, want 220", y);
+}
+
+#[test]
+fn anchor_rect_auto_flips_when_below_overflows() {
+    // Trigger near the viewport bottom; below would put popover bottom
+    // at 580+80 = 660 > 600. Auto must flip above: popover bottom = trigger
+    // top (540), top-left y = 460.
+    let trigger = Rect::new(100.0, 540.0, 80.0, 40.0);
+    let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
+        rect: trigger,
+        prefer: Placement::Auto,
+    });
+    tree.compute_layout(800.0, 600.0);
+    let (_x, y) = layer_paint_xy(&mut tree);
+    assert!(
+        (y - 460.0).abs() < 0.5,
+        "y = {}, want 460 (flipped above)",
+        y
+    );
+}
+
+#[test]
+fn anchor_rect_auto_stays_below_when_room_is_there() {
+    let trigger = Rect::new(100.0, 50.0, 80.0, 32.0);
+    let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
+        rect: trigger,
+        prefer: Placement::Auto,
+    });
+    tree.compute_layout(800.0, 600.0);
+    let (_x, y) = layer_paint_xy(&mut tree);
+    assert!((y - 82.0).abs() < 0.5, "y = {}, want 82 (below)", y);
+}
+
+#[test]
+fn anchor_rect_x_clamps_to_viewport_right() {
+    // Trigger far right; popover would land at x=750 + width 150 = 900
+    // > 800. Must clamp to x = 650 so right edge sits at 800.
+    let trigger = Rect::new(750.0, 100.0, 40.0, 32.0);
+    let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
+        rect: trigger,
+        prefer: Placement::Below,
+    });
+    tree.compute_layout(800.0, 600.0);
+    let (x, _y) = layer_paint_xy(&mut tree);
+    assert!((x - 650.0).abs() < 0.5, "x = {}, want 650 (clamped)", x);
+}
+
+#[test]
+fn anchor_rect_x_clamps_to_viewport_left() {
+    // Negative trigger.x (e.g., scrolled trigger off-screen) clamps to 0.
+    let trigger = Rect::new(-30.0, 100.0, 40.0, 32.0);
+    let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
+        rect: trigger,
+        prefer: Placement::Below,
+    });
+    tree.compute_layout(800.0, 600.0);
+    let (x, _y) = layer_paint_xy(&mut tree);
+    assert!((x - 0.0).abs() < 0.5, "x = {}, want 0 (clamped)", x);
+}
+
 #[test]
 fn no_layer_paints_only_main_tree() {
     // Regression: paint() must still work with zero layers active.
@@ -218,9 +343,11 @@ fn click_inside_layer_dispatches_to_layer_widget() {
     let mc = Rc::clone(&main_clicks);
     tree.add_child(
         main_root,
-        Button::new("main").background(Color::WHITE).on_click(move |_| {
-            mc.set(mc.get() + 1);
-        }),
+        Button::new("main")
+            .background(Color::WHITE)
+            .on_click(move |_| {
+                mc.set(mc.get() + 1);
+            }),
     );
 
     let lc = Rc::clone(&layer_clicks);
@@ -230,9 +357,11 @@ fn click_inside_layer_dispatches_to_layer_widget() {
     );
     tree.add_child(
         layer_root,
-        Button::new("layer").background(Color::WHITE).on_click(move |_| {
-            lc.set(lc.get() + 1);
-        }),
+        Button::new("layer")
+            .background(Color::WHITE)
+            .on_click(move |_| {
+                lc.set(lc.get() + 1);
+            }),
     );
 
     // Use the measure path so Button sizes from its label.
@@ -256,7 +385,11 @@ fn click_inside_layer_dispatches_to_layer_widget() {
     );
 
     assert_eq!(layer_clicks.get(), 1, "layer button should receive click");
-    assert_eq!(main_clicks.get(), 0, "main button must not see layer-scope click");
+    assert_eq!(
+        main_clicks.get(),
+        0,
+        "main button must not see layer-scope click"
+    );
 }
 
 #[test]
@@ -310,10 +443,7 @@ fn outside_click_does_not_reach_main_tree() {
     );
 
     let opts = LayerOptions::modal().dismiss_on_outside_click(false);
-    tree.push_layer(
-        opts,
-        Container::column().width(50.0).height(40.0),
-    );
+    tree.push_layer(opts, Container::column().width(50.0).height(40.0));
 
     tree.compute_layout(800.0, 600.0);
 
@@ -332,7 +462,11 @@ fn outside_click_does_not_reach_main_tree() {
             button: MouseButton::Left,
         },
     );
-    assert_eq!(main_clicks.get(), 0, "main tree must not see swallowed click");
+    assert_eq!(
+        main_clicks.get(),
+        0,
+        "main tree must not see swallowed click"
+    );
 }
 
 #[test]
@@ -361,7 +495,11 @@ fn escape_no_dismiss_when_disabled() {
             key: Key::Named(NamedKey::Escape),
         },
     );
-    assert_eq!(tree.layer_count(), 1, "Escape must not dismiss when disabled");
+    assert_eq!(
+        tree.layer_count(),
+        1,
+        "Escape must not dismiss when disabled"
+    );
 }
 
 #[test]
@@ -437,13 +575,15 @@ fn handler_push_layer_via_event_context() {
     let main = tree.set_root(Container::column().width(400.0).height(300.0));
     tree.add_child(
         main,
-        Button::new("open").background(Color::WHITE).on_click(|ctx| {
-            ctx.push_layer(
-                LayerOptions::modal(),
-                Container::column().width(120.0).height(60.0),
-                |_tree, _root| {},
-            );
-        }),
+        Button::new("open")
+            .background(Color::WHITE)
+            .on_click(|ctx| {
+                ctx.push_layer(
+                    LayerOptions::modal(),
+                    Container::column().width(120.0).height(60.0),
+                    |_tree, _root| {},
+                );
+            }),
     );
     tree.compute_layout(400.0, 300.0);
 
@@ -475,9 +615,11 @@ fn handler_pop_top_layer_via_event_context() {
     );
     tree.add_child(
         layer,
-        Button::new("close").background(Color::WHITE).on_click(|ctx| {
-            ctx.pop_top_layer();
-        }),
+        Button::new("close")
+            .background(Color::WHITE)
+            .on_click(|ctx| {
+                ctx.pop_top_layer();
+            }),
     );
     measured_layout(&mut tree, 400.0, 300.0);
 
