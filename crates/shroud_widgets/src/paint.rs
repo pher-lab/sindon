@@ -23,6 +23,15 @@ pub struct PaintContext {
     clip_stack: Vec<Rect>,
     /// Stack of accumulated translation offsets.
     offset_stack: Vec<(f32, f32)>,
+    /// Boundaries between paint *layers* — each tuple is the
+    /// `(rects.len(), glyphs.len(), secure_glyphs.len())` snapshot at
+    /// the moment the corresponding overlay layer started painting.
+    ///
+    /// Renders the main tree as one logical batch and every overlay
+    /// layer as its own; the renderer iterates these spans in z order
+    /// so a layer rect never gets overdrawn by the main tree's text.
+    /// Empty when no layers were pushed in the current frame.
+    layer_starts: Vec<(usize, usize, usize)>,
 }
 
 impl PaintContext {
@@ -35,7 +44,25 @@ impl PaintContext {
             theme,
             clip_stack: Vec::new(),
             offset_stack: Vec::new(),
+            layer_starts: Vec::new(),
         }
+    }
+
+    /// Mark the start of an overlay layer's paint batch. Subsequent
+    /// `fill_rect` / `draw_glyph` calls become part of this layer's
+    /// batch, which the renderer draws after every previously-recorded
+    /// batch. Called by [`WidgetTree::paint`](crate::tree::WidgetTree::paint)
+    /// once per layer; widget code does not invoke this directly.
+    pub fn begin_layer(&mut self) {
+        self.layer_starts
+            .push((self.rects.len(), self.glyphs.len(), self.secure_glyphs.len()));
+    }
+
+    /// Read the recorded layer-batch boundaries. Renderer-facing —
+    /// each entry is the cumulative `(rect_count, glyph_count,
+    /// secure_glyph_count)` at the start of one overlay layer.
+    pub fn layer_starts(&self) -> &[(usize, usize, usize)] {
+        &self.layer_starts
     }
 
     /// Push a clip rectangle. If a clip is already active, the pushed clip is
@@ -172,6 +199,7 @@ impl PaintContext {
         self.rects.clear();
         self.glyphs.clear();
         self.secure_glyphs.clear();
+        self.layer_starts.clear();
     }
 }
 

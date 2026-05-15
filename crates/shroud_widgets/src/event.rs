@@ -1,5 +1,6 @@
 //! Event types and dispatch context.
 
+use crate::layer::LayerOptions;
 use crate::tree::WidgetTree;
 use crate::widget::Widget;
 use shroud_core::Point;
@@ -109,6 +110,11 @@ pub enum EventResult {
 /// appease `clippy::type_complexity`.
 type RebuildBuilder = Box<dyn FnOnce(&mut WidgetTree, usize)>;
 
+/// Builder closure for `TreeCommand::PushLayer`. Receives the tree plus
+/// the freshly-pushed layer's root index so children can be added under
+/// it via `tree.add_child(root, ...)`.
+type LayerPopulator = Box<dyn FnOnce(&mut WidgetTree, usize)>;
+
 /// Deferred tree mutation requested by an event handler.
 ///
 /// Event handlers run while `WidgetTree` is mid-walk, so they can't borrow
@@ -145,6 +151,24 @@ pub(crate) enum TreeCommand {
     Focus {
         target: Option<usize>,
     },
+    /// Push a new overlay layer. `root_widget` becomes the layer's root,
+    /// then `populate` runs to add children. Mirrors `ReplaceScreen`'s
+    /// "root + populator" shape so the dispatch site never needs the
+    /// layer's index synchronously.
+    PushLayer {
+        options: LayerOptions,
+        root_widget: Box<dyn Widget + 'static>,
+        populate: LayerPopulator,
+    },
+    /// Pop a specific layer by its root index. No-op when the layer is
+    /// already gone (e.g. dismissed by an outside-click before the
+    /// command drained).
+    PopLayer {
+        root: usize,
+    },
+    /// Pop whichever layer is currently on top. No-op when no layer is
+    /// active.
+    PopTopLayer,
 }
 
 /// Keyboard modifier state at the time of an event.
@@ -280,6 +304,44 @@ impl EventContext {
     /// `FocusLost`; no widget gains focus afterwards.
     pub fn blur(&mut self) {
         self.commands.push(TreeCommand::Focus { target: None });
+    }
+
+    /// Open a new overlay layer. `root_widget` provides the layer's root
+    /// container, then `populate` runs against the freshly-installed
+    /// layer to add children — same shape as
+    /// [`Self::replace_screen`] but scoped to a single layer instead of
+    /// the whole tree.
+    ///
+    /// Layers paint over the main tree in push order (last pushed =
+    /// topmost) and capture all pointer / keyboard input while active.
+    /// See [`LayerOptions::modal`] / [`LayerOptions::popover`] for the
+    /// common configurations.
+    ///
+    /// The command is enqueued and runs after the current dispatch
+    /// completes; the topmost layer is the one most recently pushed when
+    /// the drain settles.
+    pub fn push_layer<F>(&mut self, options: LayerOptions, root_widget: impl Widget + 'static, populate: F)
+    where
+        F: FnOnce(&mut WidgetTree, usize) + 'static,
+    {
+        self.commands.push(TreeCommand::PushLayer {
+            options,
+            root_widget: Box::new(root_widget),
+            populate: Box::new(populate),
+        });
+    }
+
+    /// Dismiss the layer whose root is `root`. No-op when that layer is
+    /// already gone (e.g. dismissed by an outside-click before this
+    /// command drained).
+    pub fn pop_layer(&mut self, root: usize) {
+        self.commands.push(TreeCommand::PopLayer { root });
+    }
+
+    /// Dismiss whichever layer is currently on top. No-op when no layer
+    /// is active by the time the command drains.
+    pub fn pop_top_layer(&mut self) {
+        self.commands.push(TreeCommand::PopTopLayer);
     }
 
     /// Drain queued commands. Intended for `WidgetTree` to call after a

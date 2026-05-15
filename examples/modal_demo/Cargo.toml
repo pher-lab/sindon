@@ -1,0 +1,9 @@
+[package]
+name = "modal_demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+shroud = { path = "../../crates/shroud" }

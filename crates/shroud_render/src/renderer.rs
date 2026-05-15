@@ -430,6 +430,7 @@ impl Renderer {
         rects: &[DrawRect],
         glyphs: &[DrawGlyph],
         secure_glyphs: &[DrawGlyph],
+        layer_starts: &[(usize, usize, usize)],
     ) -> Result<(), RenderError> {
         // Upload standard glyphs to the standard atlas (cached)
         for glyph in glyphs {
@@ -477,30 +478,55 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Build rect geometry
-        let (rect_verts, rect_indices, rect_batches) = self.build_rect_geometry(rects);
-        let has_rects = !rect_verts.is_empty();
+        // Split the flat command vecs into per-layer slices. The first
+        // slice is the main tree; each subsequent one is an overlay
+        // layer in push order. Each batch is rendered as rects → text
+        // → secure text in turn, so a layer's content never gets
+        // overdrawn by the main tree's glyphs (which would happen if
+        // every rect drew before every glyph globally).
+        let mut batch_ranges: Vec<(std::ops::Range<usize>, std::ops::Range<usize>, std::ops::Range<usize>)> =
+            Vec::with_capacity(layer_starts.len() + 1);
+        let mut prev = (0usize, 0usize, 0usize);
+        for &(r, g, s) in layer_starts {
+            batch_ranges.push((prev.0..r, prev.1..g, prev.2..s));
+            prev = (r, g, s);
+        }
+        batch_ranges.push((
+            prev.0..rects.len(),
+            prev.1..glyphs.len(),
+            prev.2..secure_glyphs.len(),
+        ));
 
-        let rect_vb = self.create_vertex_buffer("rect_vb", bytemuck::cast_slice(&rect_verts));
-        let rect_ib = self.create_index_buffer("rect_ib", bytemuck::cast_slice(&rect_indices));
+        struct BatchBuffers {
+            rect_vb: wgpu::Buffer,
+            rect_ib: wgpu::Buffer,
+            rect_batches: Vec<DrawBatch>,
+            text_vb: wgpu::Buffer,
+            text_ib: wgpu::Buffer,
+            text_batches: Vec<DrawBatch>,
+            sec_vb: wgpu::Buffer,
+            sec_ib: wgpu::Buffer,
+            sec_batches: Vec<DrawBatch>,
+        }
 
-        // Build standard text geometry
-        let (text_verts, text_indices, text_batches) =
-            self.build_text_geometry(glyphs, &self.atlas);
-        let has_text = !text_verts.is_empty();
-
-        let text_vb = self.create_vertex_buffer("text_vb", bytemuck::cast_slice(&text_verts));
-        let text_ib = self.create_index_buffer("text_ib", bytemuck::cast_slice(&text_indices));
-
-        // Build secure text geometry (uses secure atlas UVs)
-        let (sec_text_verts, sec_text_indices, sec_text_batches) =
-            self.build_text_geometry(secure_glyphs, self.secure_atlas.as_atlas());
-        let has_secure_text = !sec_text_verts.is_empty();
-
-        let sec_text_vb =
-            self.create_vertex_buffer("sec_text_vb", bytemuck::cast_slice(&sec_text_verts));
-        let sec_text_ib =
-            self.create_index_buffer("sec_text_ib", bytemuck::cast_slice(&sec_text_indices));
+        let mut batches: Vec<BatchBuffers> = Vec::with_capacity(batch_ranges.len());
+        for (rr, gr, sr) in &batch_ranges {
+            let (rv, ri, rb) = self.build_rect_geometry(&rects[rr.clone()]);
+            let (tv, ti, tb) = self.build_text_geometry(&glyphs[gr.clone()], &self.atlas);
+            let (sv, si, sb) =
+                self.build_text_geometry(&secure_glyphs[sr.clone()], self.secure_atlas.as_atlas());
+            batches.push(BatchBuffers {
+                rect_vb: self.create_vertex_buffer("rect_vb", bytemuck::cast_slice(&rv)),
+                rect_ib: self.create_index_buffer("rect_ib", bytemuck::cast_slice(&ri)),
+                rect_batches: rb,
+                text_vb: self.create_vertex_buffer("text_vb", bytemuck::cast_slice(&tv)),
+                text_ib: self.create_index_buffer("text_ib", bytemuck::cast_slice(&ti)),
+                text_batches: tb,
+                sec_vb: self.create_vertex_buffer("sec_text_vb", bytemuck::cast_slice(&sv)),
+                sec_ib: self.create_index_buffer("sec_text_ib", bytemuck::cast_slice(&si)),
+                sec_batches: sb,
+            });
+        }
 
         let surface_w = self.surface_config.width;
         let surface_h = self.surface_config.height;
@@ -532,41 +558,40 @@ impl Renderer {
                 ..Default::default()
             });
 
-            // Draw rects first (background)
-            if has_rects {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, rect_vb.slice(..));
-                pass.set_index_buffer(rect_ib.slice(..), wgpu::IndexFormat::Uint16);
-                for batch in &rect_batches {
-                    apply_scissor(&mut pass, batch.clip_rect, surface_w, surface_h);
-                    let end = batch.index_start + batch.index_count;
-                    pass.draw_indexed(batch.index_start..end, 0, 0..1);
+            for batch in &batches {
+                if !batch.rect_batches.is_empty() {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, batch.rect_vb.slice(..));
+                    pass.set_index_buffer(batch.rect_ib.slice(..), wgpu::IndexFormat::Uint16);
+                    for b in &batch.rect_batches {
+                        apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
+                        let end = b.index_start + b.index_count;
+                        pass.draw_indexed(b.index_start..end, 0, 0..1);
+                    }
                 }
-            }
 
-            // Draw standard text
-            if has_text {
-                pass.set_pipeline(&self.text_pipeline);
-                pass.set_bind_group(0, &self.text_bind_group, &[]);
-                pass.set_vertex_buffer(0, text_vb.slice(..));
-                pass.set_index_buffer(text_ib.slice(..), wgpu::IndexFormat::Uint16);
-                for batch in &text_batches {
-                    apply_scissor(&mut pass, batch.clip_rect, surface_w, surface_h);
-                    let end = batch.index_start + batch.index_count;
-                    pass.draw_indexed(batch.index_start..end, 0, 0..1);
+                if !batch.text_batches.is_empty() {
+                    pass.set_pipeline(&self.text_pipeline);
+                    pass.set_bind_group(0, &self.text_bind_group, &[]);
+                    pass.set_vertex_buffer(0, batch.text_vb.slice(..));
+                    pass.set_index_buffer(batch.text_ib.slice(..), wgpu::IndexFormat::Uint16);
+                    for b in &batch.text_batches {
+                        apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
+                        let end = b.index_start + b.index_count;
+                        pass.draw_indexed(b.index_start..end, 0, 0..1);
+                    }
                 }
-            }
 
-            // Draw secure text (separate atlas)
-            if has_secure_text {
-                pass.set_pipeline(&self.text_pipeline);
-                pass.set_bind_group(0, &self.secure_text_bind_group, &[]);
-                pass.set_vertex_buffer(0, sec_text_vb.slice(..));
-                pass.set_index_buffer(sec_text_ib.slice(..), wgpu::IndexFormat::Uint16);
-                for batch in &sec_text_batches {
-                    apply_scissor(&mut pass, batch.clip_rect, surface_w, surface_h);
-                    let end = batch.index_start + batch.index_count;
-                    pass.draw_indexed(batch.index_start..end, 0, 0..1);
+                if !batch.sec_batches.is_empty() {
+                    pass.set_pipeline(&self.text_pipeline);
+                    pass.set_bind_group(0, &self.secure_text_bind_group, &[]);
+                    pass.set_vertex_buffer(0, batch.sec_vb.slice(..));
+                    pass.set_index_buffer(batch.sec_ib.slice(..), wgpu::IndexFormat::Uint16);
+                    for b in &batch.sec_batches {
+                        apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
+                        let end = b.index_start + b.index_count;
+                        pass.draw_indexed(b.index_start..end, 0, 0..1);
+                    }
                 }
             }
         }

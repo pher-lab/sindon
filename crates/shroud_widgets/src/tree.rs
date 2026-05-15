@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::event::{EventContext, EventResult, Key, NamedKey, TreeCommand, WidgetEvent};
 use crate::focus::{FocusDirection, FocusManager};
+use crate::layer::{LayerAnchor, LayerEntry, LayerOptions};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Point, Rect, SecurityLevel, Size, Theme};
@@ -59,6 +60,15 @@ pub struct WidgetTree {
     /// so re-arming requires another `focus_initially` call (e.g. inside a
     /// `replace_screen` build closure).
     pending_initial_focus: Option<usize>,
+    /// Active overlay layers (modals, dropdowns, context menus), painted
+    /// in push order over the main root. Topmost layer (last push) gets
+    /// event priority. While `layers` is non-empty, the main tree
+    /// receives no pointer or keyboard input — see [`Self::dispatch_event`].
+    layers: Vec<LayerEntry>,
+    /// Viewport size from the last layout pass. Held so paint and event
+    /// dispatch can place layer roots relative to it without threading a
+    /// size through every call site. `(0, 0)` until the first layout.
+    viewport: (f32, f32),
 }
 
 impl WidgetTree {
@@ -70,6 +80,8 @@ impl WidgetTree {
             hovered: None,
             focus: FocusManager::new(),
             pending_initial_focus: None,
+            layers: Vec::new(),
+            viewport: (0.0, 0.0),
         }
     }
 
@@ -140,6 +152,64 @@ impl WidgetTree {
         self.replace_root_boxed(Box::new(widget))
     }
 
+    /// Push an overlay layer with `widget` as its root, returning the
+    /// root's index so the caller can populate children via
+    /// [`Self::add_child`].
+    ///
+    /// Layers paint over the main tree in push order (last push = topmost)
+    /// and receive events first. While any layer is up, the main tree
+    /// receives no pointer or keyboard events — Tab routing is also
+    /// trapped inside the topmost layer (see [`Self::focusable_in_tab_order`]).
+    ///
+    /// The root widget defines the layer's natural size; positioning
+    /// inside the viewport follows [`LayerOptions::anchor`]. See
+    /// [`LayerOptions::modal`] / [`LayerOptions::popover`] for the
+    /// common presets.
+    ///
+    /// For event-handler driven pushes (e.g. opening a dialog from a
+    /// button click), use [`EventContext::push_layer`] instead — this
+    /// direct method is for app boot and tests.
+    pub fn push_layer(&mut self, options: LayerOptions, widget: impl Widget + 'static) -> usize {
+        self.push_layer_boxed(options, Box::new(widget))
+    }
+
+    /// Remove the top layer (last pushed), tombstoning its entire subtree.
+    ///
+    /// No-op when no layer is active. Returns the removed layer's root
+    /// index for callers that want to assert or log the dismiss.
+    pub fn pop_top_layer(&mut self) -> Option<usize> {
+        let entry = self.layers.pop()?;
+        let root = entry.root;
+        self.remove(root);
+        Some(root)
+    }
+
+    /// Remove the layer whose root is `root`, regardless of position in
+    /// the stack. Tombstones the entire subtree; returns `true` if a
+    /// matching layer was found.
+    ///
+    /// Useful when an event handler captured a specific layer's root
+    /// index and wants to dismiss that layer even though another layer
+    /// landed on top in the meantime.
+    pub fn pop_layer(&mut self, root: usize) -> bool {
+        let Some(pos) = self.layers.iter().position(|l| l.root == root) else {
+            return false;
+        };
+        self.layers.remove(pos);
+        self.remove(root);
+        true
+    }
+
+    /// Number of currently active overlay layers.
+    pub fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Index of the topmost layer's root, or `None` if no layer is active.
+    pub fn top_layer_root(&self) -> Option<usize> {
+        self.layers.last().map(|l| l.root)
+    }
+
     /// Remove `idx` and every descendant from the tree.
     ///
     /// The slots are tombstoned (left as `None`) rather than compacted, so
@@ -206,11 +276,18 @@ impl WidgetTree {
 
         // Drop nodes and their Taffy layout nodes. Widget `Drop` runs here
         // — secure widgets zeroize their backing memory.
-        for i in to_remove {
-            if let Some(node) = self.nodes[i].take() {
+        for i in &to_remove {
+            if let Some(node) = self.nodes[*i].take() {
                 self.layout.remove(node.layout_node);
             }
         }
+
+        // Defensive: if any of the removed nodes was a layer root (e.g.
+        // a user called `remove` directly instead of `pop_layer`), drop
+        // the matching LayerEntry so paint / dispatch don't iterate over
+        // a tombstoned root. Preserves the relative order of surviving
+        // layers, which determines paint / event priority.
+        self.layers.retain(|l| !to_remove.contains(&l.root));
     }
 
     fn collect_subtree_postorder(&self, idx: usize, out: &mut Vec<usize>) {
@@ -292,6 +369,45 @@ impl WidgetTree {
         self.set_root_boxed(widget)
     }
 
+    /// Insert `widget` as a parent-less node and register a layer entry
+    /// pointing at it. The node lives in the same `nodes` Vec as the main
+    /// tree (so `add_child`, `remove`, focus, etc. all work uniformly),
+    /// but is not reachable from `self.root` and so won't appear in the
+    /// main paint / hit-test walk.
+    fn push_layer_boxed(
+        &mut self,
+        options: LayerOptions,
+        widget: Box<dyn Widget + 'static>,
+    ) -> usize {
+        let effective_security = widget.security_level();
+        let initial_visible = widget.visible();
+        let mut style = widget.style();
+        if !initial_visible {
+            style = style.display_none();
+        }
+        let layout_node = self.layout.add_leaf(style);
+        let idx = self.nodes.len();
+        self.nodes.push(Some(WidgetNode {
+            widget,
+            layout_node,
+            children: Vec::new(),
+            parent: None,
+            effective_security,
+            last_applied_visible: initial_visible,
+        }));
+        self.layers.push(LayerEntry {
+            root: idx,
+            options,
+            offset: (0.0, 0.0),
+            measured_size: Size::ZERO,
+        });
+        // Cursor is no longer "over" any main-tree widget once a layer
+        // takes input priority — clear so a stale MouseLeave doesn't fire
+        // at the wrong time when the layer pops.
+        self.hovered = None;
+        idx
+    }
+
     /// Apply queued tree commands from an event context.
     ///
     /// Called by [`Self::dispatch_event`] (via [`Self::drain_commands`])
@@ -354,6 +470,20 @@ impl WidgetTree {
                     }
                     self.focus(target, event_ctx);
                 }
+                TreeCommand::PushLayer {
+                    options,
+                    root_widget,
+                    populate,
+                } => {
+                    let layer_root = self.push_layer_boxed(options, root_widget);
+                    populate(self, layer_root);
+                }
+                TreeCommand::PopLayer { root } => {
+                    self.pop_layer(root);
+                }
+                TreeCommand::PopTopLayer => {
+                    self.pop_top_layer();
+                }
             }
         }
     }
@@ -406,14 +536,39 @@ impl WidgetTree {
     /// `Container::column().center()` will collapse them to width 0 unless
     /// a fixed width is set. For the general case, prefer
     /// [`Self::compute_layout_with_measure`].
+    ///
+    /// Active layers are each laid out against the viewport with their
+    /// anchor-derived offset cached for paint and event dispatch.
     pub fn compute_layout(&mut self, width: f32, height: f32) {
+        self.viewport = (width, height);
+        self.refresh_visibility_styles();
         if let Some(root) = self.root {
-            self.refresh_visibility_styles();
             let root_node = self
                 .node(root)
                 .expect("root stays populated between set_root and remove")
                 .layout_node;
             self.layout.compute(root_node, width, height);
+        }
+        let layer_root_nodes: Vec<(usize, LayoutNodeId)> = self
+            .layers
+            .iter()
+            .map(|l| (l.root, self.node(l.root).expect("live layer root").layout_node))
+            .collect();
+        for (_, root_node) in &layer_root_nodes {
+            self.layout.compute(*root_node, width, height);
+        }
+        for (i, (root, root_node)) in layer_root_nodes.iter().enumerate() {
+            let layout_rect = self.layout.absolute_rect(*root_node);
+            let size = layout_rect.size;
+            let offset = match self.layers[i].options.anchor {
+                LayerAnchor::ViewportCenter => (
+                    ((width - size.width) * 0.5).max(0.0),
+                    ((height - size.height) * 0.5).max(0.0),
+                ),
+            };
+            self.layers[i].measured_size = size;
+            self.layers[i].offset = offset;
+            let _ = root;
         }
     }
 
@@ -442,6 +597,10 @@ impl WidgetTree {
     /// This is the path the real event loop uses. It lets `TextWidget` and
     /// `Button` report their natural size based on their shaped content, so
     /// flex centering / gap / grow work without wrapper containers.
+    ///
+    /// Each active overlay layer is laid out as its own independent root
+    /// against the viewport; the resulting size + anchor-derived offset
+    /// is cached on the [`LayerEntry`] for paint and event dispatch.
     pub fn compute_layout_with_measure(
         &mut self,
         width: f32,
@@ -449,12 +608,8 @@ impl WidgetTree {
         text_engine: &mut TextEngine,
         theme: &Theme,
     ) {
-        let Some(root) = self.root else { return };
+        self.viewport = (width, height);
         self.refresh_visibility_styles();
-        let root_node = self
-            .node(root)
-            .expect("root stays populated between set_root and remove")
-            .layout_node;
 
         // Invalidate Taffy's measure cache. Taffy memoizes leaf measure
         // results by (node, available_width, available_height); when a
@@ -470,7 +625,9 @@ impl WidgetTree {
 
         // Reverse-lookup Taffy node → widget index. Built fresh every layout
         // pass; cheap for the tree sizes we target, and keeps us from having
-        // to stash indices as Taffy node-context.
+        // to stash indices as Taffy node-context. Shared across the main
+        // root and every layer root pass — measure logic is the same
+        // closure either way.
         let node_map: HashMap<LayoutNodeId, usize> = self
             .nodes
             .iter()
@@ -478,31 +635,85 @@ impl WidgetTree {
             .filter_map(|(i, slot)| slot.as_ref().map(|n| (n.layout_node, i)))
             .collect();
 
-        let nodes = &self.nodes;
-        self.layout
-            .compute_with_measure(root_node, width, height, |node_id, query| {
-                let Some(&widget_idx) = node_map.get(&node_id) else {
-                    // Node unknown to us (shouldn't happen in practice) —
-                    // return zero so Taffy falls back to style-based sizing.
-                    return Size::ZERO;
-                };
-                let Some(node) = nodes[widget_idx].as_ref() else {
-                    return Size::ZERO;
-                };
+        // Collect Taffy roots up front so the immut `&self.nodes` borrow
+        // can drop before we call `&mut self.layout` for compute.
+        let main_root_node = self
+            .root
+            .and_then(|r| self.node(r))
+            .map(|n| n.layout_node);
+        let layer_root_nodes: Vec<(usize, LayoutNodeId)> = self
+            .layers
+            .iter()
+            .map(|l| (l.root, self.node(l.root).expect("live layer root").layout_node))
+            .collect();
 
-                // Width constraint: parent-decided width wins over available.
-                let constraint = query.known_width.or(query.available_width);
+        if let Some(root_node) = main_root_node {
+            let nodes = &self.nodes;
+            self.layout
+                .compute_with_measure(root_node, width, height, |node_id, query| {
+                    measure_node(&node_map, nodes, text_engine, theme, node_id, query)
+                });
+        }
 
-                let widget = node.widget.as_ref();
-                let mut ctx = MeasureContext::new(text_engine, theme);
-                widget.measure(constraint, &mut ctx).unwrap_or(Size::ZERO)
-            });
+        // Each layer root is its own Taffy root with the viewport as
+        // available space. The widget's flex style controls how it
+        // grows / shrinks inside that space (e.g. fixed-width modal vs.
+        // content-sized popover).
+        for (_, root_node) in &layer_root_nodes {
+            let nodes = &self.nodes;
+            self.layout
+                .compute_with_measure(*root_node, width, height, |node_id, query| {
+                    measure_node(&node_map, nodes, text_engine, theme, node_id, query)
+                });
+        }
+
+        // Update each layer's offset + measured size from the layout
+        // result. Reads must come after compute so the rects are fresh.
+        for (i, (root, root_node)) in layer_root_nodes.iter().enumerate() {
+            let layout_rect = self.layout.absolute_rect(*root_node);
+            let size = layout_rect.size;
+            let offset = match self.layers[i].options.anchor {
+                LayerAnchor::ViewportCenter => (
+                    ((width - size.width) * 0.5).max(0.0),
+                    ((height - size.height) * 0.5).max(0.0),
+                ),
+            };
+            self.layers[i].measured_size = size;
+            self.layers[i].offset = offset;
+            // Silence the lint until we wire AnchorRect — we keep `root`
+            // bound for future variants that need the layer-root index.
+            let _ = root;
+        }
     }
 
     /// Paint the entire widget tree, returning draw commands.
+    ///
+    /// Order:
+    /// 1. Main root subtree (if any) — drawn first so layers appear on top.
+    /// 2. Each layer in push order; before painting, the layer's batch
+    ///    boundary is recorded via [`PaintContext::begin_layer`] so the
+    ///    renderer can flush rects → glyphs *within* the layer before
+    ///    starting the next layer. Without this the main tree's text
+    ///    would draw on top of layer backgrounds (rect/glyph pipelines
+    ///    are flushed once each, so paint order within the same pipeline
+    ///    is preserved, but glyphs always overdraw all rects globally).
+    ///    For each layer: full-viewport scrim rect (if configured),
+    ///    then the layer subtree shifted by its anchor offset so the
+    ///    painted rect lands at the right viewport position.
     pub fn paint(&self, ctx: &mut PaintContext) {
         if let Some(root) = self.root {
             self.paint_node(root, ctx);
+        }
+        for layer in &self.layers {
+            ctx.begin_layer();
+            if let Some(scrim) = layer.options.scrim {
+                let (vw, vh) = self.viewport;
+                ctx.fill_rect(Rect::new(0.0, 0.0, vw, vh), scrim);
+            }
+            let (ox, oy) = layer.offset;
+            ctx.push_offset(ox, oy);
+            self.paint_node(layer.root, ctx);
+            ctx.pop_offset();
         }
     }
 
@@ -534,6 +745,13 @@ impl WidgetTree {
     /// For `MouseMove`, automatically generates `MouseEnter`/`MouseLeave`
     /// events when the cursor moves between widgets.
     ///
+    /// When at least one overlay layer is active, dispatch is constrained
+    /// to the topmost layer's subtree — the main tree (and lower layers)
+    /// see no pointer or keyboard input. Pointer events outside the layer's
+    /// interactive rect trigger the layer's dismiss-on-outside-click path
+    /// (when configured) and are otherwise swallowed; `Escape` dismisses
+    /// the topmost layer when its `dismiss_on_escape` flag is set.
+    ///
     /// After the walk completes, drains any tree mutations that handlers
     /// queued on the context (see [`EventContext::add_child`] and friends).
     pub fn dispatch_event(
@@ -541,9 +759,53 @@ impl WidgetTree {
         event: &WidgetEvent,
         event_ctx: &mut EventContext,
     ) -> EventResult {
-        // Generate MouseEnter/MouseLeave on cursor movement
-        if let WidgetEvent::MouseMove { position } = event {
-            self.update_hover(*position, event_ctx);
+        // Pick the subtree that owns this event: the topmost layer if any,
+        // otherwise the main root. `offset` translates viewport coords into
+        // the subtree's local space (zero for the main tree).
+        let (target_root, offset, layer_active) = match self.layers.last() {
+            Some(layer) => (Some(layer.root), layer.offset, true),
+            None => (self.root, (0.0, 0.0), false),
+        };
+
+        let result = self.dispatch_with_target(target_root, offset, layer_active, event, event_ctx);
+
+        // Drain tree-mutation commands queued by handlers. Loops because
+        // `TreeCommand::Focus` re-enters `Widget::event` (FocusLost/Gained)
+        // and those handlers can themselves enqueue more commands —
+        // `drain_commands` keeps going until the queue settles.
+        self.drain_commands(event_ctx);
+
+        result
+    }
+
+    fn dispatch_with_target(
+        &mut self,
+        target_root: Option<usize>,
+        offset: (f32, f32),
+        layer_active: bool,
+        event: &WidgetEvent,
+        event_ctx: &mut EventContext,
+    ) -> EventResult {
+        let Some(target) = target_root else {
+            return EventResult::Ignored;
+        };
+
+        // Escape dismisses the topmost layer when configured. Checked
+        // first so dismiss-aware modal flows aren't accidentally swallowed
+        // by a focused Input's KeyDown handler.
+        if layer_active
+            && matches!(
+                event,
+                WidgetEvent::KeyDown {
+                    key: Key::Named(NamedKey::Escape)
+                }
+            )
+        {
+            let top = self.layers.last().expect("layer_active implies a layer");
+            if top.options.dismiss_on_escape {
+                self.pop_top_layer();
+                return EventResult::Consumed;
+            }
         }
 
         // Tab / Shift+Tab: intercept before the normal walk. The tree
@@ -551,8 +813,10 @@ impl WidgetTree {
         // widget and dispatches `FocusLost` + `FocusGained` to the two
         // affected widgets; no widget sees the raw Tab KeyDown. Shift
         // state comes from the modifier snapshot maintained by the
-        // event loop on `ModifiersChanged`.
-        let result = if matches!(
+        // event loop on `ModifiersChanged`. `focusable_in_tab_order`
+        // already walks the topmost layer's subtree when one is active,
+        // so Tab is trapped inside the layer without extra plumbing.
+        if matches!(
             event,
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Tab)
@@ -564,37 +828,78 @@ impl WidgetTree {
                 FocusDirection::Forward
             };
             self.advance_focus(dir, event_ctx);
-            EventResult::Consumed
-        } else {
-            // Click-to-focus: before the widget sees MouseDown, route
-            // focus to the hit focusable (or clear focus if the click
-            // missed every focusable). Matches browsers' focus → click
-            // event order, so a widget's MouseDown handler observes a
-            // consistent `focused` flag (populated by FocusGained).
-            if let WidgetEvent::MouseDown { position, .. } = event {
-                let hit = self.hit_test(*position);
-                let new_focus = hit.filter(|&idx| {
-                    self.node(idx)
-                        .map(|n| n.widget.focusable())
-                        .unwrap_or(false)
-                });
-                self.focus(new_focus, event_ctx);
-            }
+            return EventResult::Consumed;
+        }
 
-            if let Some(root) = self.root {
-                self.dispatch_to_node(root, event, event_ctx)
-            } else {
-                EventResult::Ignored
+        // Pointer events: when a layer is up, route based on whether the
+        // cursor is inside the layer's interactive rect. Outside hits
+        // either dismiss (configurable) or are silently swallowed, but
+        // never fall through to the main tree.
+        if layer_active {
+            if let Some(pos) = event_position(event) {
+                let local_pos = Point::new(pos.x - offset.0, pos.y - offset.1);
+                let layer_size = self.layers.last().unwrap().measured_size;
+                let layer_rect = Rect::new(0.0, 0.0, layer_size.width, layer_size.height);
+                if !layer_rect.contains(local_pos) {
+                    // Outside the layer's content rect.
+                    if let WidgetEvent::MouseMove { .. } = event {
+                        // Cursor over scrim / margin: drop any layer-side
+                        // hover (so widgets get a final MouseLeave) but
+                        // don't dismiss on hover.
+                        self.clear_hover(event_ctx);
+                        return EventResult::Ignored;
+                    }
+                    if let WidgetEvent::MouseDown { .. } = event {
+                        let dismiss = self
+                            .layers
+                            .last()
+                            .map(|l| l.options.dismiss_on_outside_click)
+                            .unwrap_or(false);
+                        if dismiss {
+                            self.pop_top_layer();
+                        }
+                    }
+                    // MouseUp / Scroll / other position-bearing events
+                    // outside the layer are silently swallowed.
+                    return EventResult::Consumed;
+                }
             }
+        }
+
+        // From here on, events are dispatched against `target`. Position-
+        // bearing events are pre-shifted by `-offset` so widget callbacks
+        // see positions in the subtree's local coordinate space (matching
+        // their `absolute_rect`, which Taffy already reports relative to
+        // the subtree root).
+        let shifted_owned;
+        let shifted: &WidgetEvent = if offset == (0.0, 0.0) {
+            event
+        } else {
+            shifted_owned = shift_event_position(event, -offset.0, -offset.1);
+            &shifted_owned
         };
 
-        // Drain tree-mutation commands queued by handlers. Loops because
-        // `TreeCommand::Focus` re-enters `Widget::event` (FocusLost/Gained)
-        // and those handlers can themselves enqueue more commands —
-        // `drain_commands` keeps going until the queue settles.
-        self.drain_commands(event_ctx);
+        // Generate MouseEnter/MouseLeave on cursor movement within the
+        // target subtree.
+        if let WidgetEvent::MouseMove { position } = shifted {
+            self.update_hover_in(target, *position, event_ctx);
+        }
 
-        result
+        // Click-to-focus: route focus before the widget sees MouseDown so
+        // its handler observes a consistent `focused` flag. Scoped to the
+        // target subtree — clicking on a layer never refocuses something
+        // behind it.
+        if let WidgetEvent::MouseDown { position, .. } = shifted {
+            let hit = self.hit_test_in(target, *position);
+            let new_focus = hit.filter(|&idx| {
+                self.node(idx)
+                    .map(|n| n.widget.focusable())
+                    .unwrap_or(false)
+            });
+            self.focus(new_focus, event_ctx);
+        }
+
+        self.dispatch_to_node(target, shifted, event_ctx)
     }
 
     /// Index of the widget that currently has keyboard focus, if any.
@@ -606,16 +911,19 @@ impl WidgetTree {
     }
 
     /// Collect focusable widgets in tab order — DFS pre-order over the
-    /// root's subtree, skipping invisible branches.
+    /// active subtree, skipping invisible branches.
     ///
     /// Invisible widgets collapse the entire subtree (matching
     /// `display: none` layout semantics), so a focusable child inside a
-    /// hidden container is not reachable. Exposed for tests and for
-    /// callers that want to implement custom traversal on top of the
-    /// primitive set.
+    /// hidden container is not reachable. When at least one layer is
+    /// active, traversal walks the topmost layer's subtree only — this
+    /// is what traps Tab inside an open modal. Exposed for tests and
+    /// for callers that want to implement custom traversal on top of
+    /// the primitive set.
     pub fn focusable_in_tab_order(&self) -> Vec<usize> {
         let mut out = Vec::new();
-        if let Some(root) = self.root {
+        let start = self.top_layer_root().or(self.root);
+        if let Some(root) = start {
             self.collect_focusable(root, &mut out);
         }
         out
@@ -730,9 +1038,22 @@ impl WidgetTree {
         prev
     }
 
-    /// Track which widget the cursor is over and generate Enter/Leave events.
-    fn update_hover(&mut self, pos: Point, event_ctx: &mut EventContext) {
-        let new_hover = self.hit_test(pos);
+    /// Update the tree-wide `hovered` pointer using a hit-test rooted at
+    /// `subtree_root`, and emit `MouseEnter` / `MouseLeave` on the
+    /// affected widgets. `pos` is in the subtree's local coordinate
+    /// space (callers translate any layer offset before invoking).
+    ///
+    /// `new_hover` may be `None` when the cursor is over the subtree's
+    /// area but missed every visible widget (e.g. on a layer's scrim or
+    /// padding), in which case any previously hovered widget receives a
+    /// final `MouseLeave` and the pointer clears.
+    fn update_hover_in(
+        &mut self,
+        subtree_root: usize,
+        pos: Point,
+        event_ctx: &mut EventContext,
+    ) {
+        let new_hover = self.hit_test_in(subtree_root, pos);
 
         if new_hover == self.hovered {
             return;
@@ -763,9 +1084,27 @@ impl WidgetTree {
         self.hovered = new_hover;
     }
 
-    /// Find the deepest (frontmost) widget at the given position.
-    fn hit_test(&self, pos: Point) -> Option<usize> {
-        self.root.and_then(|root| self.hit_test_node(root, pos))
+    /// Clear the hovered pointer, emitting `MouseLeave` to the current
+    /// hover target if any. Used when the cursor leaves the topmost
+    /// layer's interactive rect (the scrim acts like "nothing is
+    /// hovered" from the widget's perspective).
+    fn clear_hover(&mut self, event_ctx: &mut EventContext) {
+        if let Some(old_idx) = self.hovered.take() {
+            if let Some(old_node) = self.node(old_idx) {
+                let old_rect = self.layout.absolute_rect(old_node.layout_node);
+                if let Some(n) = self.node_mut(old_idx) {
+                    n.widget
+                        .event(&WidgetEvent::MouseLeave, old_rect, event_ctx);
+                }
+            }
+        }
+    }
+
+    /// Hit-test starting from `subtree_root`. `pos` is in that subtree's
+    /// local coordinate space — for layer dispatch the caller subtracts
+    /// the layer's anchor offset before calling.
+    fn hit_test_in(&self, subtree_root: usize, pos: Point) -> Option<usize> {
+        self.hit_test_node(subtree_root, pos)
     }
 
     fn hit_test_node(&self, idx: usize, pos: Point) -> Option<usize> {
@@ -942,6 +1281,29 @@ impl Default for WidgetTree {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Shared measure callback for `compute_with_measure`. Factored out so the
+/// main-root and per-layer compute calls use identical logic without
+/// duplicating the closure body in `compute_layout_with_measure`.
+fn measure_node(
+    node_map: &HashMap<LayoutNodeId, usize>,
+    nodes: &[Option<WidgetNode>],
+    text_engine: &mut TextEngine,
+    theme: &Theme,
+    node_id: LayoutNodeId,
+    query: shroud_layout::MeasureQuery,
+) -> Size {
+    let Some(&widget_idx) = node_map.get(&node_id) else {
+        return Size::ZERO;
+    };
+    let Some(node) = nodes[widget_idx].as_ref() else {
+        return Size::ZERO;
+    };
+    let constraint = query.known_width.or(query.available_width);
+    let widget = node.widget.as_ref();
+    let mut ctx = MeasureContext::new(text_engine, theme);
+    widget.measure(constraint, &mut ctx).unwrap_or(Size::ZERO)
 }
 
 /// Extract the position from events that carry one, for hit testing.

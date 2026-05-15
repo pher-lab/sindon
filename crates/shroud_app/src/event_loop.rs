@@ -621,6 +621,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     &paint_ctx.rects,
                     &paint_ctx.glyphs,
                     &paint_ctx.secure_glyphs,
+                    paint_ctx.layer_starts(),
                 ) {
                     Ok(()) => {}
                     Err(e) => {
