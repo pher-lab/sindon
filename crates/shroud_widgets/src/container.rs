@@ -1,11 +1,15 @@
 //! Container widget — a flexbox layout container.
 
-use crate::event::{EventContext, EventResult, WidgetEvent};
+use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, Rect};
+use shroud_core::{Color, Point, Rect};
 use shroud_layout::FlexStyle;
 use shroud_reactive::Reactive;
+
+/// Callback type for [`Container::on_context_menu`]. Kept as a type alias
+/// so the struct field stays inside `clippy::type_complexity`.
+type ContextMenuHandler = Box<dyn FnMut(Point, &mut EventContext)>;
 
 /// A flexbox container widget.
 ///
@@ -32,6 +36,13 @@ pub struct Container {
     hovered: bool,
     radius: f32,
     visible: Reactive<bool>,
+    /// Optional right-click handler. When set, `MouseDown { button: Right }`
+    /// inside the container's layout rect invokes the handler with the
+    /// click position (already translated to the subtree's local coordinate
+    /// space by tree dispatch) and the event context — typical use is to
+    /// `ctx.push_layer(LayerAnchor::AnchorRect { ... }, ...)` so a context
+    /// menu pops up at the cursor.
+    on_context_menu: Option<ContextMenuHandler>,
 }
 
 impl Container {
@@ -47,6 +58,7 @@ impl Container {
             hovered: false,
             radius: 0.0,
             visible: Reactive::Static(true),
+            on_context_menu: None,
         }
     }
 
@@ -65,6 +77,7 @@ impl Container {
             hovered: false,
             radius: 0.0,
             visible: Reactive::Static(true),
+            on_context_menu: None,
         }
     }
 
@@ -202,6 +215,42 @@ impl Container {
         self.style = self.style.grow(factor);
         self
     }
+
+    /// Register a right-click handler.
+    ///
+    /// The handler runs on `MouseDown { button: Right }` inside this
+    /// container's layout rect. It receives the click position (already
+    /// in the subtree's local coordinate space — same frame as
+    /// `paint`'s `layout` argument) and the event context, so the
+    /// typical body opens a context menu layer anchored at the cursor:
+    ///
+    /// ```ignore
+    /// Container::row().on_context_menu(|pos, ctx| {
+    ///     let anchor = Rect::new(pos.x, pos.y, 0.0, 0.0);
+    ///     ctx.push_layer(
+    ///         LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
+    ///             rect: anchor,
+    ///             prefer: Placement::Below,
+    ///         }),
+    ///         ContextMenuRoot::new(),
+    ///         |tree, root| {
+    ///             tree.add_child(root, MenuItem::new("Rename", |c| { /* … */ c.pop_top_layer(); }));
+    ///             tree.add_child(root, MenuItem::new("Delete", |c| { /* … */ c.pop_top_layer(); }));
+    ///         },
+    ///     );
+    /// })
+    /// ```
+    ///
+    /// Setting this also opts the container into pointer events so the
+    /// right-click reaches `event` — there is no need to chain
+    /// [`Container::hoverable`] separately.
+    pub fn on_context_menu(
+        mut self,
+        handler: impl FnMut(Point, &mut EventContext) + 'static,
+    ) -> Self {
+        self.on_context_menu = Some(Box::new(handler));
+        self
+    }
 }
 
 impl Widget for Container {
@@ -230,12 +279,21 @@ impl Widget for Container {
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        _layout: Rect,
-        _ctx: &mut EventContext,
-    ) -> EventResult {
+    fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
+        // Right-click → context menu (independent of hoverable). Consumed
+        // so a parent container with its own on_context_menu doesn't fire
+        // twice for the same click.
+        if let WidgetEvent::MouseDown {
+            button: MouseButton::Right,
+            position,
+        } = event
+        {
+            if let Some(handler) = &mut self.on_context_menu {
+                handler(*position, ctx);
+                return EventResult::Consumed;
+            }
+        }
+
         // Stay inert when not opted in — keeps the no-hover path identical
         // to the pre-A4 behavior (no events consumed, no extra book-keeping).
         if !self.hoverable {

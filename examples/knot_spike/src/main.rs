@@ -25,10 +25,14 @@ use chacha20poly1305::{
 use zeroize::Zeroizing;
 
 use shroud::app::App;
+use shroud::core::Rect;
 use shroud::reactive::{Reactive, Signal};
 use shroud::security::SecureString;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, Dropdown, ScrollView, SecureInput, TextWidget};
+use shroud::widgets::{
+    Button, Container, Dropdown, LayerAnchor, LayerOptions, MenuItem, Placement, ScrollView,
+    SecureInput, TextWidget,
+};
 
 const DEMO_PASSWORD: &str = "knot-demo-2026";
 const DEMO_NOTE_TITLE: &str = "Welcome to Knot";
@@ -207,6 +211,11 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         _ => shroud::core::Color::rgb(0.12, 0.12, 0.18), // default
     });
 
+    // Right-click on the card → context menu with tint shortcuts. Phase 24
+    // dogfood for `Container::on_context_menu` + `MenuItem` + AnchorRect-
+    // anchored popover layer. The menu's tint actions write to the same
+    // signal the dropdown writes to, so the card re-tints either way.
+    let menu_tint = tint;
     let card = tree.add_child(
         root,
         Container::column()
@@ -215,7 +224,37 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .padding(32.0)
             .gap(16.0)
             .background(card_bg)
-            .radius(16.0),
+            .radius(16.0)
+            .on_context_menu(move |pos, ctx| {
+                let anchor = Rect::new(pos.x, pos.y, 0.0, 0.0);
+                let menu_root = Container::column()
+                    .padding(4.0)
+                    .background(shroud::core::Color::rgb(0.15, 0.15, 0.18))
+                    .radius(6.0);
+                ctx.push_layer(
+                    LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
+                        rect: anchor,
+                        prefer: Placement::Below,
+                    }),
+                    menu_root,
+                    move |tree, root| {
+                        tree.add_child(
+                            root,
+                            MenuItem::new("Reset tint", move |c| {
+                                menu_tint.set(0);
+                                c.pop_top_layer();
+                            }),
+                        );
+                        tree.add_child(
+                            root,
+                            MenuItem::new("Cycle tint", move |c| {
+                                menu_tint.set((menu_tint.get() + 1) % 4);
+                                c.pop_top_layer();
+                            }),
+                        );
+                    },
+                );
+            }),
     );
 
     tree.add_child(card, TextWidget::new("Knot").font_size(40.0));

@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use crate::event::{EventContext, EventResult, Key, NamedKey, TreeCommand, WidgetEvent};
+use crate::event::{
+    EventContext, EventResult, Key, MouseButton, NamedKey, TreeCommand, WidgetEvent,
+};
 use crate::focus::{FocusDirection, FocusManager};
 use crate::layer::{LayerAnchor, LayerEntry, LayerOptions, Placement};
 use crate::paint::PaintContext;
@@ -969,8 +971,14 @@ impl WidgetTree {
         // Click-to-focus: route focus before the widget sees MouseDown so
         // its handler observes a consistent `focused` flag. Scoped to the
         // target subtree — clicking on a layer never refocuses something
-        // behind it.
-        if let WidgetEvent::MouseDown { position, .. } = shifted {
+        // behind it. Only the **primary** (Left) button drives focus —
+        // matches web/native behavior where right-click opens a context
+        // menu without stealing focus from the currently focused element.
+        if let WidgetEvent::MouseDown {
+            position,
+            button: MouseButton::Left,
+        } = shifted
+        {
             let hit = self.hit_test_in(target, *position);
             let new_focus = hit.filter(|&idx| {
                 self.node(idx)
@@ -1204,7 +1212,10 @@ impl WidgetTree {
     /// hover-bubble path which already filtered indices through
     /// `ancestors_inclusive`.
     fn emit_to(&mut self, idx: usize, event: &WidgetEvent, event_ctx: &mut EventContext) {
-        let Some(rect) = self.node(idx).map(|n| self.layout.absolute_rect(n.layout_node)) else {
+        let Some(rect) = self
+            .node(idx)
+            .map(|n| self.layout.absolute_rect(n.layout_node))
+        else {
             return;
         };
         if let Some(n) = self.node_mut(idx) {

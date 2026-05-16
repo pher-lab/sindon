@@ -57,7 +57,11 @@ fn main() {
                     .background(Color::rgb(0.12, 0.12, 0.18))
                     .radius(6.0),
             );
-            for title in ["Welcome to Knot", "Meeting notes \u{2014} Apr 30", "Grocery list"] {
+            for title in [
+                "Welcome to Knot",
+                "Meeting notes \u{2014} Apr 30",
+                "Grocery list",
+            ] {
                 let row = tree.add_child(
                     list,
                     Container::row()
@@ -66,7 +70,10 @@ fn main() {
                         .radius(4.0)
                         .align_center(),
                 );
-                tree.add_child(row, TextWidget::new(title).color(Color::rgb(0.85, 0.87, 0.92)));
+                tree.add_child(
+                    row,
+                    TextWidget::new(title).color(Color::rgb(0.85, 0.87, 0.92)),
+                );
             }
 
             // Pattern 2: explicit hover bg override. Useful when the

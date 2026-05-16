@@ -3660,15 +3660,11 @@ impl shroud_widgets::Widget for HoverProbe {
     ) -> EventResult {
         match event {
             WidgetEvent::MouseEnter => {
-                self.events
-                    .borrow_mut()
-                    .push(format!("{}:enter", self.tag));
+                self.events.borrow_mut().push(format!("{}:enter", self.tag));
                 EventResult::Ignored
             }
             WidgetEvent::MouseLeave => {
-                self.events
-                    .borrow_mut()
-                    .push(format!("{}:leave", self.tag));
+                self.events.borrow_mut().push(format!("{}:leave", self.tag));
                 EventResult::Ignored
             }
             _ => EventResult::Ignored,
@@ -3725,7 +3721,7 @@ fn container_without_hoverable_paints_nothing_on_hover() {
     // matter where the cursor sits. Guards against accidentally turning
     // every container into a hover target.
     let mut tree = WidgetTree::new();
-    let root = tree.set_root(Container::column().width(200.0).height(200.0));
+    let _root = tree.set_root(Container::column().width(200.0).height(200.0));
     tree.compute_layout(200.0, 200.0);
 
     let mut event_ctx = EventContext::new();

@@ -12,6 +12,7 @@ pub mod event;
 pub mod focus;
 mod input;
 pub mod layer;
+mod menu_item;
 pub mod paint;
 mod scroll_view;
 mod secure_input;
@@ -29,6 +30,7 @@ pub use event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey
 pub use focus::{FocusDirection, FocusManager};
 pub use input::Input;
 pub use layer::{LayerAnchor, LayerOptions, Placement};
+pub use menu_item::MenuItem;
 pub use paint::PaintContext;
 pub use scroll_view::ScrollView;
 pub use secure_input::SecureInput;
