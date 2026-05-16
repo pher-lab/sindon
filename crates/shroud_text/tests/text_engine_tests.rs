@@ -130,6 +130,70 @@ fn shape_with_max_width_wraps() {
 }
 
 #[test]
+fn cursor_position_empty_prefix_is_origin() {
+    let mut engine = TextEngine::new();
+    let (x, y) = engine.cursor_position("", 16.0, 20.0, None);
+    assert_eq!(x, 0.0);
+    assert_eq!(y, 0.0);
+}
+
+#[test]
+fn cursor_position_grows_along_x_for_single_line() {
+    let mut engine = TextEngine::new();
+    let (x_a, y_a) = engine.cursor_position("A", 16.0, 20.0, None);
+    let (x_abc, y_abc) = engine.cursor_position("ABC", 16.0, 20.0, None);
+    assert!(x_abc > x_a, "longer prefix should sit further right");
+    assert_eq!(y_a, y_abc, "single-line cursor stays on the same line");
+}
+
+#[test]
+fn cursor_position_after_single_newline_does_not_double_count_line_height() {
+    // Regression: an earlier version added `line_height` itself on top of
+    // the trailing empty BufferLine's `line_top`, landing the cursor on
+    // line 3 instead of line 2 for "abc\n". Visible in textarea_demo as
+    // "press Enter, caret jumps an extra line".
+    let mut engine = TextEngine::new();
+    let (x, y) = engine.cursor_position("abc\n", 16.0, 19.2, None);
+    assert_eq!(x, 0.0, "cursor x should sit at left margin after a newline");
+    assert!(
+        (y - 19.2).abs() < 0.5,
+        "cursor y must be exactly one line_height after one '\\n', got {y}"
+    );
+}
+
+#[test]
+fn cursor_position_after_hard_break_lands_on_next_line() {
+    let mut engine = TextEngine::new();
+    let (x_pre, _y_pre) = engine.cursor_position("foo", 16.0, 20.0, None);
+    let (x_after, y_after) = engine.cursor_position("foo\n", 16.0, 20.0, None);
+
+    assert_eq!(
+        x_after, 0.0,
+        "cursor after a hard break starts at line origin"
+    );
+    assert!(
+        y_after > 0.0,
+        "cursor after a hard break sits below the first line"
+    );
+    // Sanity: the prefix sat to the right of origin, the post-\n cursor is at origin.
+    assert!(x_pre > 0.0);
+}
+
+#[test]
+fn cursor_position_soft_wraps_into_extra_lines() {
+    let mut engine = TextEngine::new();
+    // Long enough to exceed a narrow max_width.
+    let (_x_no_wrap, y_no_wrap) = engine.cursor_position("Hello World Test", 16.0, 20.0, None);
+    let (_x_wrapped, y_wrapped) =
+        engine.cursor_position("Hello World Test", 16.0, 20.0, Some(50.0));
+
+    assert!(
+        y_wrapped > y_no_wrap,
+        "cursor wrapped past max_width should land on a lower line"
+    );
+}
+
+#[test]
 fn multiple_shape_calls_are_independent() {
     let mut engine = TextEngine::new();
 

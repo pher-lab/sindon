@@ -13,6 +13,15 @@
 //! signal. No Effect loop — widgets don't subscribe to signals, they just
 //! pull on paint; a write-back to the same signal has no subscribers that
 //! would re-trigger this widget.
+//!
+//! ## Multi-line mode (Phase 25)
+//!
+//! Calling [`Input::multiline`] flips the widget into a textarea: Enter
+//! inserts `\n` (instead of firing `on_submit`), text soft-wraps at the
+//! widget's content width, ArrowUp / ArrowDown navigate between hard
+//! lines preserving the visual column, and the default height grows to
+//! [`Input::lines`] line-heights. All other behavior (signal binding,
+//! placeholder, focus ring, on_change) carries over unchanged.
 
 use std::cell::{Cell, RefCell};
 
@@ -50,6 +59,19 @@ pub struct Input {
     placeholder: String,
     font_size: Option<f32>,
     focused: bool,
+    /// Multi-line / textarea mode. When `true`, Enter inserts `\n`
+    /// (instead of firing `on_submit`) and ArrowUp/Down navigate between
+    /// hard lines preserving the visual column.
+    multiline: bool,
+    /// Number of line-heights to size the field to when multi-line is on.
+    /// `None` = a small built-in default (3 lines). Ignored in single-line
+    /// mode where `min_height` derives from `font_size`.
+    line_count: Option<usize>,
+    /// "Sticky" column tracked across ArrowUp / ArrowDown so vertical
+    /// navigation through ragged lines lands the cursor at the same
+    /// visual offset as where the user originally started navigating.
+    /// Cleared by any non-vertical edit or motion.
+    desired_col: Cell<Option<usize>>,
     on_change: Option<TextCallback>,
     on_submit: Option<TextCallback>,
     // Colors (None = read from theme).
@@ -75,6 +97,9 @@ impl Input {
             placeholder: String::new(),
             font_size: None,
             focused: false,
+            multiline: false,
+            line_count: None,
+            desired_col: Cell::new(None),
             on_change: None,
             on_submit: None,
             bg_color: None,
@@ -120,6 +145,27 @@ impl Input {
     /// Set the font size.
     pub fn font_size(mut self, px: f32) -> Self {
         self.font_size = Some(px);
+        self
+    }
+
+    /// Switch this input to multi-line (textarea) mode.
+    ///
+    /// In multi-line mode, Enter inserts a newline at the cursor instead of
+    /// firing [`on_submit`](Self::on_submit), text soft-wraps at the field's
+    /// content width, and ArrowUp / ArrowDown navigate between hard lines
+    /// while preserving the visual column. Tab is *not* captured — the focus
+    /// manager keeps owning it — so the field stays a friendly form citizen.
+    pub fn multiline(mut self) -> Self {
+        self.multiline = true;
+        self
+    }
+
+    /// Initial visible row count for multi-line mode. Used to size the
+    /// field's `min_height` to `lines * line_height + 2 * padding`. Has no
+    /// effect when [`multiline`](Self::multiline) is not set. Defaults to
+    /// 3 lines.
+    pub fn lines(mut self, count: usize) -> Self {
+        self.line_count = Some(count.max(1));
         self
     }
 
@@ -238,6 +284,42 @@ impl Input {
             src.set(self.value.borrow().clone());
         }
     }
+
+    /// Hard-line index + byte column within that line for the current
+    /// cursor. Hard-line model: navigation treats each `\n`-separated
+    /// paragraph as one line, regardless of soft wrap. Mirrors what most
+    /// simple textareas (and `<textarea>`) do for ArrowUp/Down.
+    fn line_col_for_cursor(value: &str, cursor: usize) -> (usize, usize) {
+        let prefix = &value[..cursor];
+        let line = prefix.matches('\n').count();
+        let col = match prefix.rfind('\n') {
+            Some(nl) => cursor - (nl + 1),
+            None => cursor,
+        };
+        (line, col)
+    }
+
+    /// Inverse of [`line_col_for_cursor`]. Snaps `col` down to the chosen
+    /// line's length (so ArrowDown into a shorter line lands at end-of-line)
+    /// and to the nearest preceding char boundary (so we never split a
+    /// multi-byte codepoint).
+    fn cursor_for_line_col(value: &str, line: usize, col: usize) -> usize {
+        let mut line_start = 0;
+        for _ in 0..line {
+            match value[line_start..].find('\n') {
+                Some(rel) => line_start += rel + 1,
+                None => return value.len(),
+            }
+        }
+        let line_end = value[line_start..]
+            .find('\n')
+            .map_or(value.len(), |rel| line_start + rel);
+        let mut target = (line_start + col).min(line_end);
+        while target > line_start && !value.is_char_boundary(target) {
+            target -= 1;
+        }
+        target
+    }
 }
 
 impl Default for Input {
@@ -253,7 +335,15 @@ impl Widget for Input {
 
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
-        FlexStyle::new().padding(8.0).min_height(font_size + 20.0)
+        if self.multiline {
+            let line_height = font_size * 1.2;
+            let rows = self.line_count.unwrap_or(3) as f32;
+            FlexStyle::new()
+                .padding(8.0)
+                .min_height(rows * line_height + 16.0)
+        } else {
+            FlexStyle::new().padding(8.0).min_height(font_size + 20.0)
+        }
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
@@ -262,6 +352,7 @@ impl Widget for Input {
         let font_size = self
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);
+        let line_height = font_size * 1.2;
         let text_color = self.text_color.unwrap_or(ctx.theme.colors.on_surface);
         let placeholder_color = self
             .placeholder_color
@@ -292,18 +383,34 @@ impl Widget for Input {
         );
 
         let text_x = layout.origin.x + 8.0;
-        let text_y = layout.origin.y + (layout.size.height - font_size) / 2.0;
+        // Single-line: vertically center the (one) line of text so the field
+        // looks balanced. Multi-line: top-align to padding so the block grows
+        // downward as the user types and ArrowUp/Down stay predictable.
+        let text_y = if self.multiline {
+            layout.origin.y + 8.0
+        } else {
+            layout.origin.y + (layout.size.height - font_size) / 2.0
+        };
         let max_width = layout.size.width - 16.0;
+        // Pass max_width as the wrap constraint only in multi-line mode.
+        // Single-line inputs intentionally let text overflow horizontally
+        // (and don't draw outside their bounds because the wgpu pipeline
+        // clips to the widget — adding wrap here would unexpectedly stack
+        // text into multiple visual rows inside a one-line input).
+        let wrap_width = if self.multiline {
+            Some(max_width)
+        } else {
+            None
+        };
 
         let value = self.value.borrow();
         if value.is_empty() {
-            // Placeholder
             if !self.placeholder.is_empty() {
                 let shaped = ctx.text_engine.shape_text(
                     &self.placeholder,
                     font_size,
-                    font_size * 1.2,
-                    Some(max_width),
+                    line_height,
+                    wrap_width,
                 );
                 for glyph in &shaped.glyphs {
                     if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
@@ -323,10 +430,9 @@ impl Widget for Input {
                 ctx.fill_rect(Rect::new(text_x, text_y, 2.0, font_size), text_color);
             }
         } else {
-            // Render actual text
-            let shaped =
-                ctx.text_engine
-                    .shape_text(&value, font_size, font_size * 1.2, Some(max_width));
+            let shaped = ctx
+                .text_engine
+                .shape_text(&value, font_size, line_height, wrap_width);
 
             for glyph in &shaped.glyphs {
                 if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
@@ -340,19 +446,22 @@ impl Widget for Input {
                 }
             }
 
-            // Cursor
             if self.focused {
                 let cursor = self.cursor.get();
-                let cursor_x = if cursor == 0 {
-                    text_x
+                let (cx, cy) = if cursor == 0 {
+                    (0.0, 0.0)
                 } else {
-                    let before_cursor = &value[..cursor];
-                    let shaped_before =
-                        ctx.text_engine
-                            .shape_text(before_cursor, font_size, font_size * 1.2, None);
-                    text_x + shaped_before.width
+                    ctx.text_engine.cursor_position(
+                        &value[..cursor],
+                        font_size,
+                        line_height,
+                        wrap_width,
+                    )
                 };
-                ctx.fill_rect(Rect::new(cursor_x, text_y, 2.0, font_size), text_color);
+                ctx.fill_rect(
+                    Rect::new(text_x + cx, text_y + cy, 2.0, font_size),
+                    text_color,
+                );
             }
         }
 
@@ -373,6 +482,7 @@ impl Widget for Input {
                 // Just move the cursor to end — precise positioning
                 // would need per-glyph metrics.
                 self.cursor.set(self.value.borrow().len());
+                self.desired_col.set(None);
                 EventResult::Consumed
             }
 
@@ -383,6 +493,7 @@ impl Widget for Input {
 
             WidgetEvent::FocusLost => {
                 self.focused = false;
+                self.desired_col.set(None);
                 EventResult::Ignored
             }
 
@@ -392,6 +503,7 @@ impl Widget for Input {
                     let cursor = self.cursor.get();
                     self.value.borrow_mut().insert(cursor, *ch);
                     self.cursor.set(cursor + ch_len);
+                    self.desired_col.set(None);
 
                     self.push_to_source();
                     if let Some(handler) = self.on_change.as_mut() {
@@ -412,6 +524,7 @@ impl Widget for Input {
                         };
                         self.value.borrow_mut().drain(prev..cursor);
                         self.cursor.set(prev);
+                        self.desired_col.set(None);
 
                         self.push_to_source();
                         if let Some(handler) = self.on_change.as_mut() {
@@ -430,6 +543,7 @@ impl Widget for Input {
                             Self::next_char_boundary(&v, cursor)
                         };
                         self.value.borrow_mut().drain(cursor..next);
+                        self.desired_col.set(None);
 
                         self.push_to_source();
                         if let Some(handler) = self.on_change.as_mut() {
@@ -448,6 +562,7 @@ impl Widget for Input {
                         };
                         self.cursor.set(prev);
                     }
+                    self.desired_col.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowRight) => {
@@ -460,18 +575,71 @@ impl Widget for Input {
                         };
                         self.cursor.set(next);
                     }
+                    self.desired_col.set(None);
+                    EventResult::Consumed
+                }
+                Key::Named(NamedKey::ArrowUp) if self.multiline => {
+                    let (line, col) = {
+                        let v = self.value.borrow();
+                        Self::line_col_for_cursor(&v, self.cursor.get())
+                    };
+                    if line > 0 {
+                        let target_col = self.desired_col.get().unwrap_or(col);
+                        let new_cursor = {
+                            let v = self.value.borrow();
+                            Self::cursor_for_line_col(&v, line - 1, target_col)
+                        };
+                        self.cursor.set(new_cursor);
+                        // Stash the original column so repeated Up moves
+                        // through a short line and back into a longer one
+                        // restore the original visual column.
+                        self.desired_col.set(Some(target_col));
+                    }
+                    EventResult::Consumed
+                }
+                Key::Named(NamedKey::ArrowDown) if self.multiline => {
+                    let (line, col) = {
+                        let v = self.value.borrow();
+                        Self::line_col_for_cursor(&v, self.cursor.get())
+                    };
+                    let total_lines = self.value.borrow().matches('\n').count() + 1;
+                    if line + 1 < total_lines {
+                        let target_col = self.desired_col.get().unwrap_or(col);
+                        let new_cursor = {
+                            let v = self.value.borrow();
+                            Self::cursor_for_line_col(&v, line + 1, target_col)
+                        };
+                        self.cursor.set(new_cursor);
+                        self.desired_col.set(Some(target_col));
+                    }
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Home) => {
                     self.cursor.set(0);
+                    self.desired_col.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::End) => {
                     self.cursor.set(self.value.borrow().len());
+                    self.desired_col.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Enter) => {
-                    if let Some(handler) = self.on_submit.as_mut() {
+                    if self.multiline {
+                        // Insert a newline at the cursor; on_submit is
+                        // intentionally inert in multi-line mode so the
+                        // field behaves like a textarea.
+                        let cursor = self.cursor.get();
+                        self.value.borrow_mut().insert(cursor, '\n');
+                        self.cursor.set(cursor + 1);
+                        self.desired_col.set(None);
+
+                        self.push_to_source();
+                        if let Some(handler) = self.on_change.as_mut() {
+                            let snapshot = self.value.borrow().clone();
+                            handler(&snapshot, ctx);
+                        }
+                    } else if let Some(handler) = self.on_submit.as_mut() {
                         let snapshot = self.value.borrow().clone();
                         handler(&snapshot, ctx);
                     }

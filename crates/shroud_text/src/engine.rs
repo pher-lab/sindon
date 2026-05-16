@@ -135,6 +135,63 @@ impl TextEngine {
         }
     }
 
+    /// Compute the visual position of the cursor sitting at the *end* of
+    /// `text_before_cursor`, under the same wrap configuration the caller
+    /// uses for full-text rendering.
+    ///
+    /// Returns `(cursor_x, cursor_line_top_y)`:
+    /// - `cursor_x` — horizontal offset within the shaped block, in pixels.
+    ///   When the cursor sits at end-of-text or end-of-line, this is the
+    ///   right edge of the last visible run. Empty / pure-whitespace
+    ///   prefixes return `0.0`.
+    /// - `cursor_line_top_y` — top of the cursor's line within the block.
+    ///   Multi-line callers stack lines starting at `0.0`, so this is
+    ///   directly usable as `text_y_offset + cursor_line_top_y`.
+    ///
+    /// Hard breaks (`\n`) and soft wraps (`max_width` overflow) are both
+    /// honored: the cursor lands on the correct visual line. A prefix
+    /// ending in `\n` reports the empty line below (cursor_x = 0, y on the
+    /// next baseline).
+    pub fn cursor_position(
+        &mut self,
+        text_before_cursor: &str,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> (f32, f32) {
+        if text_before_cursor.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_size(&mut self.font_system, max_width, None);
+        buffer.set_text(
+            &mut self.font_system,
+            text_before_cursor,
+            &Attrs::new(),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+
+        // cosmic-text 0.18 yields one run per visual line — including a
+        // zero-width run for an empty BufferLine produced by a trailing
+        // `\n` (verified via `tests/cursor_probe.rs`). That means the
+        // last run already sits at the right `line_top` and reports
+        // `line_w = 0` for the empty line, so the cursor falls into place
+        // with no extra fix-up. `line_height` is therefore unused here.
+        let _ = line_height;
+        let mut cursor_x = 0.0;
+        let mut cursor_y = 0.0;
+        for run in buffer.layout_runs() {
+            cursor_x = run.line_w;
+            cursor_y = run.line_top;
+        }
+
+        (cursor_x, cursor_y)
+    }
+
     /// Rasterize a glyph into an alpha mask.
     ///
     /// Returns `None` if the glyph has no visible pixels (e.g. space).

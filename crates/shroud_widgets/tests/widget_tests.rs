@@ -3860,6 +3860,269 @@ fn hover_bubble_skips_common_ancestor_when_moving_within_subtree() {
     );
 }
 
+// ── Input: multi-line (Phase 25, A-2) ────────────────────────────
+
+/// Build a 400×300 tree, install a single Input as the root's only child,
+/// bind it to `sig`, focus it, and return `(tree, idx, event_ctx, sig)`.
+/// `multiline=true` flips the textarea behavior on. Cursor lands at the
+/// end of `sig`'s current value after the focus click.
+fn build_input_with_signal(
+    initial: &str,
+    multiline: bool,
+) -> (WidgetTree, usize, EventContext, Signal<String>) {
+    let sig = Signal::new(String::from(initial));
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let mut input = Input::new().value(sig);
+    if multiline {
+        input = input.multiline().lines(4);
+    }
+    let idx = tree.add_child(root, input);
+    tree.compute_layout(400.0, 300.0);
+
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    (tree, idx, event_ctx, sig)
+}
+
+fn key(named: shroud_widgets::event::NamedKey) -> WidgetEvent {
+    WidgetEvent::KeyDown {
+        key: shroud_widgets::event::Key::Named(named),
+    }
+}
+
+/// Cursor-position assertion via a side-effect probe. Cursor state isn't
+/// observable through the public Widget API, so we type a marker char and
+/// check where it lands in the bound signal: if the cursor was at byte N,
+/// the signal goes from `<prefix><suffix>` to `<prefix>M<suffix>`.
+fn assert_cursor_inserts_at(
+    tree: &mut WidgetTree,
+    ctx: &mut EventContext,
+    sig: &Signal<String>,
+    expected_after: &str,
+) {
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'M' }, ctx);
+    assert_eq!(sig.get_clone(), expected_after);
+}
+
+#[test]
+fn multiline_enter_inserts_newline_into_signal() {
+    let (mut tree, idx, mut ctx, sig) = build_input_with_signal("", true);
+
+    for ch in ['a', 'b'] {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut ctx);
+    }
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::Enter), &mut ctx);
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'c' }, &mut ctx);
+
+    assert_eq!(sig.get_clone(), "ab\nc");
+    // Bonus: the index is still valid (Enter didn't replace the widget).
+    assert!(tree.contains(idx));
+}
+
+#[test]
+fn multiline_enter_does_not_fire_on_submit() {
+    let submitted = Rc::new(Cell::new(false));
+    let submitted2 = submitted.clone();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let idx = tree.add_child(
+        root,
+        Input::new()
+            .multiline()
+            .on_submit(move |_text, _ctx| submitted2.set(true)),
+    );
+    tree.compute_layout(400.0, 300.0);
+
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::Enter), &mut event_ctx);
+
+    assert!(
+        !submitted.get(),
+        "on_submit must stay quiet in multi-line mode — Enter is a newline there"
+    );
+}
+
+#[test]
+fn single_line_enter_still_fires_on_submit() {
+    // Regression guard: the multi-line branch must not bleed into the
+    // default single-line behavior.
+    let submitted = Rc::new(Cell::new(false));
+    let submitted2 = submitted.clone();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(
+        root,
+        Input::new().on_submit(move |_text, _ctx| submitted2.set(true)),
+    );
+    tree.compute_layout(400.0, 100.0);
+
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::Enter), &mut event_ctx);
+
+    assert!(submitted.get());
+    let _ = idx; // silence dead-code warning
+}
+
+#[test]
+fn multiline_arrow_down_keeps_visual_column() {
+    // "abc\ndefgh" — cursor starts at byte 9 (end), Left × 7 → byte 2.
+    // ArrowDown should land at byte 6 = (line 1, col 2). Probe by typing
+    // 'M' there and checking the buffer becomes "abc\ndeMfgh".
+    let (mut tree, _idx, mut ctx, sig) = build_input_with_signal("abc\ndefgh", true);
+
+    for _ in 0..7 {
+        tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowLeft), &mut ctx);
+    }
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowDown), &mut ctx);
+
+    assert_cursor_inserts_at(&mut tree, &mut ctx, &sig, "abc\ndeMfgh");
+}
+
+#[test]
+fn multiline_arrow_up_returns_to_origin_column() {
+    // "abcdef\nghi" — cursor at byte 10 (end of "ghi", col=3). ArrowUp
+    // takes it to byte 3 (line 0, col 3). Probe with 'M' → "abcMdef\nghi".
+    let (mut tree, _idx, mut ctx, sig) = build_input_with_signal("abcdef\nghi", true);
+
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowUp), &mut ctx);
+
+    assert_cursor_inserts_at(&mut tree, &mut ctx, &sig, "abcMdef\nghi");
+}
+
+#[test]
+fn multiline_arrow_down_into_shorter_line_clamps_to_end() {
+    // "abcdef\ngh" — cursor at byte 9 (line 1, col 2 — end of "gh").
+    // ArrowUp → line 0, col 2 = byte 2 (no desired_col seeded yet).
+    // Right × 3 → byte 5 (line 0, col 5), clearing desired_col each press.
+    // ArrowDown into "gh" clamps to byte 9 (end of line 1).
+    // Probe 'M' at byte 9 → "abcdef\nghM".
+    let (mut tree, _idx, mut ctx, sig) = build_input_with_signal("abcdef\ngh", true);
+
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowUp), &mut ctx);
+    for _ in 0..3 {
+        tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowRight), &mut ctx);
+    }
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowDown), &mut ctx);
+
+    assert_cursor_inserts_at(&mut tree, &mut ctx, &sig, "abcdef\nghM");
+}
+
+#[test]
+fn multiline_desired_col_survives_short_middle_line() {
+    // Three lines: "long line one" (13), "x" (1), "long line two" (13).
+    // Walk to (line 0, col 10), then Down → clamps into "x" (col 1),
+    // then Down again → desired_col 10 must restore to byte 16 + 10 = 26.
+    // Probe 'M' at byte 26 → "long line one\nx\nlong line Mtwo".
+    let (mut tree, _idx, mut ctx, sig) =
+        build_input_with_signal("long line one\nx\nlong line two", true);
+
+    // Cursor at byte 29 (end of line 2). Up twice → end of line 0 = byte 13
+    // (desired_col seeded to 13 from the original col).
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowUp), &mut ctx);
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowUp), &mut ctx);
+    // Left × 3 → byte 10 (col 10), and each Left clears desired_col so the
+    // next Down will seed from the *visual* col=10.
+    for _ in 0..3 {
+        tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowLeft), &mut ctx);
+    }
+    // Down → clamps into "x" (length 1), cursor sits at byte 15.
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowDown), &mut ctx);
+    // Down → desired_col 10 restored, lands at byte 16 + 10 = 26.
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowDown), &mut ctx);
+
+    assert_cursor_inserts_at(
+        &mut tree,
+        &mut ctx,
+        &sig,
+        "long line one\nx\nlong line Mtwo",
+    );
+}
+
+#[test]
+fn single_line_arrow_up_down_are_no_ops() {
+    // ArrowUp/Down must do nothing in single-line mode. Probe 'M' lands
+    // at end of "hello" — proves cursor stayed put.
+    let (mut tree, _idx, mut ctx, sig) = build_input_with_signal("hello", false);
+
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowUp), &mut ctx);
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowDown), &mut ctx);
+
+    assert_cursor_inserts_at(&mut tree, &mut ctx, &sig, "helloM");
+}
+
+#[test]
+fn multiline_min_height_scales_with_lines() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(800.0));
+    let single = tree.add_child(root, Input::new());
+    let multi5 = tree.add_child(root, Input::new().multiline().lines(5));
+    tree.compute_layout(400.0, 800.0);
+
+    let h_single = tree.layout_rect(single).size.height;
+    let h_multi = tree.layout_rect(multi5).size.height;
+    assert!(
+        h_multi > h_single * 2.0,
+        "lines(5) multi-line Input must be substantially taller than the single-line default \
+         (got multi={h_multi}, single={h_single})"
+    );
+}
+
+#[test]
+fn multiline_does_not_intercept_tab() {
+    // Two multi-line Inputs in a row. Tab from the first should advance
+    // focus to the second — the focus manager owns Tab, the widget must
+    // not consume it.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(400.0));
+    let first = tree.add_child(root, Input::new().multiline());
+    let second = tree.add_child(root, Input::new().multiline());
+    tree.compute_layout(400.0, 400.0);
+
+    let rect = tree.layout_rect(first);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    assert_eq!(tree.focused(), Some(first));
+
+    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::Tab), &mut event_ctx);
+    assert_eq!(
+        tree.focused(),
+        Some(second),
+        "Tab inside a multi-line Input must still advance focus"
+    );
+}
+
 #[test]
 fn hoverable_container_lights_up_when_cursor_is_in_child_button() {
     // The canonical "list row contains an action button" case. Without

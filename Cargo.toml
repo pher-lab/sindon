@@ -19,6 +19,7 @@ members = [
     "examples/modal_demo",
     "examples/password_manager",
     "examples/secure_password_form",
+    "examples/textarea_demo",
 ]
 
 [workspace.package]
