@@ -1,5 +1,6 @@
 //! Container widget — a flexbox layout container.
 
+use crate::event::{EventContext, EventResult, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
 use shroud_core::{Color, Rect};
@@ -18,6 +19,17 @@ use shroud_reactive::Reactive;
 pub struct Container {
     style: FlexStyle,
     background: Option<Reactive<Color>>,
+    /// Hover override. `Some` (set via [`Container::hover_background`]) wins
+    /// over the theme; `None` with `hoverable == true` falls back to
+    /// `theme.hover.bg`.
+    hover_bg: Option<Reactive<Color>>,
+    /// Whether this container reacts to pointer hover. Off by default —
+    /// the vast majority of containers are passive layout boxes, so
+    /// enrolling every one in MouseEnter/Leave routing would be wasted
+    /// work. Flipped on by [`Container::hoverable`] or by setting an
+    /// explicit hover bg.
+    hoverable: bool,
+    hovered: bool,
     radius: f32,
     visible: Reactive<bool>,
 }
@@ -30,6 +42,9 @@ impl Container {
         Self {
             style: FlexStyle::new().column(),
             background: None,
+            hover_bg: None,
+            hoverable: false,
+            hovered: false,
             radius: 0.0,
             visible: Reactive::Static(true),
         }
@@ -45,6 +60,9 @@ impl Container {
         Self {
             style: FlexStyle::new().row(),
             background: None,
+            hover_bg: None,
+            hoverable: false,
+            hovered: false,
             radius: 0.0,
             visible: Reactive::Static(true),
         }
@@ -68,6 +86,28 @@ impl Container {
     /// `Reactive::derive(...)`.
     pub fn background(mut self, color: impl Into<Reactive<Color>>) -> Self {
         self.background = Some(color.into());
+        self
+    }
+
+    /// Enable pointer-hover styling using the theme's `hover.bg` token.
+    ///
+    /// Without this (or [`Container::hover_background`]), a container is
+    /// inert to pointer enter/leave — the common case, so opt-in keeps
+    /// the renderer from re-painting passive layout boxes whenever the
+    /// cursor moves through them.
+    ///
+    /// Combine with [`Container::background`] for the "row that lifts off
+    /// surface when the cursor enters" pattern (list items, menu rows).
+    pub fn hoverable(mut self) -> Self {
+        self.hoverable = true;
+        self
+    }
+
+    /// Set an explicit background color for the hover state. Implies
+    /// [`Container::hoverable`] — calling this alone is enough to opt in.
+    pub fn hover_background(mut self, color: impl Into<Reactive<Color>>) -> Self {
+        self.hover_bg = Some(color.into());
+        self.hoverable = true;
         self
     }
 
@@ -174,8 +214,45 @@ impl Widget for Container {
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
-        if let Some(bg) = &self.background {
-            ctx.fill_rect_rounded(layout, bg.get(), self.radius);
+        let hover_bg = if self.hoverable && self.hovered {
+            Some(
+                self.hover_bg
+                    .as_ref()
+                    .map(|c| c.get())
+                    .unwrap_or(ctx.theme.hover.bg),
+            )
+        } else {
+            None
+        };
+        let bg = hover_bg.or_else(|| self.background.as_ref().map(|c| c.get()));
+        if let Some(color) = bg {
+            ctx.fill_rect_rounded(layout, color, self.radius);
+        }
+    }
+
+    fn event(
+        &mut self,
+        event: &WidgetEvent,
+        _layout: Rect,
+        _ctx: &mut EventContext,
+    ) -> EventResult {
+        // Stay inert when not opted in — keeps the no-hover path identical
+        // to the pre-A4 behavior (no events consumed, no extra book-keeping).
+        if !self.hoverable {
+            return EventResult::Ignored;
+        }
+        match event {
+            WidgetEvent::MouseEnter => {
+                self.hovered = true;
+                // Don't consume — descendants that also care about hover (an
+                // inner Button inside a hoverable row) still get to see it.
+                EventResult::Ignored
+            }
+            WidgetEvent::MouseLeave => {
+                self.hovered = false;
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
         }
     }
 }

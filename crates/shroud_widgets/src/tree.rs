@@ -16,10 +16,8 @@ struct WidgetNode {
     widget: Box<dyn Widget>,
     layout_node: LayoutNodeId,
     children: Vec<usize>,
-    /// Upward index for future tree-walk APIs (focus traversal, ancestor
-    /// queries). Kept as it's cheap to maintain and removing would require
-    /// re-threading every `add_child` call-site later.
-    #[allow(dead_code)]
+    /// Upward index used by ancestor walks (hover bubble in
+    /// `update_hover_in`, future focus / context queries).
     parent: Option<usize>,
     /// Effective security level: max(parent_effective, self.declared).
     effective_security: SecurityLevel,
@@ -69,6 +67,18 @@ pub struct WidgetTree {
     /// dispatch can place layer roots relative to it without threading a
     /// size through every call site. `(0, 0)` until the first layout.
     viewport: (f32, f32),
+}
+
+/// Find the deepest node that appears in both ancestor chains (each
+/// leaf-first, root-last). Returns `None` when the chains share no
+/// ancestor — happens when the cursor enters a fresh subtree (e.g. the
+/// first hover after `clear_hover` returns `self.hovered = None`).
+///
+/// Linear search rather than a `HashSet`: hover chains are short
+/// (typical UI depth < 10), so the constant-factor win matters more
+/// than the asymptotic shape.
+fn lowest_common_ancestor(old_chain: &[usize], new_chain: &[usize]) -> Option<usize> {
+    new_chain.iter().copied().find(|n| old_chain.contains(n))
 }
 
 /// Resolve a [`LayerAnchor`] against the freshly-measured layer size and the
@@ -1114,10 +1124,17 @@ impl WidgetTree {
     /// affected widgets. `pos` is in the subtree's local coordinate
     /// space (callers translate any layer offset before invoking).
     ///
+    /// Bubbles the events up the ancestor chain, DOM-style: every
+    /// ancestor that newly contains (or no longer contains) the cursor
+    /// also gets a MouseEnter / MouseLeave, stopping at the lowest
+    /// common ancestor so widgets that span both the old and new path
+    /// stay quietly hovered. Lets a hoverable `Container` light up when
+    /// the cursor enters a child `Button` inside it.
+    ///
     /// `new_hover` may be `None` when the cursor is over the subtree's
     /// area but missed every visible widget (e.g. on a layer's scrim or
-    /// padding), in which case any previously hovered widget receives a
-    /// final `MouseLeave` and the pointer clears.
+    /// padding), in which case the previous hover chain receives final
+    /// `MouseLeave`s and the pointer clears.
     fn update_hover_in(&mut self, subtree_root: usize, pos: Point, event_ctx: &mut EventContext) {
         let new_hover = self.hit_test_in(subtree_root, pos);
 
@@ -1125,44 +1142,73 @@ impl WidgetTree {
             return;
         }
 
-        // Send MouseLeave to the widget we're leaving
-        if let Some(old_idx) = self.hovered {
-            if let Some(old_node) = self.node(old_idx) {
-                let old_rect = self.layout.absolute_rect(old_node.layout_node);
-                if let Some(n) = self.node_mut(old_idx) {
-                    n.widget
-                        .event(&WidgetEvent::MouseLeave, old_rect, event_ctx);
-                }
+        let old_chain = self.ancestors_inclusive(self.hovered);
+        let new_chain = self.ancestors_inclusive(new_hover);
+        let lca = lowest_common_ancestor(&old_chain, &new_chain);
+
+        // MouseLeave: every node in the old chain up to (but not
+        // including) the LCA, leaf first so deeper widgets see leave
+        // before their parents.
+        for &idx in &old_chain {
+            if Some(idx) == lca {
+                break;
             }
+            self.emit_to(idx, &WidgetEvent::MouseLeave, event_ctx);
         }
 
-        // Send MouseEnter to the widget we're entering
-        if let Some(new_idx) = new_hover {
-            if let Some(new_node) = self.node(new_idx) {
-                let new_rect = self.layout.absolute_rect(new_node.layout_node);
-                if let Some(n) = self.node_mut(new_idx) {
-                    n.widget
-                        .event(&WidgetEvent::MouseEnter, new_rect, event_ctx);
-                }
-            }
+        // MouseEnter: every node in the new chain up to (but not
+        // including) the LCA, outer-most first so a parent's hover
+        // state is set before its child reacts.
+        let enter_stop = new_chain.iter().position(|&idx| Some(idx) == lca);
+        let enter_slice = match enter_stop {
+            Some(stop) => &new_chain[..stop],
+            None => &new_chain[..],
+        };
+        for &idx in enter_slice.iter().rev() {
+            self.emit_to(idx, &WidgetEvent::MouseEnter, event_ctx);
         }
 
         self.hovered = new_hover;
     }
 
-    /// Clear the hovered pointer, emitting `MouseLeave` to the current
-    /// hover target if any. Used when the cursor leaves the topmost
-    /// layer's interactive rect (the scrim acts like "nothing is
-    /// hovered" from the widget's perspective).
+    /// Clear the hovered pointer, emitting `MouseLeave` to every widget
+    /// in the current hover chain (leaf first). Used when the cursor
+    /// leaves the topmost layer's interactive rect (the scrim acts like
+    /// "nothing is hovered" from the widget's perspective).
     fn clear_hover(&mut self, event_ctx: &mut EventContext) {
         if let Some(old_idx) = self.hovered.take() {
-            if let Some(old_node) = self.node(old_idx) {
-                let old_rect = self.layout.absolute_rect(old_node.layout_node);
-                if let Some(n) = self.node_mut(old_idx) {
-                    n.widget
-                        .event(&WidgetEvent::MouseLeave, old_rect, event_ctx);
-                }
+            let chain = self.ancestors_inclusive(Some(old_idx));
+            for idx in chain {
+                self.emit_to(idx, &WidgetEvent::MouseLeave, event_ctx);
             }
+        }
+    }
+
+    /// Collect `idx` and all its ancestors, leaf first. Returns an
+    /// empty vec when `idx` is `None`. Stops at any tombstoned node
+    /// (defense-in-depth — `remove` invalidates `hovered`, so a
+    /// dangling index should not arise in practice).
+    fn ancestors_inclusive(&self, idx: Option<usize>) -> Vec<usize> {
+        let mut chain = Vec::new();
+        let mut cur = idx;
+        while let Some(i) = cur {
+            let Some(node) = self.node(i) else { break };
+            chain.push(i);
+            cur = node.parent;
+        }
+        chain
+    }
+
+    /// Send `event` to the widget at `idx`, fetching its layout rect
+    /// for the dispatch. Silent if the slot is tombstoned. Used by the
+    /// hover-bubble path which already filtered indices through
+    /// `ancestors_inclusive`.
+    fn emit_to(&mut self, idx: usize, event: &WidgetEvent, event_ctx: &mut EventContext) {
+        let Some(rect) = self.node(idx).map(|n| self.layout.absolute_rect(n.layout_node)) else {
+            return;
+        };
+        if let Some(n) = self.node_mut(idx) {
+            n.widget.event(event, rect, event_ctx);
         }
     }
 

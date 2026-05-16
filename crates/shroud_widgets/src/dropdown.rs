@@ -246,11 +246,16 @@ impl Widget for Dropdown {
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
-        let bg = self
+        let hover_bg = ctx.theme.hover.bg;
+        let base_bg = self
             .background
             .as_ref()
             .map(|c| c.get())
             .unwrap_or(colors.input_background);
+        // Hover overrides the resting bg; the popover stays open while
+        // hovered, so the trigger keeps the highlight as long as the
+        // cursor sits over it — matches OS-native combobox feel.
+        let bg = if self.hovered { hover_bg } else { base_bg };
         let text_color = self
             .text_color
             .as_ref()
@@ -508,15 +513,15 @@ impl Widget for OptionItem {
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
         // Copy out the theme tokens we need so the immutable borrow drops
         // before the mutable PaintContext calls below.
-        let surface_variant = ctx.theme.colors.surface_variant;
+        let hover_bg = ctx.theme.hover.bg;
         let text_color = ctx.theme.colors.on_surface;
         let font_size = ctx.theme.typography.body.font_size;
 
-        // Hover highlight uses surface_variant — already in the palette as
-        // the "subtle container variant" tone, which reads naturally as a
-        // row hover against the popover's surface background.
+        // Hover highlight shares the theme's hover token with every
+        // other interactive row (hoverable Container, Dropdown trigger)
+        // so a single theme tweak retones the whole UI in one place.
         let bg = if self.hovered {
-            surface_variant
+            hover_bg
         } else {
             Color::TRANSPARENT
         };

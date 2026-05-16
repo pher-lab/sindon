@@ -14,6 +14,7 @@ members = [
     "examples/clock",
     "examples/counter",
     "examples/hello_world",
+    "examples/hover_demo",
     "examples/knot_spike",
     "examples/modal_demo",
     "examples/password_manager",

@@ -3630,3 +3630,281 @@ fn event_context_blur_clears_focus_via_drain() {
     assert_eq!(tree.focused(), None);
     assert_eq!(*events.borrow(), vec!["a:lost".to_string()]);
 }
+
+// ── Phase 23: hover state + ancestor bubble ───────────────────────
+
+/// Test widget that records every MouseEnter / MouseLeave so the
+/// hover-bubble path can be asserted at the test level. Mirrors
+/// FocusProbe's shape; lives at a fixed 10x10 so layout is trivial.
+struct HoverProbe {
+    events: Rc<RefCell<Vec<String>>>,
+    tag: &'static str,
+}
+
+impl HoverProbe {
+    fn new(tag: &'static str, events: Rc<RefCell<Vec<String>>>) -> Self {
+        Self { events, tag }
+    }
+}
+
+impl shroud_widgets::Widget for HoverProbe {
+    fn style(&self) -> shroud_layout::FlexStyle {
+        shroud_layout::FlexStyle::new().width(40.0).height(40.0)
+    }
+    fn paint(&self, _: shroud_core::Rect, _: &mut PaintContext) {}
+    fn event(
+        &mut self,
+        event: &WidgetEvent,
+        _: shroud_core::Rect,
+        _: &mut EventContext,
+    ) -> EventResult {
+        match event {
+            WidgetEvent::MouseEnter => {
+                self.events
+                    .borrow_mut()
+                    .push(format!("{}:enter", self.tag));
+                EventResult::Ignored
+            }
+            WidgetEvent::MouseLeave => {
+                self.events
+                    .borrow_mut()
+                    .push(format!("{}:leave", self.tag));
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+}
+
+#[test]
+fn theme_dark_and_light_provide_hover_tokens() {
+    // Just a smoke test — we don't want to lock in exact RGB values, but
+    // both themes must populate `hover` and the bg must differ from each
+    // theme's plain surface (otherwise hover is invisible against it).
+    let dark = Theme::dark();
+    let light = Theme::light();
+    assert_ne!(dark.hover.bg, dark.colors.surface);
+    assert_ne!(light.hover.bg, light.colors.surface);
+}
+
+#[test]
+fn hoverable_container_paints_theme_hover_bg_when_hovered() {
+    // Container with `.hoverable()` and no resting bg must produce a
+    // hover-bg rect the moment the cursor lands inside it.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::column()
+            .width(200.0)
+            .height(200.0)
+            .padding(10.0)
+            .hoverable(),
+    );
+    tree.compute_layout(200.0, 200.0);
+    let root_rect = tree.layout_rect(root);
+
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(root_rect.origin.x + 5.0, root_rect.origin.y + 5.0),
+        },
+        &mut event_ctx,
+    );
+
+    let theme = Theme::default();
+    let mut paint = PaintContext::new(theme.clone());
+    tree.paint(&mut paint);
+
+    assert_eq!(paint.rects.len(), 1, "hoverable bg must paint exactly once");
+    assert_eq!(paint.rects[0].color, theme.hover.bg);
+}
+
+#[test]
+fn container_without_hoverable_paints_nothing_on_hover() {
+    // Mirror image of the previous test — a plain Container with no
+    // background and no `.hoverable()` opt-in must stay invisible no
+    // matter where the cursor sits. Guards against accidentally turning
+    // every container into a hover target.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(200.0));
+    tree.compute_layout(200.0, 200.0);
+
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(50.0, 50.0),
+        },
+        &mut event_ctx,
+    );
+
+    let mut paint = PaintContext::default();
+    tree.paint(&mut paint);
+    assert!(
+        paint.rects.is_empty(),
+        "non-hoverable container with no bg must not paint"
+    );
+}
+
+#[test]
+fn hover_background_overrides_theme_default() {
+    // Explicit override must win even when the theme provides a hover
+    // token — the override is the user's "this row's hover doesn't
+    // match the theme" escape hatch.
+    let override_color = Color::rgb(0.9, 0.1, 0.1);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::column()
+            .width(100.0)
+            .height(100.0)
+            .hover_background(override_color),
+    );
+    tree.compute_layout(100.0, 100.0);
+    let root_rect = tree.layout_rect(root);
+
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(root_rect.origin.x + 5.0, root_rect.origin.y + 5.0),
+        },
+        &mut event_ctx,
+    );
+
+    let mut paint = PaintContext::default();
+    tree.paint(&mut paint);
+    assert_eq!(paint.rects.len(), 1);
+    assert_eq!(paint.rects[0].color, override_color);
+}
+
+#[test]
+fn mouse_enter_leave_bubble_to_ancestors() {
+    // Probe in: outer → middle → leaf. Cursor enters the leaf only;
+    // hover must bubble up so middle and outer also see MouseEnter.
+    // Order matters too — outer first, then middle, then leaf — so a
+    // parent's state is set before its child reacts.
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut tree = WidgetTree::new();
+    let outer = tree.set_root(Container::column().width(200.0).height(200.0).padding(10.0));
+    let middle_probe = tree.add_child(outer, HoverProbe::new("middle", events.clone()));
+    // Wrap a leaf probe inside middle by re-parenting via add_child to
+    // middle_probe. HoverProbe has fixed size; layout will place leaf
+    // inside middle's box.
+    let leaf_probe = tree.add_child(middle_probe, HoverProbe::new("leaf", events.clone()));
+    tree.compute_layout(200.0, 200.0);
+
+    let leaf_rect = tree.layout_rect(leaf_probe);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(leaf_rect.origin.x + 1.0, leaf_rect.origin.y + 1.0),
+        },
+        &mut event_ctx,
+    );
+
+    // Bubble emits MouseEnter outer-most first.
+    assert_eq!(
+        *events.borrow(),
+        vec!["middle:enter".to_string(), "leaf:enter".to_string()]
+    );
+
+    // Move cursor away — bubble emits MouseLeave leaf first, then
+    // ancestors in leaf-up order.
+    events.borrow_mut().clear();
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(999.0, 999.0),
+        },
+        &mut event_ctx,
+    );
+    assert_eq!(
+        *events.borrow(),
+        vec!["leaf:leave".to_string(), "middle:leave".to_string()]
+    );
+}
+
+#[test]
+fn hover_bubble_skips_common_ancestor_when_moving_within_subtree() {
+    // Cursor moves from one sibling to another under the same hoverable
+    // parent. The parent must NOT receive a redundant leave→enter pair
+    // — that would cause a parent's hover bg to flash off-and-on as the
+    // user moves between rows.
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut tree = WidgetTree::new();
+    let outer = tree.set_root(Container::row().width(400.0).height(60.0));
+    let parent = tree.add_child(outer, HoverProbe::new("parent", events.clone()));
+    let leaf_a = tree.add_child(parent, HoverProbe::new("a", events.clone()));
+    let leaf_b = tree.add_child(parent, HoverProbe::new("b", events.clone()));
+    tree.compute_layout(400.0, 60.0);
+
+    let rect_a = tree.layout_rect(leaf_a);
+    let rect_b = tree.layout_rect(leaf_b);
+    let mut event_ctx = EventContext::new();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(rect_a.origin.x + 1.0, rect_a.origin.y + 1.0),
+        },
+        &mut event_ctx,
+    );
+    // Parent + a got entered.
+    assert_eq!(
+        *events.borrow(),
+        vec!["parent:enter".to_string(), "a:enter".to_string()]
+    );
+    events.borrow_mut().clear();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(rect_b.origin.x + 1.0, rect_b.origin.y + 1.0),
+        },
+        &mut event_ctx,
+    );
+    // Only the leaves flipped — parent stayed quietly hovered.
+    assert_eq!(
+        *events.borrow(),
+        vec!["a:leave".to_string(), "b:enter".to_string()]
+    );
+}
+
+#[test]
+fn hoverable_container_lights_up_when_cursor_is_in_child_button() {
+    // The canonical "list row contains an action button" case. Without
+    // ancestor bubbling, the row would never see MouseEnter because the
+    // Button is the deepest hit and consumes the event-walk return.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(200.0));
+    let row = tree.add_child(
+        root,
+        Container::row()
+            .padding(10.0)
+            .gap(8.0)
+            .align_center()
+            .hoverable(),
+    );
+    let btn = tree.add_child(row, Button::new("Delete").on_click(|_| {}));
+    tree.compute_layout(400.0, 200.0);
+    let btn_rect = tree.layout_rect(btn);
+
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(btn_rect.origin.x + 5.0, btn_rect.origin.y + 5.0),
+        },
+        &mut event_ctx,
+    );
+
+    let theme = Theme::default();
+    let mut paint = PaintContext::new(theme.clone());
+    tree.paint(&mut paint);
+
+    // Paint order: container row first, button bg second. The row's
+    // rect (rects[0]) must use the hover tint even though the cursor
+    // is on the button.
+    assert!(
+        paint.rects.len() >= 2,
+        "expected row bg + button bg, got {}",
+        paint.rects.len()
+    );
+    assert_eq!(
+        paint.rects[0].color, theme.hover.bg,
+        "row bg should be theme.hover.bg when cursor is in inner button"
+    );
+}

@@ -12,6 +12,7 @@ pub struct Theme {
     pub typography: Typography,
     pub spacing: Spacing,
     pub focus: FocusStyle,
+    pub hover: HoverStyle,
 }
 
 /// Visual tokens for the keyboard-focus ring.
@@ -30,6 +31,24 @@ pub struct FocusStyle {
     /// Distance in px between the widget rect and the inner edge of the
     /// ring. `0.0` paints the ring flush against the widget edge.
     pub ring_offset: f32,
+}
+
+/// Visual tokens for the pointer-hover state of generic interactive rows.
+///
+/// Read by widgets that opt into hover styling without an explicit override
+/// (`Container::hoverable`, `Dropdown` option list). `Button` keeps its own
+/// `primary_hover` token because filled buttons need a stronger contrast
+/// than passive rows do.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HoverStyle {
+    /// Background when the widget is hovered.
+    pub bg: Color,
+    /// Foreground (text/icon) when hovered. Reserved for widgets that want
+    /// to shift label color on hover — current widgets all reuse their
+    /// regular `on_surface` token.
+    pub fg: Color,
+    /// Border tint when hovered. Same reservation as `fg`.
+    pub border: Color,
 }
 
 /// Color tokens organized by semantic role.
@@ -166,6 +185,14 @@ impl Theme {
                 ring_width: 2.0,
                 ring_offset: 2.0,
             },
+            hover: HoverStyle {
+                // Lifts off surface (0.12) by ~6%, the same step
+                // surface→surface_variant uses, so a hovered row reads
+                // like a softly-raised panel.
+                bg: Color::rgb(0.18, 0.18, 0.24),
+                fg: Color::WHITE,
+                border: Color::rgb(0.35, 0.35, 0.42),
+            },
         }
     }
 
@@ -225,6 +252,14 @@ impl Theme {
                 ring_color: Color::rgb(0.2, 0.45, 0.95),
                 ring_width: 2.0,
                 ring_offset: 2.0,
+            },
+            hover: HoverStyle {
+                // ~6% darker than surface (1.0) so the row visually
+                // recedes-on-touch the same way dark theme's lifts —
+                // both directions read as "this row is being aimed at".
+                bg: Color::rgb(0.93, 0.93, 0.95),
+                fg: Color::rgb(0.1, 0.1, 0.1),
+                border: Color::rgb(0.65, 0.65, 0.7),
             },
         }
     }
