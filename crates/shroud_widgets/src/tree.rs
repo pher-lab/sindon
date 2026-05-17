@@ -1423,6 +1423,16 @@ impl WidgetTree {
             .as_mut()
     }
 
+    /// Typed accessor: borrow a widget as a concrete type `T` via runtime
+    /// downcast. Returns `None` if the slot is tombstoned, out of range,
+    /// or holds a different concrete widget type. Intended primarily for
+    /// tests and introspection — production code should already know what
+    /// widget lives at a given index.
+    pub fn widget_as<T: Widget>(&self, idx: usize) -> Option<&T> {
+        let w = self.try_widget(idx)?;
+        (w as &dyn std::any::Any).downcast_ref::<T>()
+    }
+
     /// Get the effective security level for a widget.
     ///
     /// This is `max(parent_effective, widget_declared)` — a child inside

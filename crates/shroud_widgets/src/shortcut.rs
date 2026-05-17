@@ -269,8 +269,7 @@ mod tests {
         router.register(Shortcut::ctrl('l'), move |_| f.set(true));
 
         let mut ctx = EventContext::new();
-        let consumed =
-            router.try_dispatch(&key_l_down(), Modifiers::CTRL, false, false, &mut ctx);
+        let consumed = router.try_dispatch(&key_l_down(), Modifiers::CTRL, false, false, &mut ctx);
 
         assert!(consumed);
         assert!(fired.get());
@@ -284,8 +283,7 @@ mod tests {
         router.register(Shortcut::ctrl('l'), move |_| f.set(true));
 
         let mut ctx = EventContext::new();
-        let consumed =
-            router.try_dispatch(&key_l_down(), Modifiers::NONE, false, false, &mut ctx);
+        let consumed = router.try_dispatch(&key_l_down(), Modifiers::NONE, false, false, &mut ctx);
 
         assert!(!consumed);
         assert!(!fired.get());
@@ -319,8 +317,7 @@ mod tests {
         );
 
         let mut ctx = EventContext::new();
-        let consumed =
-            router.try_dispatch(&key_l_down(), Modifiers::CTRL, true, false, &mut ctx);
+        let consumed = router.try_dispatch(&key_l_down(), Modifiers::CTRL, true, false, &mut ctx);
 
         assert!(consumed);
         assert!(fired.get());
@@ -337,8 +334,7 @@ mod tests {
         );
 
         let mut ctx = EventContext::new();
-        let consumed =
-            router.try_dispatch(&key_l_down(), Modifiers::CTRL, false, true, &mut ctx);
+        let consumed = router.try_dispatch(&key_l_down(), Modifiers::CTRL, false, true, &mut ctx);
 
         assert!(!consumed);
         assert!(!fired.get());
@@ -356,8 +352,7 @@ mod tests {
         assert_eq!(fired.get(), 1);
 
         router.remove(id);
-        let consumed =
-            router.try_dispatch(&key_l_down(), Modifiers::CTRL, false, false, &mut ctx);
+        let consumed = router.try_dispatch(&key_l_down(), Modifiers::CTRL, false, false, &mut ctx);
         assert!(!consumed);
         assert_eq!(fired.get(), 1);
     }

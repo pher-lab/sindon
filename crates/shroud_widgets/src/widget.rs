@@ -27,7 +27,7 @@ impl<'a> MeasureContext<'a> {
     }
 }
 
-pub trait Widget {
+pub trait Widget: std::any::Any {
     /// The security level of this widget. Propagates to children.
     fn security_level(&self) -> SecurityLevel {
         SecurityLevel::Normal

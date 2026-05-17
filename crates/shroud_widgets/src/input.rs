@@ -22,6 +22,20 @@
 //! lines preserving the visual column, and the default height grows to
 //! [`Input::lines`] line-heights. All other behavior (signal binding,
 //! placeholder, focus ring, on_change) carries over unchanged.
+//!
+//! ## Numeric mode (Phase 28)
+//!
+//! Calling [`Input::numeric`] restricts character input to ASCII digits,
+//! enables typed bidirectional binding via [`Input::number_value`]
+//! (`Signal<i64>`), and applies the [`Input::min_value`] / [`Input::max_value`]
+//! clamp every time the buffer parses cleanly. While the field is being
+//! edited, intermediate states like an empty buffer or leading zeros are
+//! tolerated — the bound signal only updates when the buffer parses. On
+//! focus loss the buffer is re-rendered from the signal, so any partial /
+//! out-of-range input snaps back to a canonical form (e.g. `"007"` → `"7"`,
+//! `""` → the clamped value). External writes to the signal are picked up
+//! on the next paint unless the field is currently focused. Numeric mode
+//! is mutually exclusive with multi-line mode (the builder asserts in debug).
 
 use std::cell::{Cell, RefCell};
 
@@ -43,6 +57,23 @@ use shroud_reactive::Signal;
 ///     .on_submit(|s, _ctx| println!("submitted: {s}"));
 /// ```
 type TextCallback = Box<dyn FnMut(&str, &mut EventContext)>;
+
+/// Clamp `v` to the inclusive `[min, max]` range when either bound is set.
+/// `None` bounds are unbounded on that side. Used by numeric-mode editing.
+fn clamp_opt(v: i64, min: Option<i64>, max: Option<i64>) -> i64 {
+    let mut out = v;
+    if let Some(lo) = min {
+        if out < lo {
+            out = lo;
+        }
+    }
+    if let Some(hi) = max {
+        if out > hi {
+            out = hi;
+        }
+    }
+    out
+}
 
 pub struct Input {
     /// Editable buffer. `RefCell` because [`Widget::paint`] takes `&self`
@@ -72,6 +103,24 @@ pub struct Input {
     /// visual offset as where the user originally started navigating.
     /// Cleared by any non-vertical edit or motion.
     desired_col: Cell<Option<usize>>,
+    /// Numeric (digit-only) input mode. When `true`, [`CharInput`] events
+    /// only commit ASCII digits and [`min_value`] / [`max_value`] clamp
+    /// the parsed integer on each edit.
+    ///
+    /// [`CharInput`]: crate::event::WidgetEvent::CharInput
+    /// [`min_value`]: Self::min_value
+    /// [`max_value`]: Self::max_value
+    numeric: bool,
+    /// Inclusive lower bound used by numeric mode to clamp the parsed
+    /// value. `None` = no lower bound.
+    min_value: Option<i64>,
+    /// Inclusive upper bound used by numeric mode to clamp the parsed
+    /// value. `None` = no upper bound.
+    max_value: Option<i64>,
+    /// Optional typed binding for numeric mode. When `Some`, the widget
+    /// rebases its buffer from the signal on paint (unless focused) and
+    /// writes the freshly-parsed-and-clamped value back on every edit.
+    number_source: Option<Signal<i64>>,
     on_change: Option<TextCallback>,
     on_submit: Option<TextCallback>,
     // Colors (None = read from theme).
@@ -100,6 +149,10 @@ impl Input {
             multiline: false,
             line_count: None,
             desired_col: Cell::new(None),
+            numeric: false,
+            min_value: None,
+            max_value: None,
+            number_source: None,
             on_change: None,
             on_submit: None,
             bg_color: None,
@@ -156,6 +209,10 @@ impl Input {
     /// while preserving the visual column. Tab is *not* captured — the focus
     /// manager keeps owning it — so the field stays a friendly form citizen.
     pub fn multiline(mut self) -> Self {
+        debug_assert!(
+            !self.numeric,
+            "Input::multiline() cannot be combined with numeric()"
+        );
         self.multiline = true;
         self
     }
@@ -166,6 +223,72 @@ impl Input {
     /// 3 lines.
     pub fn lines(mut self, count: usize) -> Self {
         self.line_count = Some(count.max(1));
+        self
+    }
+
+    /// Switch this input to numeric (digit-only) mode.
+    ///
+    /// `CharInput` events are filtered to ASCII digits (`0`..=`9`); other
+    /// characters are silently dropped. Combine with
+    /// [`min_value`](Self::min_value) / [`max_value`](Self::max_value) to
+    /// clamp the parsed integer on every edit, and with
+    /// [`number_value`](Self::number_value) for typed bidirectional
+    /// binding to a `Signal<i64>`.
+    ///
+    /// Mutually exclusive with [`multiline`](Self::multiline) — combining
+    /// the two trips a `debug_assert` in debug builds.
+    pub fn numeric(mut self) -> Self {
+        debug_assert!(
+            !self.multiline,
+            "Input::numeric() cannot be combined with multiline()"
+        );
+        self.numeric = true;
+        self
+    }
+
+    /// Inclusive lower bound for numeric mode. Applied every time the
+    /// buffer parses as an integer. Has no effect outside numeric mode.
+    pub fn min_value(mut self, v: i64) -> Self {
+        self.min_value = Some(v);
+        self
+    }
+
+    /// Inclusive upper bound for numeric mode. Applied every time the
+    /// buffer parses as an integer. Has no effect outside numeric mode.
+    pub fn max_value(mut self, v: i64) -> Self {
+        self.max_value = Some(v);
+        self
+    }
+
+    /// Bind this input to a `Signal<i64>` (bidirectional, numeric mode).
+    ///
+    /// Calling this also implicitly enables [`numeric`](Self::numeric).
+    /// The widget's buffer seeds from the signal's current value
+    /// (rendered without a sign for non-negative integers). On paint, if
+    /// the field is *not* focused and the buffer disagrees with the
+    /// signal, the buffer is re-rendered from the signal — so external
+    /// `signal.set(n)` calls show up in the UI.
+    ///
+    /// On every edit the buffer is parsed; if it parses cleanly the value
+    /// is clamped to `[min_value, max_value]` (when set) and written back
+    /// to the signal. An empty or unparseable buffer leaves the signal
+    /// untouched, allowing transient editing states. On focus loss the
+    /// buffer is re-canonicalized from the signal.
+    pub fn number_value(mut self, signal: Signal<i64>) -> Self {
+        debug_assert!(
+            !self.multiline,
+            "Input::number_value() cannot be combined with multiline()"
+        );
+        // Render the signal's current value verbatim — no construct-time
+        // clamp. If the caller seeds with an out-of-range value, the buffer
+        // honestly shows it; clamping only kicks in once the user starts
+        // editing. Matches the HTML `<input type="number" value={x}>`
+        // semantics where `value` is shown as-is regardless of `min/max`.
+        let rendered = signal.get().to_string();
+        self.cursor.set(rendered.len());
+        *self.value.borrow_mut() = rendered;
+        self.numeric = true;
+        self.number_source = Some(signal);
         self
     }
 
@@ -263,6 +386,14 @@ impl Input {
     /// Rebase the buffer from the bound signal if they differ. Clamps the
     /// cursor to the new length. Called from both `paint` (via `&self`,
     /// interior-mutable) and `event` (via `&mut self`, same path).
+    ///
+    /// For numeric mode with a [`number_source`](Self::number_source) bound,
+    /// the rebase only happens when the field is *not* focused — otherwise
+    /// every external write would stomp on the user's mid-typing buffer
+    /// (e.g. typing "1" → buffer "1" → signal 1 → re-render to "1", fine;
+    /// but typing "" → signal stays → re-render to last value, which would
+    /// jump the cursor and prevent deletion). The text-source path keeps its
+    /// always-rebase behavior since `Signal<String>` is symmetric.
     fn sync_from_source(&self) {
         if let Some(src) = self.source.as_ref() {
             let remote = src.get_clone();
@@ -275,13 +406,60 @@ impl Input {
                 }
             }
         }
+        if let Some(src) = self.number_source.as_ref() {
+            if !self.focused {
+                // Render raw, no clamp — what `sig.get()` says is what the
+                // user sees. `min_value` / `max_value` are documented as
+                // applying only to user edits; external out-of-range writes
+                // are the caller's responsibility.
+                let rendered = src.get().to_string();
+                let mut buf = self.value.borrow_mut();
+                if *buf != rendered {
+                    let new_len = rendered.len();
+                    *buf = rendered;
+                    if self.cursor.get() > new_len {
+                        self.cursor.set(new_len);
+                    }
+                }
+            }
+        }
     }
 
     /// Push the current buffer back to the bound signal (if any). Called
     /// after each edit.
+    ///
+    /// For numeric mode the buffer is parsed and clamped; an empty or
+    /// unparseable buffer leaves the signal untouched so the user can pass
+    /// through transient editing states without the signal flapping.
     fn push_to_source(&self) {
         if let Some(src) = self.source.as_ref() {
             src.set(self.value.borrow().clone());
+        }
+        if let Some(src) = self.number_source.as_ref() {
+            let buf = self.value.borrow();
+            if let Ok(parsed) = buf.parse::<i64>() {
+                let clamped = clamp_opt(parsed, self.min_value, self.max_value);
+                if src.get() != clamped {
+                    src.set(clamped);
+                }
+            }
+        }
+    }
+
+    /// Re-render the buffer from the bound `Signal<i64>` (numeric mode
+    /// only). Used on `FocusLost` to snap partial input ("", "007", an
+    /// out-of-range number that didn't parse) back to the signal's
+    /// canonical decimal form. No clamp here — the signal is already
+    /// canonical (it was clamped on the last edit), and rendering raw
+    /// keeps "what you see" aligned with "what `sig.get()` returns".
+    fn canonicalize_numeric_buffer(&mut self) {
+        if let Some(src) = self.number_source.as_ref() {
+            let rendered = src.get().to_string();
+            let new_len = rendered.len();
+            *self.value.borrow_mut() = rendered;
+            if self.cursor.get() > new_len {
+                self.cursor.set(new_len);
+            }
         }
     }
 
@@ -498,11 +676,14 @@ impl Widget for Input {
             WidgetEvent::FocusLost => {
                 self.focused = false;
                 self.desired_col.set(None);
+                if self.numeric {
+                    self.canonicalize_numeric_buffer();
+                }
                 EventResult::Ignored
             }
 
             WidgetEvent::CharInput { ch } if self.focused => {
-                if !ch.is_control() {
+                if !ch.is_control() && (!self.numeric || ch.is_ascii_digit()) {
                     let ch_len = ch.len_utf8();
                     let cursor = self.cursor.get();
                     self.value.borrow_mut().insert(cursor, *ch);

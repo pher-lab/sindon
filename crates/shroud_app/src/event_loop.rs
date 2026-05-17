@@ -397,9 +397,7 @@ fn translate_character(s: &str, mods: Modifiers) -> Vec<WidgetEvent> {
             })
             .collect()
     } else {
-        s.chars()
-            .map(|ch| WidgetEvent::CharInput { ch })
-            .collect()
+        s.chars().map(|ch| WidgetEvent::CharInput { ch }).collect()
     }
 }
 

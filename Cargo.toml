@@ -17,6 +17,7 @@ members = [
     "examples/hover_demo",
     "examples/knot_spike",
     "examples/modal_demo",
+    "examples/number_input_demo",
     "examples/password_manager",
     "examples/secure_password_form",
     "examples/textarea_demo",

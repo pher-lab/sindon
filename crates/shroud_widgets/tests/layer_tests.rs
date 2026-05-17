@@ -759,7 +759,10 @@ fn modal_with_default_options_does_not_block_global_shortcut() {
 
     dispatch_key_with_mods(&mut tree, 'l', Modifiers::CTRL);
 
-    assert!(fired.get(), "Global shortcut must fire through default modal");
+    assert!(
+        fired.get(),
+        "Global shortcut must fire through default modal"
+    );
 }
 
 #[test]

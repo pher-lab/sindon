@@ -4493,10 +4493,9 @@ fn shortcut_handler_can_replace_screen() {
 
     tree.shortcut_router_mut()
         .register(Shortcut::ctrl('l'), |ctx| {
-            ctx.event_ctx
-                .replace_screen(|t| {
-                    t.set_root(Container::column().width(100.0).height(100.0));
-                });
+            ctx.event_ctx.replace_screen(|t| {
+                t.set_root(Container::column().width(100.0).height(100.0));
+            });
         });
 
     let initial_len = tree.len();
@@ -4512,4 +4511,282 @@ fn shortcut_handler_can_replace_screen() {
     // After drain: the old root + its child are tombstoned, a fresh root
     // is in place. len() counts live nodes only, so it should be 1.
     assert_ne!(tree.len(), initial_len);
+}
+
+// ── Phase 28: Input numeric mode + Signal<i64> binding ─────────────
+
+/// Helper: focus an input by clicking inside its rect so subsequent
+/// CharInput events are accepted (Input only commits when `self.focused`).
+fn focus_input(tree: &mut WidgetTree, idx: usize, event_ctx: &mut EventContext) {
+    let rect = tree.layout_rect(idx);
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        event_ctx,
+    );
+}
+
+#[test]
+fn input_numeric_filters_non_digit_chars() {
+    // In numeric mode, only ASCII digits should land in the buffer.
+    // Letters / punctuation / whitespace are dropped silently — same model
+    // as HTML <input type="number"> rejecting non-numeric typing.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().numeric());
+    tree.compute_layout(400.0, 100.0);
+
+    let mut event_ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut event_ctx);
+
+    // Mix of digits and non-digits: only the digits should commit.
+    for ch in ['1', 'a', '2', '!', '3', ' ', '4'] {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut event_ctx);
+    }
+
+    let input = tree
+        .widget_as::<Input>(idx)
+        .expect("widget should still be Input");
+    assert_eq!(
+        input.value_clone(),
+        "1234",
+        "numeric mode must drop non-digit CharInput events"
+    );
+}
+
+#[test]
+fn input_number_value_seeds_buffer_and_enables_numeric() {
+    // number_value() seeds the buffer with the signal's current value
+    // (rendered as a decimal int) and implicitly enables numeric mode.
+    let sig = Signal::new(42i64);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().number_value(sig));
+    tree.compute_layout(400.0, 100.0);
+
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.value_clone(), "42", "buffer seeds from Signal<i64>");
+
+    // Implicit numeric: letters should be dropped even though caller
+    // never wrote `.numeric()`.
+    let mut event_ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut event_ctx);
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'x' }, &mut event_ctx);
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(
+        input.value_clone(),
+        "42",
+        "letters rejected after number_value()"
+    );
+}
+
+#[test]
+fn input_numeric_pushes_parsed_value_to_signal() {
+    // Typing a digit at the end of the buffer should parse-and-write the
+    // freshly-parsed integer to the bound signal on every keystroke.
+    let sig = Signal::new(0i64);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().number_value(sig));
+    tree.compute_layout(400.0, 100.0);
+
+    let mut event_ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut event_ctx);
+    // MouseDown moves cursor to end of buffer ("0"), so digits append.
+    for ch in ['7', '2'] {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut event_ctx);
+    }
+
+    assert_eq!(sig.get(), 72, "signal must track each parsed buffer state");
+}
+
+#[test]
+fn input_numeric_clamps_to_max_on_edit() {
+    // Typing past max_value should clamp the *signal* even though the
+    // buffer keeps showing the typed digits (snap-back happens on FocusLost).
+    let sig = Signal::new(5i64);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(
+        root,
+        Input::new().min_value(1).max_value(10).number_value(sig),
+    );
+    tree.compute_layout(400.0, 100.0);
+
+    let mut event_ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut event_ctx);
+    // Cursor at end of "5" → typing "9" makes buffer "59" → 59 clamped to 10.
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: '9' }, &mut event_ctx);
+
+    assert_eq!(sig.get(), 10, "out-of-range edit must clamp signal to max");
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(
+        input.value_clone(),
+        "59",
+        "buffer stays free-form mid-edit; canonicalize is FocusLost's job"
+    );
+}
+
+#[test]
+fn input_numeric_clamps_to_min_via_focus_lost_when_buffer_empty() {
+    // User clears the buffer fully. The signal should not flap to 0 on
+    // each backspace (parse fails on ""), and on FocusLost the buffer
+    // should snap back to the canonical render of the last valid signal
+    // value clamped to min.
+    let sig = Signal::new(7i64);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(
+        root,
+        Input::new().min_value(1).max_value(100).number_value(sig),
+    );
+    tree.compute_layout(400.0, 100.0);
+
+    let mut event_ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut event_ctx);
+    // Clear the buffer ("7" → ""). signal must not move to 0.
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Backspace),
+        },
+        &mut event_ctx,
+    );
+    assert_eq!(
+        sig.get(),
+        7,
+        "empty buffer keeps signal at last parsed value"
+    );
+
+    // FocusLost should re-render the signal value into the buffer.
+    tree.dispatch_event(&WidgetEvent::FocusLost, &mut event_ctx);
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(
+        input.value_clone(),
+        "7",
+        "FocusLost canonicalizes buffer from signal"
+    );
+}
+
+#[test]
+fn input_numeric_canonicalizes_leading_zeros_on_focus_lost() {
+    // Buffer "007" is a valid parse (= 7) and the signal already holds 7.
+    // FocusLost should normalize the visible buffer to "7" by re-rendering
+    // the signal value.
+    let sig = Signal::new(0i64);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().number_value(sig));
+    tree.compute_layout(400.0, 100.0);
+
+    let mut event_ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut event_ctx);
+    // Buffer starts as "0", cursor at end. Typing "07" → "007", parses to 7.
+    for ch in ['0', '7'] {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut event_ctx);
+    }
+    assert_eq!(sig.get(), 7);
+
+    tree.dispatch_event(&WidgetEvent::FocusLost, &mut event_ctx);
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(
+        input.value_clone(),
+        "7",
+        "leading zeros stripped on canonicalize"
+    );
+}
+
+#[test]
+fn input_numeric_external_signal_set_rebases_when_unfocused() {
+    // While the field is unfocused, paint should re-render an externally
+    // set signal value. Mirror of the Signal<String> "external_signal_set"
+    // test, but for the typed binding.
+    let sig = Signal::new(1i64);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().number_value(sig));
+    tree.compute_layout(400.0, 100.0);
+
+    // Initial paint to prime sync.
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "1");
+
+    // External write — widget is unfocused, so the next paint must rebase.
+    sig.set(999);
+    let mut ctx2 = PaintContext::default();
+    tree.paint(&mut ctx2);
+    assert_eq!(
+        tree.widget_as::<Input>(idx).unwrap().value_clone(),
+        "999",
+        "unfocused widget must rebase from external signal write"
+    );
+}
+
+#[test]
+fn input_numeric_external_signal_does_not_clobber_focused_buffer() {
+    // While focused, the user's mid-edit buffer must survive an external
+    // signal write. Otherwise the user could be typing and have the field
+    // jump out from under them (e.g. an on_frame handler nudging the value).
+    let sig = Signal::new(1i64);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().number_value(sig));
+    tree.compute_layout(400.0, 100.0);
+
+    let mut event_ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut event_ctx);
+    // Type a digit so the buffer diverges from the signal in a typed-by-user way.
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: '5' }, &mut event_ctx);
+    // Now buffer = "15", signal = 15.
+    assert_eq!(sig.get(), 15);
+
+    // External overwrite while focused — the buffer should NOT snap.
+    sig.set(7);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(
+        tree.widget_as::<Input>(idx).unwrap().value_clone(),
+        "15",
+        "external signal write must not clobber a focused user buffer"
+    );
+}
+
+#[test]
+fn input_numeric_min_clamp_on_edit_only() {
+    // Only setting min_value (no max) should clamp the lower side via
+    // user edits. The displayed value mirrors the signal verbatim — no
+    // construct-time or paint-time clamp — so an initial out-of-range
+    // signal value renders honestly until the user edits.
+    let sig = Signal::new(0i64);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().min_value(10).number_value(sig));
+    tree.compute_layout(400.0, 100.0);
+
+    // Verbatim seed: signal=0 → buffer "0", no silent snap to min.
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.value_clone(), "0", "buffer renders signal raw");
+    assert_eq!(sig.get(), 0);
+
+    // First edit triggers the min clamp. Cursor is at end → typing "5"
+    // makes buffer "05" → parses to 5 → clamped up to 10.
+    let mut event_ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut event_ctx);
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: '5' }, &mut event_ctx);
+    assert_eq!(sig.get(), 10, "min_value clamps on edit (no max set)");
+
+    // Defocus canonicalizes the buffer to the signal's decimal form.
+    tree.dispatch_event(&WidgetEvent::FocusLost, &mut event_ctx);
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.value_clone(), "10");
 }
