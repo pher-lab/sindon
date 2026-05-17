@@ -2273,6 +2273,7 @@ dependencies = [
  "raw-window-handle",
  "shroud_core",
  "shroud_security",
+ "sys-locale",
  "windows 0.61.3",
  "winit",
  "zeroize",
@@ -2482,6 +2483,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "system_demo"
+version = "0.1.0"
+dependencies = [
+ "shroud",
 ]
 
 [[package]]

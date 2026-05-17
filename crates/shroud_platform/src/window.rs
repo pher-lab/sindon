@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::display_protection::{DisplayProtection, DisplayProtectionResult};
+use crate::system_theme::SystemTheme;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
@@ -65,5 +66,16 @@ impl PlatformWindow {
         } else {
             self.display_protection.disable()
         }
+    }
+
+    /// Best-effort snapshot of the OS theme preference for this window.
+    ///
+    /// Returns `None` when the platform doesn't report a preference
+    /// (e.g. X11 outside GNOME / KDE), letting callers fall back to
+    /// their compiled-in default. Reactive subscribers should use
+    /// `AppScope::system_theme` instead — that signal is also kept
+    /// fresh via `WindowEvent::ThemeChanged`.
+    pub fn system_theme(&self) -> Option<SystemTheme> {
+        self.window.theme().map(SystemTheme::from_winit)
     }
 }

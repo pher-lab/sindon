@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use shroud_app::{App, AppScope};
+use shroud_platform::SystemTheme;
 use shroud_widgets::shortcut::Shortcut;
 use shroud_widgets::tree::WidgetTree;
 
@@ -54,6 +55,21 @@ fn _scope_surface(scope: &mut AppScope) -> WidgetTree {
 #[allow(dead_code)]
 fn _scope_shortcut_surface(scope: &mut AppScope) -> WidgetTree {
     let _id = scope.on_shortcut(Shortcut::ctrl('l'), |_ctx| {});
+    WidgetTree::new()
+}
+
+/// Compile-check: `AppScope::system_theme` returns a clonable
+/// `Signal<Option<SystemTheme>>`, and `system_locale` returns
+/// `Option<String>`. Catches accidental signature drift on the
+/// detection APIs added in the A-13/A-14 phase. The memoization
+/// contract (two calls return the same `Signal` id) is unit-tested in
+/// the event_loop module where `AppScope::new` is reachable without
+/// spinning up winit.
+#[allow(dead_code)]
+fn _scope_system_surface(scope: &mut AppScope) -> WidgetTree {
+    let sig: shroud_reactive::Signal<Option<SystemTheme>> = scope.system_theme();
+    let _copy: shroud_reactive::Signal<Option<SystemTheme>> = sig;
+    let _loc: Option<String> = scope.system_locale();
     WidgetTree::new()
 }
 

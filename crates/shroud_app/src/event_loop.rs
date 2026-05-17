@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use shroud_core::{Point, Theme};
-use shroud_platform::PlatformWindow;
+use shroud_platform::{PlatformWindow, SystemTheme};
+use shroud_reactive::Signal;
 use shroud_render::renderer::Renderer;
 use shroud_security::hardening;
 use shroud_widgets::event::{EventContext, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
@@ -75,6 +76,12 @@ pub struct AppScope {
     /// [`Self::on_shortcut`].
     pending_shortcuts: Vec<(ShortcutId, Shortcut, ShortcutHandler)>,
     next_shortcut_id: u64,
+    /// Signal carrying the OS theme preference, lazily created on the
+    /// first [`Self::system_theme`] call. The event loop holds the
+    /// same `Copy` handle and writes to it from
+    /// `WindowEvent::ThemeChanged` plus the post-`resumed` snapshot,
+    /// so subscribers re-render as the OS preference changes.
+    system_theme_signal: Option<Signal<Option<SystemTheme>>>,
 }
 
 impl AppScope {
@@ -84,6 +91,7 @@ impl AppScope {
             frame_hook: None,
             pending_shortcuts: Vec::new(),
             next_shortcut_id: 0,
+            system_theme_signal: None,
         }
     }
 
@@ -143,6 +151,51 @@ impl AppScope {
         self.pending_shortcuts
             .push((id, shortcut, Box::new(handler)));
         id
+    }
+
+    /// Reactive `Signal` carrying the OS theme preference.
+    ///
+    /// Starts at `None` and becomes `Some(SystemTheme::Light | Dark)`
+    /// as soon as the window has reported a preference (winit fires
+    /// `ThemeChanged` shortly after window creation on supported
+    /// platforms; on Linux outside GNOME / KDE this may stay `None`
+    /// for the life of the app). Subscribers reading the signal
+    /// inside a reactive closure (`TextWidget::reactive`, `Reactive`)
+    /// re-evaluate when the value changes.
+    ///
+    /// The first call instantiates the signal lazily; subsequent
+    /// calls return the same handle. Use this when the app supports a
+    /// `theme = "system"` preference (Knot-style) and needs to
+    /// re-derive its visual theme when the OS toggles between light
+    /// and dark.
+    ///
+    /// ```ignore
+    /// App::new().run(|scope| {
+    ///     let os_theme = scope.system_theme();
+    ///     let label = TextWidget::reactive(move || match os_theme.get() {
+    ///         Some(SystemTheme::Dark) => "OS prefers dark",
+    ///         Some(SystemTheme::Light) => "OS prefers light",
+    ///         None => "OS preference unknown",
+    ///     }.to_string());
+    ///     /* … */
+    /// });
+    /// ```
+    pub fn system_theme(&mut self) -> Signal<Option<SystemTheme>> {
+        *self
+            .system_theme_signal
+            .get_or_insert_with(|| Signal::new(None))
+    }
+
+    /// One-shot snapshot of the OS locale, as a BCP-47 tag (e.g.
+    /// `"ja-JP"`, `"en-US"`). Convenience re-export of
+    /// [`shroud_platform::system_locale`] so apps can read it through
+    /// the same `AppScope` they already hold inside `App::run`.
+    ///
+    /// Returns `None` if the OS could not be queried. Locale changes
+    /// during the process lifetime aren't surfaced as events on any
+    /// supported platform — re-call to refresh.
+    pub fn system_locale(&self) -> Option<String> {
+        shroud_platform::system_locale()
     }
 }
 
@@ -328,6 +381,7 @@ impl App {
         let AppScope {
             frame_hook,
             pending_shortcuts,
+            system_theme_signal,
             ..
         } = scope;
 
@@ -352,6 +406,7 @@ impl App {
             cursor_position: Point::new(0.0, 0.0),
             frame_hook,
             next_tick: None,
+            system_theme_signal,
         };
 
         event_loop.run_app(&mut handler).expect("event loop error");
@@ -457,6 +512,11 @@ struct ShroudEventLoop {
     /// even when unrelated events (mouse moves, focus changes) cause
     /// extra `about_to_wait` calls.
     next_tick: Option<Instant>,
+    /// Mirrors `AppScope::system_theme_signal` so the event loop can
+    /// publish the post-`resumed` snapshot and live
+    /// `WindowEvent::ThemeChanged` updates without going back through
+    /// the build closure.
+    system_theme_signal: Option<Signal<Option<SystemTheme>>>,
 }
 
 impl ShroudEventLoop {
@@ -519,6 +579,18 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             }
         }
 
+        // Publish the initial OS theme snapshot to any subscriber that
+        // called `AppScope::system_theme` during build. winit also
+        // fires `ThemeChanged` shortly after window creation on most
+        // platforms, but reading once here means subscribers see a
+        // non-`None` value on the very first paint when the platform
+        // already knows the preference.
+        if let Some(sig) = self.system_theme_signal {
+            if let Some(theme) = platform_window.system_theme() {
+                sig.set(Some(theme));
+            }
+        }
+
         let window_arc = platform_window.arc();
         let renderer = pollster::block_on(Renderer::new(Arc::clone(&window_arc)));
 
@@ -546,6 +618,16 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
+            }
+
+            // Live OS theme change — publish to the signal if any
+            // subscriber asked for it. The redraw nudge ensures reactive
+            // closures pull the new value into the next frame.
+            WindowEvent::ThemeChanged(theme) => {
+                if let Some(sig) = self.system_theme_signal {
+                    sig.set(Some(SystemTheme::from_winit(theme)));
+                }
+                self.request_redraw();
             }
 
             // Keep EventContext's modifier snapshot current so widgets
@@ -793,6 +875,21 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], WidgetEvent::CharInput { ch: 'L' }));
+    }
+
+    #[test]
+    fn system_theme_signal_is_readable_and_writable() {
+        // The reactive bridge that publishes `WindowEvent::ThemeChanged`
+        // assumes `Signal<Option<SystemTheme>>` round-trips through the
+        // runtime — exercise that contract here so a regression to the
+        // SystemTheme derives (losing `Copy`, say) trips a unit test
+        // rather than only surfacing inside a live window.
+        let sig: Signal<Option<SystemTheme>> = Signal::new(None);
+        assert_eq!(sig.get(), None);
+        sig.set(Some(SystemTheme::Light));
+        assert_eq!(sig.get(), Some(SystemTheme::Light));
+        sig.set(Some(SystemTheme::Dark));
+        assert_eq!(sig.get(), Some(SystemTheme::Dark));
     }
 
     #[test]
