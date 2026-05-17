@@ -4167,3 +4167,266 @@ fn hoverable_container_lights_up_when_cursor_is_in_child_button() {
         "row bg should be theme.hover.bg when cursor is in inner button"
     );
 }
+
+// ── Truncate / wrap (Phase 26) ────────────────────────────────────
+
+const LONG_LATIN: &str =
+    "This is a deliberately overlong sentence that should not fit inside a narrow box.";
+
+#[test]
+fn truncate_false_is_default_and_still_wraps() {
+    // Baseline for A-9: a TextWidget with no truncate flag, dropped into a
+    // narrow column, must wrap onto multiple visual lines. Guards the
+    // wrap-by-default behavior that we are not adding a knob for.
+    use shroud_core::Theme;
+    use shroud_text::TextEngine;
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(120.0).height(400.0));
+    let text_idx = tree.add_child(root, TextWidget::new(LONG_LATIN).font_size(16.0));
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(120.0, 400.0, &mut engine, &theme);
+
+    let rect = tree.layout_rect(text_idx);
+    let line_height = theme.typography.body.line_height;
+    assert!(
+        rect.size.height > line_height * 1.5,
+        "wrap-by-default should produce multi-line height; \
+         got {} for line_height {}",
+        rect.size.height,
+        line_height,
+    );
+}
+
+#[test]
+fn text_wrap_kicks_in_when_narrower_than_natural() {
+    // Companion to the test above — directly verifies that paint emits
+    // glyphs on more than one Y row when the available width is narrower
+    // than the natural shaped width. A-9 regression guard.
+    use shroud_core::Theme;
+    use shroud_text::TextEngine;
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(80.0).height(400.0));
+    let _text_idx = tree.add_child(
+        root,
+        TextWidget::new("Hello wrap world test").font_size(16.0),
+    );
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(80.0, 400.0, &mut engine, &theme);
+
+    let mut ctx = PaintContext::new(theme);
+    tree.paint(&mut ctx);
+
+    let unique_ys: std::collections::BTreeSet<i32> = ctx.glyphs.iter().map(|g| g.y).collect();
+    assert!(
+        unique_ys.len() >= 2,
+        "wrapped text should produce glyphs on at least two baselines; \
+         got {} unique y-rows",
+        unique_ys.len(),
+    );
+}
+
+#[test]
+fn truncate_true_short_text_fits_in_one_line_with_no_ellipsis() {
+    // Truncate-on, but the text already fits — must not append ellipsis,
+    // and must produce the same glyph count as natural shaping.
+    use shroud_core::Rect as CoreRect;
+    use shroud_core::Theme;
+
+    let theme = Theme::default();
+    let widget = TextWidget::new("Hi").font_size(16.0).truncate(true);
+    let mut ctx = PaintContext::new(theme.clone());
+
+    // Wide enough to obviously fit "Hi".
+    let layout = CoreRect::new(0.0, 0.0, 400.0, 22.0);
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+
+    let natural = ctx.text_engine.shape_text("Hi", 16.0, 22.0, None);
+    assert_eq!(
+        ctx.glyphs.len(),
+        natural.glyphs.len(),
+        "truncate-on with text that fits must paint exactly the natural glyph stream"
+    );
+
+    let ellipsis = ctx.text_engine.shape_text("\u{2026}", 16.0, 22.0, None);
+    let ellipsis_gid = ellipsis.glyphs.first().map(|g| g.cache_key.glyph_id);
+    if let Some(gid) = ellipsis_gid {
+        assert!(
+            !ctx.glyphs.iter().any(|g| g.cache_key.glyph_id == gid),
+            "no ellipsis glyph should appear when the text already fits"
+        );
+    }
+}
+
+#[test]
+fn truncate_true_long_text_appends_ellipsis() {
+    use shroud_core::Rect as CoreRect;
+    use shroud_core::Theme;
+
+    let theme = Theme::default();
+    let widget = TextWidget::new(LONG_LATIN).font_size(16.0).truncate(true);
+    let mut ctx = PaintContext::new(theme);
+
+    let layout = CoreRect::new(0.0, 0.0, 120.0, 22.0);
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+
+    // cache_key carries x_bin subpixel state, so two `…` glyphs at different
+    // positions don't compare equal. Match on `glyph_id` instead (the font's
+    // glyph index, which is position-independent).
+    let ellipsis_only = ctx.text_engine.shape_text("\u{2026}", 16.0, 22.0, None);
+    let ellipsis_gid = ellipsis_only
+        .glyphs
+        .first()
+        .map(|g| g.cache_key.glyph_id)
+        .expect("ellipsis must produce at least one glyph in the system font");
+
+    assert!(
+        ctx.glyphs
+            .iter()
+            .any(|g| g.cache_key.glyph_id == ellipsis_gid),
+        "truncated overflow should include the ellipsis glyph in the paint stream"
+    );
+
+    // And the last glyph should be the ellipsis (truncate appends at the tail).
+    let last_gid = ctx.glyphs.last().map(|g| g.cache_key.glyph_id);
+    assert_eq!(
+        last_gid,
+        Some(ellipsis_gid),
+        "ellipsis must be the trailing glyph for tail truncation"
+    );
+
+    // And we actually painted less than the full natural string would (proof
+    // that the prefix was clipped, not just rendered).
+    let natural = ctx.text_engine.shape_text(LONG_LATIN, 16.0, 22.0, None);
+    assert!(
+        ctx.glyphs.len() < natural.glyphs.len(),
+        "truncated paint must drop some prefix glyphs (got {} of {} natural)",
+        ctx.glyphs.len(),
+        natural.glyphs.len(),
+    );
+}
+
+#[test]
+fn truncate_true_measure_returns_single_line_height() {
+    use shroud_text::TextEngine;
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    let widget = TextWidget::new(LONG_LATIN).font_size(16.0).truncate(true);
+
+    let mut ctx = MeasureContext::new(&mut engine, &theme);
+    let size = <TextWidget as Widget>::measure(&widget, Some(120.0), &mut ctx)
+        .expect("measure should report Some");
+
+    let line_height = theme.typography.body.line_height.ceil();
+    assert_eq!(
+        size.height, line_height,
+        "truncated widget must report exactly one line of height \
+         (got {}, expected {})",
+        size.height, line_height,
+    );
+    assert!(
+        size.width <= 120.0,
+        "truncated width must not exceed available_width; got {}",
+        size.width,
+    );
+}
+
+#[test]
+fn truncate_true_long_text_does_not_overflow_layout_width() {
+    use shroud_core::Rect as CoreRect;
+    use shroud_core::Theme;
+
+    let theme = Theme::default();
+    let widget = TextWidget::new(LONG_LATIN).font_size(16.0).truncate(true);
+    let mut ctx = PaintContext::new(theme);
+
+    let layout = CoreRect::new(10.0, 5.0, 120.0, 22.0);
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+
+    // The drawn glyphs' right edges (relative to the paint stream) must
+    // stay within layout's right edge. Allow 1px of slop for sub-pixel
+    // rounding.
+    let right_edge = layout.origin.x + layout.size.width + 1.0;
+    let max_right = ctx
+        .glyphs
+        .iter()
+        .map(|g| g.x as f32 + g.image.width as f32 + g.image.left as f32)
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_right <= right_edge,
+        "truncated glyphs must not paint past layout right edge \
+         (max_right={}, allowed={})",
+        max_right,
+        right_edge,
+    );
+
+    // Every glyph in the stream should also carry the layout clip — defense
+    // in depth via PaintContext::push_clip.
+    for g in &ctx.glyphs {
+        assert_eq!(
+            g.clip_rect,
+            Some(layout),
+            "every truncated glyph must record the layout rect as its clip"
+        );
+    }
+}
+
+#[test]
+fn truncate_true_with_cjk_text_walks_char_boundary() {
+    use shroud_core::Rect as CoreRect;
+    use shroud_core::Theme;
+
+    let theme = Theme::default();
+    // 5 repeats of 日本語 = 15 multi-byte chars, no ASCII fast path.
+    let widget = TextWidget::new("日本語日本語日本語日本語日本語")
+        .font_size(16.0)
+        .truncate(true);
+    let mut ctx = PaintContext::new(theme);
+
+    let layout = CoreRect::new(0.0, 0.0, 80.0, 22.0);
+    // The original byte-vs-char-index bug would `panic!` inside `&text[..end]`
+    // when `end` landed mid-character. The primary value of this test is that
+    // paint succeeds at all — no panic, no UTF-8 slice violation.
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+
+    // Secondary: prove the prefix was actually trimmed. Comparing glyph_id
+    // against `shape_text("\u{2026}")` alone is fragile because cosmic-text
+    // can pick a different (Japanese-fallback) font for the ellipsis when
+    // it sits between CJK chars vs. on its own — so the glyph_id differs.
+    // Just check that we emitted fewer glyphs than the natural full string.
+    let natural = ctx
+        .text_engine
+        .shape_text("日本語日本語日本語日本語日本語", 16.0, 22.0, None);
+    assert!(
+        ctx.glyphs.len() < natural.glyphs.len(),
+        "CJK truncate must drop some prefix; got {} of {} natural",
+        ctx.glyphs.len(),
+        natural.glyphs.len(),
+    );
+}
+
+#[test]
+fn truncate_true_with_zero_width_paints_nothing() {
+    use shroud_core::Rect as CoreRect;
+    use shroud_core::Theme;
+
+    let theme = Theme::default();
+    let widget = TextWidget::new("anything").font_size(16.0).truncate(true);
+    let mut ctx = PaintContext::new(theme);
+
+    let layout = CoreRect::new(0.0, 0.0, 0.0, 22.0);
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+
+    assert!(
+        ctx.glyphs.is_empty(),
+        "truncate at zero width must paint no glyphs (graceful, not panic); \
+         got {} glyphs",
+        ctx.glyphs.len(),
+    );
+}

@@ -101,6 +101,27 @@ fn main() {
                 .color(Color::rgb(0.75, 0.85, 0.95)),
             );
 
+            // ── Phase 26 truncate demo ───────────────────────────────
+            // Long single-line title with .truncate(true): resize the
+            // window narrower to see the trailing `…` move; wider until
+            // the entire string fits and the ellipsis disappears.
+            tree.add_child(
+                root,
+                TextWidget::new("Truncate demo (resize window to see \u{2026} appear/disappear)")
+                    .font_size(13.0)
+                    .color(Color::rgb(0.5, 0.55, 0.65)),
+            );
+            tree.add_child(
+                root,
+                TextWidget::new(
+                    "C:/Users/example/Documents/Notes/2026-05-17/very-long-directory-path/\
+                     that-should-ellipsize-on-the-right-edge.md",
+                )
+                .font_size(15.0)
+                .color(Color::rgb(0.92, 0.94, 1.0))
+                .truncate(true),
+            );
+
             tree
         });
 }

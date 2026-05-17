@@ -5,6 +5,9 @@ use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::Reactive;
+use shroud_text::TextEngine;
+
+const ELLIPSIS: &str = "\u{2026}";
 
 /// A text display widget.
 ///
@@ -19,11 +22,26 @@ use shroud_reactive::Reactive;
 /// Convenience constructors [`TextWidget::new`] and [`TextWidget::reactive`]
 /// preserve the pre-Phase-14 API — they delegate to `Reactive::Static` and
 /// `Reactive::derive` respectively.
+///
+/// ## Wrap (default)
+///
+/// By default the widget wraps on word boundaries when its laid-out width is
+/// narrower than the natural shaped width. `measure()` reports the wrapped
+/// height so Taffy allocates enough vertical room. Wrap is the only mode for
+/// the non-truncated path — there is no "no-wrap with overflow" knob.
+///
+/// ## Truncate (opt-in)
+///
+/// Call [`TextWidget::truncate`] with `true` to force a single line and
+/// append `…` (U+2026) when the text overflows the laid-out width. Use this
+/// for sidebar items, file paths, or any row where height stability matters
+/// more than showing the full string.
 pub struct TextWidget {
     text: Reactive<String>,
     font_size: Option<f32>,
     line_height: Option<f32>,
     color: Option<Reactive<Color>>,
+    truncate: bool,
 }
 
 impl TextWidget {
@@ -38,6 +56,7 @@ impl TextWidget {
             font_size: None,
             line_height: None,
             color: None,
+            truncate: false,
         }
     }
 
@@ -52,6 +71,7 @@ impl TextWidget {
             font_size: None,
             line_height: None,
             color: None,
+            truncate: false,
         }
     }
 
@@ -74,6 +94,13 @@ impl TextWidget {
     /// paint.
     pub fn color(mut self, color: impl Into<Reactive<Color>>) -> Self {
         self.color = Some(color.into());
+        self
+    }
+
+    /// Force single-line rendering with a trailing `…` (U+2026) when the
+    /// text overflows the laid-out width. Default `false` (wrap on).
+    pub fn truncate(mut self, on: bool) -> Self {
+        self.truncate = on;
         self
     }
 
@@ -104,6 +131,21 @@ impl Widget for TextWidget {
             .line_height
             .unwrap_or(ctx.theme.typography.body.line_height);
 
+        let natural = ctx
+            .text_engine
+            .shape_text(&text, font_size, line_height, None);
+
+        if self.truncate {
+            // Single-line height regardless of natural — truncate's contract
+            // is row-height stability. Width caps at whichever of natural /
+            // available_width is smaller so the row never claims unused space.
+            let w = match available_width {
+                Some(aw) => natural.width.min(aw),
+                None => natural.width,
+            };
+            return Some(Size::new(w.ceil(), line_height.ceil()));
+        }
+
         // Compute max-content first. Taffy may call us with a narrow
         // `available_width` during its min-content / flex probing passes;
         // naively shaping with that as `max_width` would wrap every space
@@ -111,9 +153,6 @@ impl Widget for TextWidget {
         // natural size — producing the bug where "Count: 0" becomes two
         // lines. So: only wrap when our natural width actually overflows
         // the available width.
-        let natural = ctx
-            .text_engine
-            .shape_text(&text, font_size, line_height, None);
         let shaped = if let Some(aw) = available_width {
             if natural.width > aw {
                 ctx.text_engine
@@ -155,6 +194,48 @@ impl Widget for TextWidget {
             .map(|c| c.get())
             .unwrap_or(ctx.theme.colors.on_background);
 
+        if self.truncate {
+            // Single-line, may need ellipsis. Clip to layout so any sub-pixel
+            // slop on the right edge can't bleed past the row.
+            ctx.push_clip(layout);
+
+            let natural = ctx
+                .text_engine
+                .shape_text(&text, font_size, line_height, None);
+            let to_paint = if natural.width <= layout.size.width {
+                natural
+            } else {
+                let display = ellipsize_to_fit(
+                    &text,
+                    &mut ctx.text_engine,
+                    font_size,
+                    line_height,
+                    layout.size.width,
+                );
+                if display.is_empty() {
+                    ctx.pop_clip();
+                    return;
+                }
+                ctx.text_engine
+                    .shape_text(&display, font_size, line_height, None)
+            };
+
+            for glyph in &to_paint.glyphs {
+                if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
+                    ctx.draw_glyph(
+                        layout.origin.x as i32 + glyph.x,
+                        layout.origin.y as i32 + glyph.y,
+                        image,
+                        color,
+                        glyph.cache_key,
+                    );
+                }
+            }
+
+            ctx.pop_clip();
+            return;
+        }
+
         let shaped =
             ctx.text_engine
                 .shape_text(&text, font_size, line_height, Some(layout.size.width));
@@ -171,4 +252,54 @@ impl Widget for TextWidget {
             }
         }
     }
+}
+
+/// Walk char boundaries from longest to shortest prefix, returning the
+/// longest `prefix + "…"` whose shaped width fits in `max_width`.
+///
+/// Returns the empty string when even `"…"` alone doesn't fit (caller
+/// renders nothing — better than overflow). Linear in the number of chars;
+/// fine for typical title-length inputs (~100 chars max).
+fn ellipsize_to_fit(
+    text: &str,
+    engine: &mut TextEngine,
+    font_size: f32,
+    line_height: f32,
+    max_width: f32,
+) -> String {
+    if max_width <= 0.0 {
+        return String::new();
+    }
+
+    let ellipsis_only = engine.shape_text(ELLIPSIS, font_size, line_height, None);
+    if ellipsis_only.width > max_width {
+        return String::new();
+    }
+
+    // Collect char boundaries (byte indices where a char starts). Walk from
+    // longest to shortest so the first that fits is the answer. `text.len()`
+    // is the "all chars" prefix; we know the full text doesn't fit (caller
+    // already shaped natural and confirmed overflow), so start one char back.
+    let mut boundaries: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+    boundaries.push(text.len());
+
+    // Drop the last entry — the full string already overflows, no need to
+    // re-shape it with an extra ellipsis appended.
+    if boundaries.pop().is_none() {
+        return String::new();
+    }
+
+    while let Some(end) = boundaries.pop() {
+        let mut candidate = String::with_capacity(end + ELLIPSIS.len());
+        candidate.push_str(&text[..end]);
+        candidate.push_str(ELLIPSIS);
+        let shaped = engine.shape_text(&candidate, font_size, line_height, None);
+        if shaped.width <= max_width {
+            return candidate;
+        }
+    }
+
+    // Even prefix-of-zero + ellipsis was the only thing left. Return just
+    // the ellipsis (we already verified it fits at the top).
+    ELLIPSIS.to_string()
 }
