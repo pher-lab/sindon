@@ -452,6 +452,20 @@ fn reactive_dynamic_from_signal_tracks_updates() {
 }
 
 #[test]
+fn reactive_dynamic_from_signal_clone_only_payload() {
+    // Phase 30: `From<Signal<T>>` accepts any `T: Clone`, not just
+    // `T: Copy`. The motivating case is `Signal<Theme>` for live theme
+    // swap — Theme is Clone but not Copy. Use String here as a stand-in
+    // so the test stays in the reactive crate, away from theme deps.
+    let s: Signal<String> = Signal::new(String::from("dark"));
+    let r: Reactive<String> = s.into();
+    assert_eq!(r.get(), "dark");
+
+    s.set(String::from("light"));
+    assert_eq!(r.get(), "light");
+}
+
+#[test]
 fn reactive_dynamic_from_memo_tracks_updates() {
     let src = Signal::new(3);
     let m = Memo::new(move || src.get() * 2);

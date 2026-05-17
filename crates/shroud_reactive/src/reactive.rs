@@ -103,10 +103,16 @@ impl<T> From<T> for Reactive<T> {
     }
 }
 
-/// A `Signal<T>` (Copy-payload) becomes `Dynamic`, re-read each `get()`.
-impl<T: Copy + 'static> From<Signal<T>> for Reactive<T> {
+/// A `Signal<T>` becomes `Dynamic`, re-read on each `get()`.
+///
+/// Bound is `T: Clone` rather than `T: Copy` so signals over non-`Copy`
+/// payloads (notably `Signal<Theme>` for live theme swap) flow through
+/// the same `.into()` site. Cloning happens once per paint frame; for
+/// `Copy` types the clone collapses to a bitwise copy at codegen, so
+/// this is a strict relaxation with no perf hit on the prior shape.
+impl<T: Clone + 'static> From<Signal<T>> for Reactive<T> {
     fn from(s: Signal<T>) -> Self {
-        Reactive::Dynamic(Rc::new(move || s.get()))
+        Reactive::Dynamic(Rc::new(move || s.get_clone()))
     }
 }
 

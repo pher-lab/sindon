@@ -22,6 +22,7 @@ members = [
     "examples/secure_password_form",
     "examples/system_demo",
     "examples/textarea_demo",
+    "examples/theme_swap_demo",
 ]
 
 [workspace.package]

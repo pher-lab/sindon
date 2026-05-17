@@ -1,9 +1,10 @@
+use std::cell::OnceCell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use shroud_core::{Point, Theme};
 use shroud_platform::{PlatformWindow, SystemTheme};
-use shroud_reactive::Signal;
+use shroud_reactive::{Reactive, Signal};
 use shroud_render::renderer::Renderer;
 use shroud_security::hardening;
 use shroud_widgets::event::{EventContext, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
@@ -21,6 +22,39 @@ const DEFAULT_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
 type FrameHook = Box<dyn FnMut() + 'static>;
 type ShortcutHandler = Box<dyn FnMut(&mut ShortcutContext) + 'static>;
+
+thread_local! {
+    /// Process-wide OS-theme signal. Lazily created on the first
+    /// `system_theme_signal()` call from this thread (the UI thread on
+    /// every supported platform — winit's main-thread requirement
+    /// makes that the only place either reads or writes happen). Held
+    /// in a `thread_local!` rather than on `AppScope` so the signal is
+    /// callable *before* `App::run`, which is the difference between
+    /// "you can subscribe inside the build closure" and "you can fold
+    /// the OS theme into a `Reactive<Theme>` passed to `App::theme(...)`".
+    static SYSTEM_THEME_SIGNAL: OnceCell<Signal<Option<SystemTheme>>>
+        = const { OnceCell::new() };
+}
+
+/// Reactive signal carrying the OS theme preference. Lazily created
+/// on first access from the UI thread; subsequent calls (including
+/// the event loop's `WindowEvent::ThemeChanged` write) return the
+/// same handle.
+///
+/// Stable across `App::run` boundaries — call it from `main()` to
+/// pre-build a `Reactive<Theme>` that mixes the OS preference with
+/// in-app user settings before handing the result to `App::theme(...)`,
+/// or call it inside the build closure (via
+/// [`AppScope::system_theme`]) when an `AppScope` is already in hand.
+///
+/// The Signal payload starts as `None` and becomes `Some(Light | Dark)`
+/// the moment the window reports a preference. On Linux outside
+/// GNOME / KDE this may stay `None` for the life of the app — code
+/// reading the signal should always treat `None` as "fall back to
+/// app default".
+pub fn system_theme_signal() -> Signal<Option<SystemTheme>> {
+    SYSTEM_THEME_SIGNAL.with(|cell| *cell.get_or_init(|| Signal::new(None)))
+}
 
 /// Custom events sent to the event loop via [`AppHandle`].
 ///
@@ -76,12 +110,6 @@ pub struct AppScope {
     /// [`Self::on_shortcut`].
     pending_shortcuts: Vec<(ShortcutId, Shortcut, ShortcutHandler)>,
     next_shortcut_id: u64,
-    /// Signal carrying the OS theme preference, lazily created on the
-    /// first [`Self::system_theme`] call. The event loop holds the
-    /// same `Copy` handle and writes to it from
-    /// `WindowEvent::ThemeChanged` plus the post-`resumed` snapshot,
-    /// so subscribers re-render as the OS preference changes.
-    system_theme_signal: Option<Signal<Option<SystemTheme>>>,
 }
 
 impl AppScope {
@@ -91,7 +119,6 @@ impl AppScope {
             frame_hook: None,
             pending_shortcuts: Vec::new(),
             next_shortcut_id: 0,
-            system_theme_signal: None,
         }
     }
 
@@ -153,21 +180,14 @@ impl AppScope {
         id
     }
 
-    /// Reactive `Signal` carrying the OS theme preference.
+    /// Convenience accessor for the OS-theme signal — thin wrapper
+    /// over [`system_theme_signal`].
     ///
-    /// Starts at `None` and becomes `Some(SystemTheme::Light | Dark)`
-    /// as soon as the window has reported a preference (winit fires
-    /// `ThemeChanged` shortly after window creation on supported
-    /// platforms; on Linux outside GNOME / KDE this may stay `None`
-    /// for the life of the app). Subscribers reading the signal
-    /// inside a reactive closure (`TextWidget::reactive`, `Reactive`)
-    /// re-evaluate when the value changes.
-    ///
-    /// The first call instantiates the signal lazily; subsequent
-    /// calls return the same handle. Use this when the app supports a
-    /// `theme = "system"` preference (Knot-style) and needs to
-    /// re-derive its visual theme when the OS toggles between light
-    /// and dark.
+    /// Both return the same underlying `Signal<Option<SystemTheme>>`;
+    /// the free-fn form exists for code that needs to read the signal
+    /// *before* `App::run` is called (e.g. building a
+    /// `Reactive<Theme>` to hand to `App::theme(...)`). Use whichever
+    /// shape reads naturally at the call site.
     ///
     /// ```ignore
     /// App::new().run(|scope| {
@@ -180,10 +200,8 @@ impl AppScope {
     ///     /* … */
     /// });
     /// ```
-    pub fn system_theme(&mut self) -> Signal<Option<SystemTheme>> {
-        *self
-            .system_theme_signal
-            .get_or_insert_with(|| Signal::new(None))
+    pub fn system_theme(&self) -> Signal<Option<SystemTheme>> {
+        system_theme_signal()
     }
 
     /// One-shot snapshot of the OS locale, as a BCP-47 tag (e.g.
@@ -209,7 +227,12 @@ struct AppConfig {
     ptrace_protection: bool,
     exploit_mitigation: bool,
     capture_prevention: bool,
-    theme: Theme,
+    /// Theme source. `Reactive::Static(t)` for the historical
+    /// `App::theme(Theme::dark())` shape; `Reactive::Dynamic(...)`
+    /// when the theme is a `Signal<Theme>` or a derived closure (for
+    /// live theme swap). Pulled on every paint, so swapping in a new
+    /// `Theme` value through the signal repaints with fresh tokens.
+    theme: Reactive<Theme>,
     tick_interval: Duration,
 }
 
@@ -223,7 +246,7 @@ impl Default for AppConfig {
             ptrace_protection: true,
             exploit_mitigation: true,
             capture_prevention: false,
-            theme: Theme::default(),
+            theme: Reactive::Static(Theme::default()),
             tick_interval: DEFAULT_TICK_INTERVAL,
         }
     }
@@ -271,10 +294,25 @@ impl App {
         self
     }
 
-    /// Visual theme applied to the paint context. Defaults to
-    /// [`Theme::default`] (currently the dark theme).
-    pub fn theme(mut self, theme: Theme) -> Self {
-        self.config.theme = theme;
+    /// Visual theme applied to the paint context.
+    ///
+    /// Accepts anything convertible into a [`Reactive<Theme>`] —
+    /// `Theme::dark()` for a static theme (the historical shape),
+    /// `Signal<Theme>` for a user-toggleable theme that flips on
+    /// `signal.set(...)`, or `Reactive::derive(|| ...)` for a theme
+    /// derived from multiple inputs (Knot-style `light | dark |
+    /// system` resolution that folds in [`system_theme_signal`]).
+    ///
+    /// The current value is pulled on every paint frame, so updating
+    /// the underlying source plus calling [`AppHandle::wake`] (or
+    /// causing any other redraw — input, `WindowEvent::ThemeChanged`,
+    /// `on_frame` tick) is enough to repaint with the new tokens. No
+    /// widget-level rewiring needed; the swap touches paint context
+    /// only.
+    ///
+    /// Defaults to [`Theme::default`] (currently the dark theme).
+    pub fn theme(mut self, theme: impl Into<Reactive<Theme>>) -> Self {
+        self.config.theme = theme.into();
         self
     }
 
@@ -381,7 +419,6 @@ impl App {
         let AppScope {
             frame_hook,
             pending_shortcuts,
-            system_theme_signal,
             ..
         } = scope;
 
@@ -406,7 +443,6 @@ impl App {
             cursor_position: Point::new(0.0, 0.0),
             frame_hook,
             next_tick: None,
-            system_theme_signal,
         };
 
         event_loop.run_app(&mut handler).expect("event loop error");
@@ -512,11 +548,6 @@ struct ShroudEventLoop {
     /// even when unrelated events (mouse moves, focus changes) cause
     /// extra `about_to_wait` calls.
     next_tick: Option<Instant>,
-    /// Mirrors `AppScope::system_theme_signal` so the event loop can
-    /// publish the post-`resumed` snapshot and live
-    /// `WindowEvent::ThemeChanged` updates without going back through
-    /// the build closure.
-    system_theme_signal: Option<Signal<Option<SystemTheme>>>,
 }
 
 impl ShroudEventLoop {
@@ -579,22 +610,22 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             }
         }
 
-        // Publish the initial OS theme snapshot to any subscriber that
-        // called `AppScope::system_theme` during build. winit also
-        // fires `ThemeChanged` shortly after window creation on most
+        // Publish the initial OS theme snapshot. winit also fires
+        // `ThemeChanged` shortly after window creation on most
         // platforms, but reading once here means subscribers see a
         // non-`None` value on the very first paint when the platform
-        // already knows the preference.
-        if let Some(sig) = self.system_theme_signal {
-            if let Some(theme) = platform_window.system_theme() {
-                sig.set(Some(theme));
-            }
+        // already knows the preference. Writing unconditionally is
+        // safe because `system_theme_signal()` lazily creates the
+        // signal — a `None` from `platform_window.system_theme()`
+        // leaves the existing `None` in place.
+        if let Some(theme) = platform_window.system_theme() {
+            system_theme_signal().set(Some(theme));
         }
 
         let window_arc = platform_window.arc();
         let renderer = pollster::block_on(Renderer::new(Arc::clone(&window_arc)));
 
-        let paint_ctx = PaintContext::new(self.config.theme.clone());
+        let paint_ctx = PaintContext::new(self.config.theme.get());
 
         self.window = Some(platform_window);
         self.renderer = Some(renderer);
@@ -620,13 +651,13 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 event_loop.exit();
             }
 
-            // Live OS theme change — publish to the signal if any
-            // subscriber asked for it. The redraw nudge ensures reactive
-            // closures pull the new value into the next frame.
+            // Live OS theme change — publish unconditionally; the
+            // thread-local signal is lazily created so writers don't
+            // need to gate on subscriber presence. Redraw nudges
+            // reactive closures (including any `Reactive<Theme>`
+            // installed via `App::theme(...)`) to pull on next frame.
             WindowEvent::ThemeChanged(theme) => {
-                if let Some(sig) = self.system_theme_signal {
-                    sig.set(Some(SystemTheme::from_winit(theme)));
-                }
+                system_theme_signal().set(Some(SystemTheme::from_winit(theme)));
                 self.request_redraw();
             }
 
@@ -757,6 +788,16 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 let size = self.renderer.as_ref().unwrap().surface_size();
                 let tree = self.tree.as_mut().unwrap();
                 let paint_ctx = self.paint_ctx.as_mut().unwrap();
+
+                // Pull the latest theme value from the reactive source
+                // before laying out / painting. For `App::theme(Theme)`
+                // this is a cheap clone of a static value; for signal-
+                // or closure-driven sources it picks up any update
+                // pushed since the last frame, making
+                // `Signal<Theme>::set(...)` (or a derived `Reactive`
+                // that depends on `system_theme_signal()`) visible on
+                // the very next paint without per-widget rewiring.
+                paint_ctx.theme = self.config.theme.get();
 
                 // Apply any deferred initial focus before layout so widget
                 // state set by FocusGained (cursor visibility, focus ring)

@@ -7,8 +7,10 @@
 
 use std::time::Duration;
 
-use shroud_app::{App, AppScope};
+use shroud_app::{App, AppScope, system_theme_signal};
+use shroud_core::Theme;
 use shroud_platform::SystemTheme;
+use shroud_reactive::{Reactive, Signal};
 use shroud_widgets::shortcut::Shortcut;
 use shroud_widgets::tree::WidgetTree;
 
@@ -63,14 +65,34 @@ fn _scope_shortcut_surface(scope: &mut AppScope) -> WidgetTree {
 /// `Option<String>`. Catches accidental signature drift on the
 /// detection APIs added in the A-13/A-14 phase. The memoization
 /// contract (two calls return the same `Signal` id) is unit-tested in
-/// the event_loop module where `AppScope::new` is reachable without
-/// spinning up winit.
+/// `system_theme_signal_is_singleton` below.
 #[allow(dead_code)]
-fn _scope_system_surface(scope: &mut AppScope) -> WidgetTree {
-    let sig: shroud_reactive::Signal<Option<SystemTheme>> = scope.system_theme();
-    let _copy: shroud_reactive::Signal<Option<SystemTheme>> = sig;
+fn _scope_system_surface(scope: &AppScope) -> WidgetTree {
+    let sig: Signal<Option<SystemTheme>> = scope.system_theme();
+    let _copy: Signal<Option<SystemTheme>> = sig;
     let _loc: Option<String> = scope.system_locale();
     WidgetTree::new()
+}
+
+/// Compile-check: `App::theme` accepts every reactive shape that
+/// `Reactive::<Theme>::From` provides — a static `Theme`, a
+/// `Signal<Theme>` (relies on the relaxed `T: Clone` bound from Phase
+/// 30), and a `Reactive::derive` closure that folds the OS theme
+/// signal in. Catches accidental tightening of the bound, which would
+/// silently break the live-theme-swap call sites in apps.
+#[allow(dead_code)]
+fn _app_theme_accepts_all_reactive_shapes() {
+    let _static = App::new().theme(Theme::light());
+
+    let sig: Signal<Theme> = Signal::new(Theme::dark());
+    let _signal_driven = App::new().theme(sig);
+
+    let os_theme = system_theme_signal();
+    let derived: Reactive<Theme> = Reactive::derive(move || match os_theme.get() {
+        Some(SystemTheme::Light) => Theme::light(),
+        _ => Theme::dark(),
+    });
+    let _derived = App::new().theme(derived);
 }
 
 #[test]
@@ -79,4 +101,27 @@ fn run_accepts_scope_closure() {
     // Cast is the verification — if the signature drifts, this fails
     // to compile.
     let _f: fn(App, fn(&mut AppScope) -> WidgetTree) = |app, build| app.run(build);
+}
+
+#[test]
+fn system_theme_signal_is_singleton() {
+    // The whole point of moving the signal into a `thread_local!` was
+    // to make pre-`run` callers and in-build callers see the same
+    // handle. Two calls in any order — even mixed across modules —
+    // must hand back identical reactive ids; otherwise an OS theme
+    // change update lands on a signal nobody is reading.
+    let a = system_theme_signal();
+    let b = system_theme_signal();
+    assert_eq!(
+        a.id(),
+        b.id(),
+        "system_theme_signal must reuse the thread-local"
+    );
+
+    // Writes through one handle must surface through the other, which
+    // is what the event-loop ThemeChanged update relies on.
+    a.set(Some(SystemTheme::Light));
+    assert_eq!(b.get(), Some(SystemTheme::Light));
+    a.set(Some(SystemTheme::Dark));
+    assert_eq!(b.get(), Some(SystemTheme::Dark));
 }

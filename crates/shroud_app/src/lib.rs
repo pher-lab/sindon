@@ -12,4 +12,4 @@
 
 pub mod event_loop;
 
-pub use event_loop::{App, AppHandle, AppScope};
+pub use event_loop::{App, AppHandle, AppScope, system_theme_signal};

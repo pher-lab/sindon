@@ -2521,6 +2521,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "theme_swap_demo"
+version = "0.1.0"
+dependencies = [
+ "shroud",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
