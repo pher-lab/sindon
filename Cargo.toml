@@ -13,6 +13,7 @@ members = [
     "crates/shroud_app",
     "examples/clock",
     "examples/counter",
+    "examples/font_size_demo",
     "examples/hello_world",
     "examples/hover_demo",
     "examples/knot_spike",

@@ -265,8 +265,78 @@ impl Theme {
     }
 }
 
+impl Theme {
+    /// Returns a new `Theme` whose typography font sizes and line heights
+    /// are all multiplied by `scale`. Colors, spacing, focus, and hover
+    /// tokens are unchanged.
+    ///
+    /// Pair with `Reactive::derive` to drive UI-wide font scaling from a
+    /// `Signal` (the same pattern as Phase 30's live theme swap):
+    ///
+    /// ```ignore
+    /// let scale: Signal<f32> = Signal::new(1.0);
+    /// let theme = Reactive::derive(move || Theme::dark().with_font_scale(scale.get()));
+    /// App::new().theme(theme).run(...);
+    /// ```
+    pub fn with_font_scale(mut self, scale: f32) -> Self {
+        self.typography.heading = self.typography.heading.scaled(scale);
+        self.typography.body = self.typography.body.scaled(scale);
+        self.typography.label = self.typography.label.scaled(scale);
+        self.typography.small = self.typography.small.scaled(scale);
+        self
+    }
+}
+
+impl TextStyle {
+    fn scaled(self, scale: f32) -> Self {
+        Self {
+            font_size: self.font_size * scale,
+            line_height: self.line_height * scale,
+        }
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self::dark()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_font_scale_identity_preserves_theme() {
+        let base = Theme::dark();
+        let scaled = base.clone().with_font_scale(1.0);
+        assert_eq!(base, scaled);
+    }
+
+    #[test]
+    fn with_font_scale_multiplies_every_text_style() {
+        let base = Theme::light();
+        let scaled = base.clone().with_font_scale(1.25);
+
+        for (b, s) in [
+            (base.typography.heading, scaled.typography.heading),
+            (base.typography.body, scaled.typography.body),
+            (base.typography.label, scaled.typography.label),
+            (base.typography.small, scaled.typography.small),
+        ] {
+            assert!((s.font_size - b.font_size * 1.25).abs() < 1e-6);
+            assert!((s.line_height - b.line_height * 1.25).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn with_font_scale_leaves_non_typography_tokens_alone() {
+        let base = Theme::dark();
+        let scaled = base.clone().with_font_scale(2.0);
+
+        assert_eq!(base.colors, scaled.colors);
+        assert_eq!(base.spacing, scaled.spacing);
+        assert_eq!(base.focus, scaled.focus);
+        assert_eq!(base.hover, scaled.hover);
     }
 }
