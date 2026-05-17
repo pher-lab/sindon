@@ -265,6 +265,10 @@ impl Widget for SecureInput {
         true
     }
 
+    fn accepts_text(&self) -> bool {
+        true
+    }
+
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
         FlexStyle::new().padding(8.0).min_height(font_size + 20.0)

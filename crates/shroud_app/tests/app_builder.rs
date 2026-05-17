@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use shroud_app::{App, AppScope};
+use shroud_widgets::shortcut::Shortcut;
 use shroud_widgets::tree::WidgetTree;
 
 #[test]
@@ -43,6 +44,16 @@ fn _scope_surface(scope: &mut AppScope) -> WidgetTree {
     scope.on_frame(|| {});
     // Second call must be accepted (replaces the first hook).
     scope.on_frame(|| {});
+    WidgetTree::new()
+}
+
+/// Compile-check: `AppScope::on_shortcut` accepts a `Shortcut` and a
+/// `FnMut(&mut ShortcutContext)`, and returns a `ShortcutId`. Doesn't
+/// run (needs a live event loop) — drift in the signature breaks the
+/// build.
+#[allow(dead_code)]
+fn _scope_shortcut_surface(scope: &mut AppScope) -> WidgetTree {
+    let _id = scope.on_shortcut(Shortcut::ctrl('l'), |_ctx| {});
     WidgetTree::new()
 }
 

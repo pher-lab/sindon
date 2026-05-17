@@ -61,6 +61,19 @@ pub trait Widget {
         false
     }
 
+    /// Whether this widget consumes printable text input when focused.
+    ///
+    /// Used by the shortcut router (see
+    /// [`ShortcutScope::WhenNoTextInput`](crate::shortcut::ShortcutScope))
+    /// to suppress default-scope shortcuts while the user is typing into a
+    /// text field. Default is `false`; `Input` and `SecureInput` override
+    /// to `true`. Widgets that accept individual key bindings (like
+    /// `Button`'s Enter/Space activation) but not freeform text should
+    /// keep the default.
+    fn accepts_text(&self) -> bool {
+        false
+    }
+
     /// Return the flex style for layout computation.
     fn style(&self) -> FlexStyle;
 

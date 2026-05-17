@@ -333,6 +333,10 @@ impl Widget for Input {
         true
     }
 
+    fn accepts_text(&self) -> bool {
+        true
+    }
+
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
         if self.multiline {

@@ -39,6 +39,7 @@ use shroud::app::App;
 use shroud::platform::SecureClipboard;
 use shroud::reactive::Signal;
 use shroud::security::SecureString;
+use shroud::widgets::shortcut::Shortcut;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, ClearTrigger, Container, Input, SecureInput, TextWidget};
 
@@ -87,11 +88,16 @@ struct AppState {
     /// reads this to target `rebuild_children` for the list only — the
     /// form stays put and clears through the reactive bindings.
     list_idx: Option<usize>,
+    /// Tree index of the add-entry "Site" Input. Set in `build_add_form`,
+    /// cleared on relock. Ctrl+N (the new-entry shortcut) reads it to jump
+    /// focus into the field without disturbing scroll or list state.
+    site_input_idx: Option<usize>,
 }
 
 impl AppState {
     fn clear_vault_refs(&mut self) {
         self.list_idx = None;
+        self.site_input_idx = None;
         self.draft_site.set(String::new());
         self.draft_username.set(String::new());
         self.clear_password.bump();
@@ -374,7 +380,8 @@ fn build_add_form(tree: &mut WidgetTree, parent: usize, state: Rc<RefCell<AppSta
         TextWidget::new("Add entry").color(shroud::core::Color::rgb(0.7, 0.7, 0.75)),
     );
 
-    tree.add_child(parent, Input::new().placeholder("Site").value(site_sig));
+    let site_idx = tree.add_child(parent, Input::new().placeholder("Site").value(site_sig));
+    state.borrow_mut().site_input_idx = Some(site_idx);
     tree.add_child(parent, Input::new().placeholder("Username").value(user_sig));
 
     // Submit is driven by Enter in the password field. The handler
@@ -472,6 +479,7 @@ fn main() {
                 draft_username: Signal::new(String::new()),
                 clear_password: ClearTrigger::new(),
                 list_idx: None,
+                site_input_idx: None,
             }));
 
             // Per-frame tick — advances the clipboard auto-clear timer on
@@ -481,6 +489,38 @@ fn main() {
             let tick_state = Rc::clone(&state);
             scope.on_frame(move || {
                 tick_state.borrow_mut().clipboard.tick();
+            });
+
+            // Ctrl+L — lock from anywhere. Global scope so it fires even
+            // while the user is typing into a draft Input. Idempotent on
+            // the lock screen (already locked, key already cleared).
+            let lock_state = Rc::clone(&state);
+            scope.on_shortcut(Shortcut::ctrl('l'), move |ctx| {
+                let was_unlocked = {
+                    let mut s = lock_state.borrow_mut();
+                    let was = matches!(s.state, VaultState::Unlocked(_));
+                    if was {
+                        s.state = VaultState::Locked;
+                        s.key = None;
+                    }
+                    was
+                };
+                if was_unlocked {
+                    let next = Rc::clone(&lock_state);
+                    ctx.event_ctx
+                        .replace_screen(move |tree| build_lock_screen(tree, next));
+                }
+            });
+
+            // Ctrl+N — jump focus to the Site field on the vault screen.
+            // Default scope (`WhenNoTextInput`) so Ctrl+N inside the
+            // password field or any other Input is silently dropped
+            // instead of yanking focus mid-typing.
+            let focus_state = Rc::clone(&state);
+            scope.on_shortcut(Shortcut::ctrl('n'), move |ctx| {
+                if let Some(idx) = focus_state.borrow().site_input_idx {
+                    ctx.event_ctx.focus(idx);
+                }
             });
 
             let mut tree = WidgetTree::new();

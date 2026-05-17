@@ -8,6 +8,7 @@ use crate::event::{
 use crate::focus::{FocusDirection, FocusManager};
 use crate::layer::{LayerAnchor, LayerEntry, LayerOptions, Placement};
 use crate::paint::PaintContext;
+use crate::shortcut::ShortcutRouter;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Point, Rect, SecurityLevel, Size, Theme};
 use shroud_layout::{LayoutEngine, LayoutNodeId};
@@ -69,6 +70,11 @@ pub struct WidgetTree {
     /// dispatch can place layer roots relative to it without threading a
     /// size through every call site. `(0, 0)` until the first layout.
     viewport: (f32, f32),
+    /// App-level keyboard shortcut registry. Consulted at the head of
+    /// [`Self::dispatch_event`] for every `KeyDown`; populated via
+    /// `AppScope::on_shortcut` after the build closure returns. See
+    /// [`crate::shortcut`].
+    shortcuts: ShortcutRouter,
 }
 
 /// Find the deepest node that appears in both ancestor chains (each
@@ -148,7 +154,18 @@ impl WidgetTree {
             pending_initial_focus: None,
             layers: Vec::new(),
             viewport: (0.0, 0.0),
+            shortcuts: ShortcutRouter::new(),
         }
+    }
+
+    /// Mutable access to the app-level shortcut registry.
+    ///
+    /// Used by `shroud_app::AppScope` to drain queued shortcut
+    /// registrations into the tree after the build closure returns.
+    /// Apps generally register via `AppScope::on_shortcut` instead of
+    /// touching this directly.
+    pub fn shortcut_router_mut(&mut self) -> &mut ShortcutRouter {
+        &mut self.shortcuts
     }
 
     /// Queue a focus target to apply on the next [`Self::flush_pending_focus`].
@@ -872,6 +889,33 @@ impl WidgetTree {
         let Some(target) = target_root else {
             return EventResult::Ignored;
         };
+
+        // App-level keyboard shortcuts. Checked before the Escape and
+        // Tab interceptors so a registered binding wins over both layer
+        // dismiss and focus navigation (the router itself skips raw
+        // Tab/Enter/Escape — see `is_reserved_bare_key`).
+        if matches!(event, WidgetEvent::KeyDown { .. }) {
+            let accepts_text = self
+                .focus
+                .focused()
+                .and_then(|i| self.try_widget(i))
+                .map(|w| w.accepts_text())
+                .unwrap_or(false);
+            let layer_blocks = self
+                .layers
+                .last()
+                .map(|l| l.options.block_shortcuts)
+                .unwrap_or(false);
+            if self.shortcuts.try_dispatch(
+                event,
+                event_ctx.modifiers,
+                accepts_text,
+                layer_blocks,
+                event_ctx,
+            ) {
+                return EventResult::Consumed;
+            }
+        }
 
         // Escape dismisses the topmost layer when configured. Checked
         // first so dismiss-aware modal flows aren't accidentally swallowed

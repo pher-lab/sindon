@@ -7,6 +7,7 @@ use shroud_render::renderer::Renderer;
 use shroud_security::hardening;
 use shroud_widgets::event::{EventContext, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
 use shroud_widgets::paint::PaintContext;
+use shroud_widgets::shortcut::{Shortcut, ShortcutContext, ShortcutId};
 use shroud_widgets::tree::WidgetTree;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, StartCause, WindowEvent};
@@ -18,6 +19,7 @@ use winit::window::WindowId;
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
 type FrameHook = Box<dyn FnMut() + 'static>;
+type ShortcutHandler = Box<dyn FnMut(&mut ShortcutContext) + 'static>;
 
 /// Custom events sent to the event loop via [`AppHandle`].
 ///
@@ -67,6 +69,12 @@ impl AppHandle {
 pub struct AppScope {
     handle: AppHandle,
     frame_hook: Option<FrameHook>,
+    /// Shortcut registrations queued during the build closure. Drained
+    /// into the tree's [`ShortcutRouter`] right after the closure returns,
+    /// preserving the ids handed back to the caller from
+    /// [`Self::on_shortcut`].
+    pending_shortcuts: Vec<(ShortcutId, Shortcut, ShortcutHandler)>,
+    next_shortcut_id: u64,
 }
 
 impl AppScope {
@@ -74,6 +82,8 @@ impl AppScope {
         Self {
             handle,
             frame_hook: None,
+            pending_shortcuts: Vec::new(),
+            next_shortcut_id: 0,
         }
     }
 
@@ -102,6 +112,37 @@ impl AppScope {
         F: FnMut() + 'static,
     {
         self.frame_hook = Some(Box::new(f));
+    }
+
+    /// Register an app-level keyboard shortcut.
+    ///
+    /// The handler runs on the UI thread when a matching `KeyDown`
+    /// reaches the widget tree, *before* the Escape and Tab interceptors
+    /// — so a registered binding wins over both layer dismiss and focus
+    /// navigation. See [`shroud_widgets::shortcut`] for the scope rules
+    /// (text-input suppression, layer opt-out).
+    ///
+    /// Returns a [`ShortcutId`] that can be passed to the tree's
+    /// `shortcut_router_mut().remove(...)` to drop the binding later.
+    /// Most apps register once in the build closure and never remove.
+    ///
+    /// ```ignore
+    /// App::new().run(|scope| {
+    ///     scope.on_shortcut(Shortcut::ctrl('l'), |ctx| {
+    ///         ctx.event_ctx.replace_screen(|t| build_lock_screen(t));
+    ///     });
+    ///     WidgetTree::new()
+    /// });
+    /// ```
+    pub fn on_shortcut<F>(&mut self, shortcut: Shortcut, handler: F) -> ShortcutId
+    where
+        F: FnMut(&mut ShortcutContext) + 'static,
+    {
+        let id = ShortcutId::from_raw(self.next_shortcut_id);
+        self.next_shortcut_id += 1;
+        self.pending_shortcuts
+            .push((id, shortcut, Box::new(handler)));
+        id
     }
 }
 
@@ -283,8 +324,22 @@ impl App {
         // threads during construction. The window/renderer come online
         // in `resumed`.
         let mut scope = AppScope::new(handle.clone());
-        let tree = build(&mut scope);
-        let AppScope { frame_hook, .. } = scope;
+        let mut tree = build(&mut scope);
+        let AppScope {
+            frame_hook,
+            pending_shortcuts,
+            ..
+        } = scope;
+
+        // Replay shortcut registrations queued in the build closure into
+        // the tree's router, preserving the ids returned from
+        // `AppScope::on_shortcut`.
+        {
+            let router = tree.shortcut_router_mut();
+            for (id, shortcut, handler) in pending_shortcuts {
+                router.register_with_id(id, shortcut, handler);
+            }
+        }
 
         let mut handler = ShroudEventLoop {
             config: self.config,
@@ -321,6 +376,33 @@ impl Default for App {
 ///
 /// Returns `None` for unmapped named keys (modifiers, function keys,
 /// etc.) — those simply don't reach widgets today.
+/// Translate a winit `Character` payload into the widget events the tree
+/// expects.
+///
+/// Plain typing (no modifier, or just Shift for capital letters) maps each
+/// char to a `CharInput` — `Input` and `SecureInput` consume those literally.
+/// When *any non-shift* modifier is held (Ctrl, Alt, logo/super) the chars
+/// instead become `KeyDown { Key::Character(ch) }` so the app-level shortcut
+/// router (`ShortcutRouter`) can match e.g. Ctrl+L. The chars don't reach
+/// `Input::event`'s `CharInput` arm because of that promotion, which is the
+/// behavior change apps need to be aware of when upgrading.
+///
+/// Held in this isolated form so it can be unit-tested without spinning up
+/// a winit instance (see [`feedback_test_translation_layer`] convention).
+fn translate_character(s: &str, mods: Modifiers) -> Vec<WidgetEvent> {
+    if mods.has_non_shift() {
+        s.chars()
+            .map(|ch| WidgetEvent::KeyDown {
+                key: Key::Character(ch),
+            })
+            .collect()
+    } else {
+        s.chars()
+            .map(|ch| WidgetEvent::CharInput { ch })
+            .collect()
+    }
+}
+
 fn translate_named_key(named: &WinitNamedKey) -> Option<WidgetEvent> {
     match named {
         WinitNamedKey::Space => Some(WidgetEvent::CharInput { ch: ' ' }),
@@ -555,17 +637,19 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 }
 
                 match &event.logical_key {
-                    // Character input → CharInput event
+                    // Character input → CharInput event (or KeyDown when a
+                    // non-shift modifier is held, so the shortcut router
+                    // sees Ctrl+letter combos before they reach Input).
                     WinitKey::Character(s) => {
-                        for ch in s.chars() {
+                        let events = translate_character(s, self.event_ctx.modifiers);
+                        if !events.is_empty() {
                             if let Some(tree) = &mut self.tree {
-                                tree.dispatch_event(
-                                    &WidgetEvent::CharInput { ch },
-                                    &mut self.event_ctx,
-                                );
+                                for ev in events {
+                                    tree.dispatch_event(&ev, &mut self.event_ctx);
+                                }
                             }
+                            self.request_redraw();
                         }
-                        self.request_redraw();
                     }
 
                     // Named keys → either a KeyDown event (most named
@@ -672,5 +756,65 @@ mod tests {
         // should pass straight through without spurious events.
         assert!(translate_named_key(&WinitNamedKey::Shift).is_none());
         assert!(translate_named_key(&WinitNamedKey::F1).is_none());
+    }
+
+    #[test]
+    fn plain_letter_translates_to_char_input() {
+        // Regression: typing 'l' with no modifier must still hit Input
+        // as a literal character — A-11 must not break basic typing.
+        let events = translate_character("l", Modifiers::default());
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], WidgetEvent::CharInput { ch: 'l' }));
+    }
+
+    #[test]
+    fn ctrl_letter_promotes_to_key_down() {
+        // Core of A-11: Ctrl+L becomes a KeyDown so the shortcut router
+        // can match it. Input::event's KeyDown arm doesn't handle
+        // Character keys, so the literal 'l' never reaches the buffer.
+        let events = translate_character("l", Modifiers::CTRL);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            WidgetEvent::KeyDown {
+                key: Key::Character('l')
+            }
+        ));
+    }
+
+    #[test]
+    fn shift_alone_stays_as_char_input() {
+        // Shift+letter is just a capital letter — must keep flowing as
+        // CharInput so typing capitalized text still works.
+        let events = translate_character(
+            "L",
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], WidgetEvent::CharInput { ch: 'L' }));
+    }
+
+    #[test]
+    fn multi_char_with_ctrl_emits_one_keydown_per_char() {
+        // Dead-key compose or IME might in theory deliver a multi-char
+        // string with Ctrl held. Each char becomes its own KeyDown so
+        // the router has a chance to match every codepoint.
+        let events = translate_character("ab", Modifiers::CTRL);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0],
+            WidgetEvent::KeyDown {
+                key: Key::Character('a')
+            }
+        ));
+        assert!(matches!(
+            events[1],
+            WidgetEvent::KeyDown {
+                key: Key::Character('b')
+            }
+        ));
     }
 }

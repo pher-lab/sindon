@@ -76,6 +76,18 @@ pub struct LayerOptions {
     pub dismiss_on_outside_click: bool,
     /// `Escape` closes the layer when it is the topmost.
     pub dismiss_on_escape: bool,
+    /// Suppress all app-level keyboard shortcuts while this layer is on
+    /// top — including
+    /// [`ShortcutScope::Global`](crate::shortcut::ShortcutScope::Global)
+    /// bindings.
+    ///
+    /// Default `false`: app-level `Global` shortcuts (lock, quit, …)
+    /// still fire through a modal, and `WhenNoTextInput` shortcuts fire
+    /// unless an input *inside* the modal currently has focus. Opt in to
+    /// `true` for "panic" sheets where every keystroke must reach the
+    /// dialog (e.g. a confirm-delete prompt where Ctrl+L should not yank
+    /// the user out mid-confirmation).
+    pub block_shortcuts: bool,
 }
 
 impl LayerOptions {
@@ -87,6 +99,7 @@ impl LayerOptions {
             scrim: Some(Color::rgba(0.0, 0.0, 0.0, 0.5)),
             dismiss_on_outside_click: true,
             dismiss_on_escape: true,
+            block_shortcuts: false,
         }
     }
 
@@ -98,6 +111,7 @@ impl LayerOptions {
             scrim: None,
             dismiss_on_outside_click: true,
             dismiss_on_escape: true,
+            block_shortcuts: false,
         }
     }
 
@@ -122,6 +136,13 @@ impl LayerOptions {
     /// Toggle the Escape dismiss path.
     pub fn dismiss_on_escape(mut self, on: bool) -> Self {
         self.dismiss_on_escape = on;
+        self
+    }
+
+    /// Toggle suppression of app-level shortcuts while this layer is on
+    /// top. See [`Self::block_shortcuts`].
+    pub fn block_shortcuts(mut self, on: bool) -> Self {
+        self.block_shortcuts = on;
         self
     }
 }

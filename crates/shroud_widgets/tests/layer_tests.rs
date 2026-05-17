@@ -14,9 +14,10 @@ use shroud_core::Rect;
 use shroud_core::{Color, Point, Theme};
 use shroud_reactive::Signal;
 use shroud_text::TextEngine;
-use shroud_widgets::event::{EventContext, Key, MouseButton, NamedKey, WidgetEvent};
+use shroud_widgets::event::{EventContext, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
 use shroud_widgets::layer::{LayerAnchor, LayerOptions, Placement};
 use shroud_widgets::paint::PaintContext;
+use shroud_widgets::shortcut::Shortcut;
 use shroud_widgets::tree::WidgetTree;
 use shroud_widgets::{Button, Container, Input, TextWidget};
 
@@ -725,4 +726,94 @@ fn layer_text_painted_after_scrim() {
         "layer background must paint after scrim (got bg at {layer_bg}, scrim at {scrim_pos})"
     );
     assert!(!ctx.glyphs.is_empty(), "layer text should produce glyphs");
+}
+
+// ── shortcut routing × layer interaction (Phase 27 / A-11) ────────
+
+/// Helper: dispatch a synthetic `KeyDown { Character(ch) }` with the
+/// given modifier set, mirroring what `translate_character` produces
+/// in the event loop.
+fn dispatch_key_with_mods(tree: &mut WidgetTree, ch: char, mods: Modifiers) {
+    let mut ctx = EventContext::new();
+    ctx.modifiers = mods;
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Character(ch),
+        },
+        &mut ctx,
+    );
+}
+
+#[test]
+fn modal_with_default_options_does_not_block_global_shortcut() {
+    // Ctrl+L registered as Global must still fire while a default modal
+    // is on top — the modal opts out of `block_shortcuts` by default so
+    // lock/panic shortcuts keep working.
+    let (mut tree, _main, _layer) = tree_with_layer(LayerOptions::modal());
+    let fired = Rc::new(Cell::new(false));
+    let f = fired.clone();
+    tree.shortcut_router_mut().register(
+        Shortcut::global(Modifiers::CTRL, Key::Character('l')),
+        move |_| f.set(true),
+    );
+
+    dispatch_key_with_mods(&mut tree, 'l', Modifiers::CTRL);
+
+    assert!(fired.get(), "Global shortcut must fire through default modal");
+}
+
+#[test]
+fn modal_with_block_shortcuts_true_suppresses_even_global() {
+    // A "trapping" modal (`.block_shortcuts(true)`) must swallow every
+    // shortcut — including Global — so a confirm dialog can't be
+    // hijacked by a stray Ctrl+L.
+    let (mut tree, _main, _layer) = tree_with_layer(LayerOptions::modal().block_shortcuts(true));
+    let fired = Rc::new(Cell::new(false));
+    let f = fired.clone();
+    tree.shortcut_router_mut().register(
+        Shortcut::global(Modifiers::CTRL, Key::Character('l')),
+        move |_| f.set(true),
+    );
+
+    dispatch_key_with_mods(&mut tree, 'l', Modifiers::CTRL);
+
+    assert!(
+        !fired.get(),
+        "Global shortcut must be suppressed by block_shortcuts modal"
+    );
+}
+
+#[test]
+fn default_scope_shortcut_suppressed_with_focused_input_in_modal() {
+    // Modal that contains a focused Input must NOT fire a default-scope
+    // (WhenNoTextInput) shortcut whose key collides with text input — the
+    // Knot case where Ctrl+N inside a backup-name field shouldn't open a
+    // new note. Layer itself uses default options (no block_shortcuts),
+    // so the suppression comes from the focused widget's accepts_text.
+    let mut tree = WidgetTree::new();
+    let main = tree.set_root(Container::column().width(800.0).height(600.0));
+    tree.add_child(main, Container::column().width(50.0).height(50.0));
+    let layer = tree.push_layer(
+        LayerOptions::modal(),
+        Container::column().width(200.0).height(100.0),
+    );
+    let input_idx = tree.add_child(layer, Input::new().value(Signal::new(String::new())));
+    tree.focus_initially(input_idx);
+    measured_layout(&mut tree, 800.0, 600.0);
+    let mut focus_ctx = EventContext::new();
+    tree.flush_pending_focus(&mut focus_ctx);
+
+    let fired = Rc::new(Cell::new(false));
+    let f = fired.clone();
+    tree.shortcut_router_mut().register(
+        Shortcut::new(Modifiers::CTRL, Key::Character('n')),
+        move |_| f.set(true),
+    );
+
+    dispatch_key_with_mods(&mut tree, 'n', Modifiers::CTRL);
+
+    assert!(
+        !fired.get(),
+        "default-scope shortcut must be suppressed while a text input has focus"
+    );
 }

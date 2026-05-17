@@ -73,7 +73,7 @@ pub enum MouseButton {
 }
 
 /// Keyboard key (simplified).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Key {
     /// A named key.
     Named(NamedKey),
@@ -82,7 +82,7 @@ pub enum Key {
 }
 
 /// Named keyboard keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NamedKey {
     Enter,
     Escape,
@@ -177,13 +177,77 @@ pub(crate) enum TreeCommand {
 /// exposed on [`EventContext::modifiers`]. Widgets read the relevant
 /// flag inside their `event` handler — e.g. `ctx.modifiers.shift` to
 /// distinguish Tab from Shift+Tab.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,
     /// The "Super" / "Meta" / "Windows" / "Command" key.
     pub logo: bool,
+}
+
+impl Modifiers {
+    /// No modifiers pressed. Same as [`Modifiers::default`] but available in
+    /// `const` contexts (useful for `Shortcut` constants).
+    pub const NONE: Self = Self {
+        shift: false,
+        ctrl: false,
+        alt: false,
+        logo: false,
+    };
+
+    /// Just `Ctrl` held.
+    pub const CTRL: Self = Self {
+        shift: false,
+        ctrl: true,
+        alt: false,
+        logo: false,
+    };
+
+    /// Just `Shift` held.
+    pub const SHIFT: Self = Self {
+        shift: true,
+        ctrl: false,
+        alt: false,
+        logo: false,
+    };
+
+    /// Just `Alt` held.
+    pub const ALT: Self = Self {
+        shift: false,
+        ctrl: false,
+        alt: true,
+        logo: false,
+    };
+
+    /// Just the logo / super / cmd key held.
+    pub const LOGO: Self = Self {
+        shift: false,
+        ctrl: false,
+        alt: false,
+        logo: true,
+    };
+
+    /// Union of two modifier sets. Pure (`const`) so combinations like
+    /// `Modifiers::CTRL.or(Modifiers::SHIFT)` work in `const` contexts.
+    pub const fn or(self, other: Self) -> Self {
+        Self {
+            shift: self.shift || other.shift,
+            ctrl: self.ctrl || other.ctrl,
+            alt: self.alt || other.alt,
+            logo: self.logo || other.logo,
+        }
+    }
+
+    /// True when any non-shift modifier is held (`ctrl`, `alt`, or `logo`).
+    ///
+    /// Used by the event loop to decide whether a winit `Character` event
+    /// should be promoted to a `KeyDown` (so the shortcut router can see
+    /// e.g. Ctrl+L) instead of arriving as `CharInput` (which `Input`
+    /// would consume as a literal 'l').
+    pub const fn has_non_shift(self) -> bool {
+        self.ctrl || self.alt || self.logo
+    }
 }
 
 /// Context passed to widgets during event handling.

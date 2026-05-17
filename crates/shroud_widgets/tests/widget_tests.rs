@@ -4430,3 +4430,86 @@ fn truncate_true_with_zero_width_paints_nothing() {
         ctx.glyphs.len(),
     );
 }
+
+// ── accepts_text predicate (Phase 27 / A-11) ──────────────────────
+
+#[test]
+fn input_and_secure_input_accept_text() {
+    // The shortcut router uses `accepts_text` to decide whether a
+    // default-scope (WhenNoTextInput) binding fires while a widget has
+    // focus. Inputs must opt in; everything else (Button/Checkbox/
+    // Container) must keep the default `false` so e.g. Ctrl+N still
+    // works while a button is focused.
+    let input = Input::new();
+    let secure = SecureInput::new();
+    let button = Button::new("ok");
+    let checkbox = Checkbox::new("opt");
+    let container = Container::column();
+
+    assert!(Widget::accepts_text(&input));
+    assert!(Widget::accepts_text(&secure));
+    assert!(!Widget::accepts_text(&button));
+    assert!(!Widget::accepts_text(&checkbox));
+    assert!(!Widget::accepts_text(&container));
+}
+
+#[test]
+fn shortcut_fires_through_tree_with_no_focus() {
+    use shroud_widgets::event::{Key, Modifiers, WidgetEvent};
+    use shroud_widgets::shortcut::Shortcut;
+
+    let mut tree = WidgetTree::new();
+    tree.set_root(Container::column().width(100.0).height(100.0));
+
+    let fired = Rc::new(Cell::new(false));
+    let f = fired.clone();
+    tree.shortcut_router_mut()
+        .register(Shortcut::ctrl('l'), move |_| f.set(true));
+
+    let mut ctx = EventContext::new();
+    ctx.modifiers = Modifiers::CTRL;
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Character('l'),
+        },
+        &mut ctx,
+    );
+
+    assert!(fired.get());
+}
+
+#[test]
+fn shortcut_handler_can_replace_screen() {
+    // End-to-end check: a shortcut handler enqueues a TreeCommand
+    // (replace_screen) and the post-dispatch drain runs it. Without
+    // this the AppScope::on_shortcut DX is hollow — handlers couldn't
+    // actually mutate the tree they were registered against.
+    use shroud_widgets::event::{Key, Modifiers, WidgetEvent};
+    use shroud_widgets::shortcut::Shortcut;
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(100.0).height(100.0));
+    tree.add_child(root, TextWidget::new("before"));
+
+    tree.shortcut_router_mut()
+        .register(Shortcut::ctrl('l'), |ctx| {
+            ctx.event_ctx
+                .replace_screen(|t| {
+                    t.set_root(Container::column().width(100.0).height(100.0));
+                });
+        });
+
+    let initial_len = tree.len();
+    let mut ctx = EventContext::new();
+    ctx.modifiers = Modifiers::CTRL;
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Character('l'),
+        },
+        &mut ctx,
+    );
+
+    // After drain: the old root + its child are tombstoned, a fresh root
+    // is in place. len() counts live nodes only, so it should be 1.
+    assert_ne!(tree.len(), initial_len);
+}
