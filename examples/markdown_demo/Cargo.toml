@@ -1,0 +1,10 @@
+[package]
+name = "markdown_demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+shroud = { path = "../../crates/shroud" }
+pulldown-cmark = { version = "0.10", default-features = false }
