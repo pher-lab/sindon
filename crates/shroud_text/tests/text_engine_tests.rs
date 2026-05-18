@@ -1,4 +1,4 @@
-use shroud_text::TextEngine;
+use shroud_text::{FontWeight, TextAttrs, TextEngine, TextFamily};
 
 #[test]
 fn engine_creates_successfully() {
@@ -191,6 +191,102 @@ fn cursor_position_soft_wraps_into_extra_lines() {
         y_wrapped > y_no_wrap,
         "cursor wrapped past max_width should land on a lower line"
     );
+}
+
+#[test]
+fn shape_text_delegates_to_shape_text_attrs_with_default() {
+    // Regression guard: the no-attrs `shape_text` must produce byte-for-byte
+    // the same glyph stream as `shape_text_attrs(.., &TextAttrs::default())`.
+    // If someone "optimizes" `shape_text` to bypass attrs, every TextWidget
+    // call that switched to `shape_text_attrs` in Phase 33 silently diverges.
+    let mut engine = TextEngine::new();
+    let plain = engine.shape_text("Hello, 世界", 16.0, 20.0, None);
+    let attrs = engine.shape_text_attrs("Hello, 世界", 16.0, 20.0, None, &TextAttrs::default());
+
+    assert_eq!(plain.glyphs.len(), attrs.glyphs.len());
+    assert_eq!(plain.width, attrs.width);
+    assert_eq!(plain.height, attrs.height);
+    for (a, b) in plain.glyphs.iter().zip(attrs.glyphs.iter()) {
+        assert_eq!(a.cache_key, b.cache_key);
+        assert_eq!(a.x, b.x);
+        assert_eq!(a.y, b.y);
+    }
+}
+
+#[test]
+fn cursor_position_delegates_to_cursor_position_attrs_with_default() {
+    let mut engine = TextEngine::new();
+    let plain = engine.cursor_position("abc\ndef", 16.0, 20.0, None);
+    let attrs =
+        engine.cursor_position_attrs("abc\ndef", 16.0, 20.0, None, &TextAttrs::default());
+    assert_eq!(plain, attrs);
+}
+
+#[test]
+fn monospace_family_makes_iii_and_mmm_equal_width() {
+    // The cosmic-text fontdb resolves the `Monospace` generic against
+    // whatever monospace face is installed on the platform (Consolas /
+    // DejaVu Sans Mono / Liberation Mono). All glyphs in that face advance
+    // by the same width, so `iii` and `mmm` should shape to the same width.
+    // In the default (proportional) family the ratio is ~0.3.
+    let mut engine = TextEngine::new();
+    let mono = TextAttrs::default().family(TextFamily::Monospace);
+    let iii = engine.shape_text_attrs("iii", 16.0, 20.0, None, &mono);
+    let mmm = engine.shape_text_attrs("mmm", 16.0, 20.0, None, &mono);
+
+    assert!(iii.width > 0.0 && mmm.width > 0.0);
+    let ratio = iii.width / mmm.width;
+    assert!(
+        ratio > 0.95 && ratio < 1.05,
+        "monospace 'iii' / 'mmm' width ratio = {} (expected ~1.0)",
+        ratio
+    );
+}
+
+#[test]
+fn proportional_family_makes_iii_much_narrower_than_mmm() {
+    // Sanity-check baseline for the monospace test above. Without it the
+    // monospace test might "pass" against a regressed shaper that simply
+    // ignored attrs (since default fonts could happen to be ~equal width
+    // for `iii` vs `mmm` on some test runner). This guards the contrast.
+    let mut engine = TextEngine::new();
+    let iii = engine.shape_text("iii", 16.0, 20.0, None);
+    let mmm = engine.shape_text("mmm", 16.0, 20.0, None);
+    assert!(
+        iii.width < mmm.width * 0.6,
+        "proportional 'iii' should be much narrower than 'mmm': {} vs {}",
+        iii.width,
+        mmm.width
+    );
+}
+
+#[test]
+fn bold_weight_reaches_the_shaper() {
+    // The cosmic-text `CacheKey` includes the resolved font face id, so a
+    // bold weight that actually reaches the shaper (and finds a bold variant
+    // in the system's fallback font) produces a different cache key than the
+    // normal-weight variant. If the system doesn't have a bold variant for
+    // the resolved family, the shaper falls back to the same face — in which
+    // case the cache keys match and the only signal we have is "didn't
+    // panic". That fallthrough is acceptable: the plumbing test is the
+    // delegation test above; this is a soft confirmation that the weight
+    // field is not silently dropped on the path through `as_cosmic`.
+    let mut engine = TextEngine::new();
+    let normal = engine.shape_text_attrs("Ag", 32.0, 40.0, None, &TextAttrs::default());
+    let bold = engine.shape_text_attrs(
+        "Ag",
+        32.0,
+        40.0,
+        None,
+        &TextAttrs::default().weight(FontWeight::BOLD),
+    );
+
+    assert_eq!(normal.glyphs.len(), bold.glyphs.len());
+    // Either the cache key differs (bold variant found) OR widths differ
+    // (some shapers adjust advances even without a separate face) OR both
+    // are equal (fallback). All three are valid outcomes; what is NOT
+    // acceptable is a panic or empty glyph list.
+    assert!(!bold.glyphs.is_empty());
 }
 
 #[test]

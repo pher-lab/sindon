@@ -27,18 +27,8 @@ const COLOR_MUTED: Color = Color {
     b: 0.60,
     a: 1.0,
 };
-const COLOR_BOLD: Color = Color {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 1.0,
-};
-const COLOR_ITALIC: Color = Color {
-    r: 0.80,
-    g: 0.85,
-    b: 1.0,
-    a: 1.0,
-};
+// Code keeps a colored fg in addition to the monospace family so the visual
+// cue is doubled (font + color) — matches how typical doc renderers style it.
 const COLOR_CODE_FG: Color = Color {
     r: 1.0,
     g: 0.85,
@@ -178,7 +168,8 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
                 tree.add_child(
                     block,
                     TextWidget::new(if line.is_empty() { " " } else { line })
-                        .color(COLOR_CODE_FG),
+                        .color(COLOR_CODE_FG)
+                        .monospace(),
                 );
             }
             i + 1
@@ -302,16 +293,14 @@ fn collect_inline(
 /// Emit one paragraph- or heading-shaped block from `runs`.
 ///
 /// Strategy:
-/// - **0 or 1 runs**: emit a single `TextWidget`, which wraps natively. This
-///   is the common case (plain paragraphs) and the only one that lays out
-///   correctly with current shroud.
-/// - **Multiple runs (mixed inline styling)**: emit a `Container::row()` of
-///   per-run `TextWidget`s. This is where the spike *fails by design*:
-///   - `Container::row()` has no `flex_wrap`, so a long mixed-style
-///     paragraph overflows the parent's width instead of breaking.
-///   - shroud's `TextWidget` has no font-weight / font-style / font-family
-///     knob, so bold/italic/code visually collapse to plain text plus a
-///     color tweak. The user can't tell a bold word from a tinted word.
+/// - **0 or 1 plain runs**: emit a single `TextWidget`, which wraps natively.
+///   This is the common case and lays out cleanly.
+/// - **Mixed inline styling**: emit a `Container::row().flex_wrap(true)` of
+///   per-run `TextWidget`s, each styled with its own weight/style/family.
+///   `flex_wrap` (Phase 32) breaks the row between runs when it overflows;
+///   bold/italic/code now visibly differ in font (Phase 33). What still does
+///   *not* work is wrapping *inside* a single run (gap #3 — needs inline
+///   rich text with `Vec<TextSpan>` so the shaper can break across spans).
 fn emit_inline_block(
     tree: &mut WidgetTree,
     parent: usize,
@@ -324,26 +313,28 @@ fn emit_inline_block(
         let text: String = runs.into_iter().map(|r| r.text).collect();
         let mut w = TextWidget::new(text).color(COLOR_BODY);
         if let Some(s) = font_size {
-            w = w.font_size(s);
+            // Headings: bigger + bold. Body paragraphs keep default weight.
+            w = w.font_size(s).bold();
         }
         tree.add_child(parent, w);
         return;
     }
 
-    // Multi-run path — known to be broken (no flex_wrap, no font weight),
-    // kept so the spike makes the gap visible in real pixels.
-    let row = tree.add_child(parent, Container::row().gap(0.0));
+    // Multi-run path. `flex_wrap(true)` breaks the row between runs when it
+    // overflows the parent's width; per-run weight/style/family makes each
+    // run's font visibly distinct.
+    let row = tree.add_child(parent, Container::row().gap(0.0).flex_wrap(true));
     for run in runs {
-        let color = match run.style {
-            InlineStyle::Plain => COLOR_BODY,
-            InlineStyle::Bold => COLOR_BOLD,
-            InlineStyle::Italic => COLOR_ITALIC,
-            InlineStyle::Code => COLOR_CODE_FG,
-            InlineStyle::Link => COLOR_LINK,
-        };
-        let mut w = TextWidget::new(run.text).color(color);
+        let mut w = TextWidget::new(run.text).color(COLOR_BODY);
+        match run.style {
+            InlineStyle::Plain => {}
+            InlineStyle::Bold => w = w.bold(),
+            InlineStyle::Italic => w = w.italic(),
+            InlineStyle::Code => w = w.monospace().color(COLOR_CODE_FG),
+            InlineStyle::Link => w = w.color(COLOR_LINK),
+        }
         if let Some(s) = font_size {
-            w = w.font_size(s);
+            w = w.font_size(s).bold();
         }
         tree.add_child(row, w);
     }

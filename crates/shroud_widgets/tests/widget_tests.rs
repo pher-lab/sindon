@@ -1362,6 +1362,61 @@ fn text_widget_measures_to_shaped_size() {
 }
 
 #[test]
+fn text_widget_monospace_normalizes_iii_and_mmm_widths() {
+    // End-to-end: `.monospace()` on the widget builder must reach
+    // `shape_text_attrs` in the engine and select a monospace face. The
+    // ratio test mirrors `shroud_text`'s `monospace_family_makes_iii_and_
+    // mmm_equal_width` but exercises the widget → MeasureContext → engine
+    // path, which is what regressed in past phases when a refactor of
+    // `measure` forgot to plumb attrs.
+    use shroud_text::TextEngine;
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+
+    let mut ctx = MeasureContext::new(&mut engine, &theme);
+    let iii_mono = <TextWidget as Widget>::measure(
+        &TextWidget::new("iii").font_size(16.0).monospace(),
+        None,
+        &mut ctx,
+    )
+    .unwrap();
+    let mmm_mono = <TextWidget as Widget>::measure(
+        &TextWidget::new("mmm").font_size(16.0).monospace(),
+        None,
+        &mut ctx,
+    )
+    .unwrap();
+
+    assert!(iii_mono.width > 0.0 && mmm_mono.width > 0.0);
+    let ratio = iii_mono.width / mmm_mono.width;
+    assert!(
+        ratio > 0.95 && ratio < 1.05,
+        "monospace widget iii / mmm width ratio = {} (expected ~1.0)",
+        ratio
+    );
+
+    // Contrast: without `.monospace()` the same chars shape proportionally.
+    let iii_prop = <TextWidget as Widget>::measure(
+        &TextWidget::new("iii").font_size(16.0),
+        None,
+        &mut ctx,
+    )
+    .unwrap();
+    let mmm_prop = <TextWidget as Widget>::measure(
+        &TextWidget::new("mmm").font_size(16.0),
+        None,
+        &mut ctx,
+    )
+    .unwrap();
+    assert!(
+        iii_prop.width < mmm_prop.width * 0.6,
+        "proportional widget iii ({}) should be much narrower than mmm ({})",
+        iii_prop.width,
+        mmm_prop.width
+    );
+}
+
+#[test]
 fn empty_text_widget_measures_to_zero() {
     use shroud_text::TextEngine;
     let mut engine = TextEngine::new();

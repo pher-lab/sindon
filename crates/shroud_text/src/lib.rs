@@ -6,8 +6,10 @@
 //!
 //! For secure text, `SecureTextBuffer` zeroizes internal buffers on drop.
 
+mod attrs;
 mod engine;
 
+pub use attrs::{FontStyle, FontWeight, TextAttrs, TextFamily};
 pub use engine::{GlyphImage, ShapedGlyph, ShapedText, TextEngine};
 
 // Re-export cosmic-text types that consumers need

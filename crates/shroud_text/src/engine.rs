@@ -1,6 +1,7 @@
 //! Core text engine: shaping + rasterization.
 
-use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
+use crate::attrs::TextAttrs;
+use cosmic_text::{Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
 
 /// A positioned glyph ready for rasterization.
 #[derive(Debug, Clone)]
@@ -79,18 +80,35 @@ impl TextEngine {
         &mut self.font_system
     }
 
-    /// Shape a text string into positioned glyphs.
-    ///
-    /// `font_size`: font size in pixels.
-    /// `line_height`: line height in pixels.
-    /// `max_width`: optional max width for line wrapping.
-    /// `text`: the string to shape.
+    /// Shape a text string with default attributes (sans-serif, normal weight,
+    /// normal style). Equivalent to calling [`shape_text_attrs`](Self::shape_text_attrs)
+    /// with `TextAttrs::default()`; retained as the original API used by
+    /// widgets that don't need font customization.
     pub fn shape_text(
         &mut self,
         text: &str,
         font_size: f32,
         line_height: f32,
         max_width: Option<f32>,
+    ) -> ShapedText {
+        self.shape_text_attrs(text, font_size, line_height, max_width, &TextAttrs::default())
+    }
+
+    /// Shape a text string into positioned glyphs with the given font
+    /// attributes.
+    ///
+    /// `font_size`: font size in pixels.
+    /// `line_height`: line height in pixels.
+    /// `max_width`: optional max width for line wrapping.
+    /// `attrs`: family / weight / style. Default attrs match cosmic-text's
+    /// `Attrs::new()`.
+    pub fn shape_text_attrs(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
     ) -> ShapedText {
         let metrics = Metrics::new(font_size, line_height);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
@@ -99,7 +117,7 @@ impl TextEngine {
         buffer.set_text(
             &mut self.font_system,
             text,
-            &Attrs::new(),
+            &attrs.as_cosmic(),
             Shaping::Advanced,
             None,
         );
@@ -159,6 +177,27 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> (f32, f32) {
+        self.cursor_position_attrs(
+            text_before_cursor,
+            font_size,
+            line_height,
+            max_width,
+            &TextAttrs::default(),
+        )
+    }
+
+    /// Like [`cursor_position`](Self::cursor_position) but with explicit font
+    /// attributes. Use the attrs that match the caller's `shape_text_attrs`
+    /// call — passing different attrs here from the render path produces a
+    /// cursor offset that does not line up with the painted glyphs.
+    pub fn cursor_position_attrs(
+        &mut self,
+        text_before_cursor: &str,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> (f32, f32) {
         if text_before_cursor.is_empty() {
             return (0.0, 0.0);
         }
@@ -169,7 +208,7 @@ impl TextEngine {
         buffer.set_text(
             &mut self.font_system,
             text_before_cursor,
-            &Attrs::new(),
+            &attrs.as_cosmic(),
             Shaping::Advanced,
             None,
         );

@@ -5,7 +5,7 @@ use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::Reactive;
-use shroud_text::TextEngine;
+use shroud_text::{FontStyle, FontWeight, TextAttrs, TextEngine, TextFamily};
 
 const ELLIPSIS: &str = "\u{2026}";
 
@@ -42,6 +42,7 @@ pub struct TextWidget {
     line_height: Option<f32>,
     color: Option<Reactive<Color>>,
     truncate: bool,
+    attrs: TextAttrs,
 }
 
 impl TextWidget {
@@ -57,6 +58,7 @@ impl TextWidget {
             line_height: None,
             color: None,
             truncate: false,
+            attrs: TextAttrs::default(),
         }
     }
 
@@ -72,6 +74,7 @@ impl TextWidget {
             line_height: None,
             color: None,
             truncate: false,
+            attrs: TextAttrs::default(),
         }
     }
 
@@ -104,6 +107,41 @@ impl TextWidget {
         self
     }
 
+    /// Set the font weight (e.g. `FontWeight::BOLD`, `FontWeight::MEDIUM`).
+    /// Default is `FontWeight::NORMAL`.
+    pub fn weight(mut self, weight: FontWeight) -> Self {
+        self.attrs.weight = weight;
+        self
+    }
+
+    /// Set the font slant (`FontStyle::Normal` / `Italic` / `Oblique`).
+    /// Default is `FontStyle::Normal`.
+    pub fn style(mut self, style: FontStyle) -> Self {
+        self.attrs.style = style;
+        self
+    }
+
+    /// Set the font family. Default is `TextFamily::SansSerif`.
+    pub fn family(mut self, family: TextFamily) -> Self {
+        self.attrs.family = family;
+        self
+    }
+
+    /// Shorthand for `.weight(FontWeight::BOLD)`.
+    pub fn bold(self) -> Self {
+        self.weight(FontWeight::BOLD)
+    }
+
+    /// Shorthand for `.style(FontStyle::Italic)`.
+    pub fn italic(self) -> Self {
+        self.style(FontStyle::Italic)
+    }
+
+    /// Shorthand for `.family(TextFamily::Monospace)`.
+    pub fn monospace(self) -> Self {
+        self.family(TextFamily::Monospace)
+    }
+
     /// Get the current text content.
     ///
     /// For reactive widgets this invokes the closure to produce a fresh
@@ -131,9 +169,9 @@ impl Widget for TextWidget {
             .line_height
             .unwrap_or(ctx.theme.typography.body.line_height);
 
-        let natural = ctx
-            .text_engine
-            .shape_text(&text, font_size, line_height, None);
+        let natural =
+            ctx.text_engine
+                .shape_text_attrs(&text, font_size, line_height, None, &self.attrs);
 
         if self.truncate {
             // Single-line height regardless of natural — truncate's contract
@@ -156,7 +194,7 @@ impl Widget for TextWidget {
         let shaped = if let Some(aw) = available_width {
             if natural.width > aw {
                 ctx.text_engine
-                    .shape_text(&text, font_size, line_height, Some(aw))
+                    .shape_text_attrs(&text, font_size, line_height, Some(aw), &self.attrs)
             } else {
                 natural
             }
@@ -211,9 +249,13 @@ impl Widget for TextWidget {
             // slop on the right edge can't bleed past the row.
             ctx.push_clip(layout);
 
-            let natural = ctx
-                .text_engine
-                .shape_text(&text, font_size, line_height, None);
+            let natural = ctx.text_engine.shape_text_attrs(
+                &text,
+                font_size,
+                line_height,
+                None,
+                &self.attrs,
+            );
             let to_paint = if natural.width <= layout.size.width {
                 natural
             } else {
@@ -223,13 +265,14 @@ impl Widget for TextWidget {
                     font_size,
                     line_height,
                     layout.size.width,
+                    &self.attrs,
                 );
                 if display.is_empty() {
                     ctx.pop_clip();
                     return;
                 }
                 ctx.text_engine
-                    .shape_text(&display, font_size, line_height, None)
+                    .shape_text_attrs(&display, font_size, line_height, None, &self.attrs)
             };
 
             for glyph in &to_paint.glyphs {
@@ -248,9 +291,13 @@ impl Widget for TextWidget {
             return;
         }
 
-        let shaped =
-            ctx.text_engine
-                .shape_text(&text, font_size, line_height, Some(layout.size.width));
+        let shaped = ctx.text_engine.shape_text_attrs(
+            &text,
+            font_size,
+            line_height,
+            Some(layout.size.width),
+            &self.attrs,
+        );
 
         for glyph in &shaped.glyphs {
             if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
@@ -278,12 +325,13 @@ fn ellipsize_to_fit(
     font_size: f32,
     line_height: f32,
     max_width: f32,
+    attrs: &TextAttrs,
 ) -> String {
     if max_width <= 0.0 {
         return String::new();
     }
 
-    let ellipsis_only = engine.shape_text(ELLIPSIS, font_size, line_height, None);
+    let ellipsis_only = engine.shape_text_attrs(ELLIPSIS, font_size, line_height, None, attrs);
     if ellipsis_only.width > max_width {
         return String::new();
     }
@@ -305,7 +353,7 @@ fn ellipsize_to_fit(
         let mut candidate = String::with_capacity(end + ELLIPSIS.len());
         candidate.push_str(&text[..end]);
         candidate.push_str(ELLIPSIS);
-        let shaped = engine.shape_text(&candidate, font_size, line_height, None);
+        let shaped = engine.shape_text_attrs(&candidate, font_size, line_height, None, attrs);
         if shaped.width <= max_width {
             return candidate;
         }
