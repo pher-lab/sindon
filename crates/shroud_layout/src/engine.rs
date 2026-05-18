@@ -119,17 +119,25 @@ impl LayoutEngine {
                     height: AvailableSpace::Definite(available_height),
                 },
                 |known, available, node_id, _node_ctx, _style| {
+                    // MinContent → `Some(0.0)` so wrappable widgets (text)
+                    // report their narrowest possible layout (= longest
+                    // unbreakable word width) when Taffy probes the lower
+                    // bound of their main-axis size. Without this, flexbox
+                    // sees min-content = natural-content for text and a
+                    // body column inside a row balloons to natural width,
+                    // squeezing fixed-width siblings to zero (the markdown_demo
+                    // blockquote bar bug). MaxContent stays `None` (= no
+                    // constraint, returns natural unwrapped size).
+                    let convert = |av: AvailableSpace| match av {
+                        AvailableSpace::Definite(v) => Some(v),
+                        AvailableSpace::MinContent => Some(0.0),
+                        AvailableSpace::MaxContent => None,
+                    };
                     let query = MeasureQuery {
                         known_width: known.width,
                         known_height: known.height,
-                        available_width: match available.width {
-                            AvailableSpace::Definite(w) => Some(w),
-                            _ => None,
-                        },
-                        available_height: match available.height {
-                            AvailableSpace::Definite(h) => Some(h),
-                            _ => None,
-                        },
+                        available_width: convert(available.width),
+                        available_height: convert(available.height),
                     };
                     let size = measure(node_id, query);
                     Size {

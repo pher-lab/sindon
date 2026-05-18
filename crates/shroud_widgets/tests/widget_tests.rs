@@ -99,6 +99,113 @@ fn text_widget_produces_glyphs() {
     );
 }
 
+#[test]
+fn text_widget_skips_paint_when_layout_width_is_zero() {
+    // Defense-in-depth: when an enclosing flex container squeezes the text
+    // widget's layout main-axis to zero (e.g. an inner column inside a row
+    // with no flex_basis / grow), cosmic-text treats `Some(0.0)` as
+    // unconstrained and emits a natural-width single-line layout that bleeds
+    // outside the layout rect. The paint should bail before producing
+    // glyphs.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    // height has to be non-zero so the text widget actually paints; we shrink
+    // only the width to recreate the overflow scenario.
+    let _text = tree.add_child(
+        root,
+        TextWidget::new("This long string would overflow if painted unwrapped.")
+            .font_size(16.0),
+    );
+    // Pre-flight: a normal layout should produce glyphs.
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx_baseline = PaintContext::default();
+    tree.paint(&mut ctx_baseline);
+    assert!(
+        !ctx_baseline.glyphs.is_empty(),
+        "baseline sanity check: text paints when layout width > 0",
+    );
+
+    // Now reproduce the zero-width condition by laying out the root into a
+    // viewport whose width forces children to zero. compute_layout sizes the
+    // root to its declared 400x300; instead, force the squeeze by setting
+    // root width to 0 directly via a fresh tree.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(0.0).height(300.0));
+    let _text = tree.add_child(
+        root,
+        TextWidget::new("This long string would overflow if painted unwrapped.")
+            .font_size(16.0),
+    );
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert!(
+        ctx.glyphs.is_empty(),
+        "text widget with layout width = 0 should not emit glyphs (got {})",
+        ctx.glyphs.len(),
+    );
+}
+
+// Phase 32 — verify the markdown_demo blockquote shape lays out correctly
+// at the event-loop path (compute_layout_with_measure). The body column
+// has `flex_basis(0).grow(1.0)`, the body should take row leftover and
+// long text inside should wrap.
+#[test]
+fn blockquote_body_flex_basis_zero_grow_one_wraps_long_text() {
+    use shroud_text::TextEngine;
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(720.0).height(600.0).padding(24.0));
+    let body_col = tree.add_child(root, Container::column().width_full().gap(12.0));
+    let row = tree.add_child(body_col, Container::row().gap(12.0));
+    let bar = tree.add_child(
+        row,
+        Container::column().width(4.0).background(Color::WHITE),
+    );
+    let body = tree.add_child(
+        row,
+        Container::column().gap(8.0).flex_basis(0.0).grow(1.0),
+    );
+    let text = tree.add_child(
+        body,
+        TextWidget::new(
+            "Knot is a privacy-first notes app whose source of truth is an encrypted \
+             SQLCipher database. The spike doesn't open the DB; it keeps a single note \
+             encrypted in memory.",
+        ),
+    );
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(720.0, 600.0, &mut engine, &theme);
+
+    let row_rect = tree.layout_rect(row);
+    let body_rect = tree.layout_rect(body);
+    let bar_rect = tree.layout_rect(bar);
+    let text_rect = tree.layout_rect(text);
+    println!(
+        "row={:?} bar={:?} body={:?} text={:?}",
+        row_rect, bar_rect, body_rect, text_rect
+    );
+
+    assert_eq!(bar_rect.size.width, 4.0, "bar keeps explicit width");
+    assert!(
+        body_rect.size.width > 600.0,
+        "body should take row leftover (~656), got {}",
+        body_rect.size.width,
+    );
+    assert!(
+        body_rect.size.height > 22.0,
+        "long text must wrap (body height > 1 line), got {}",
+        body_rect.size.height,
+    );
+    assert!(
+        bar_rect.size.height >= body_rect.size.height,
+        "bar height ({}) must reach body height ({}) via cross-axis stretch",
+        bar_rect.size.height,
+        body_rect.size.height,
+    );
+}
+
 // ── Events ────────────────────────────────────────────────────────
 
 #[test]

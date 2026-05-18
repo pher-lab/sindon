@@ -227,6 +227,53 @@ fn max_width_does_not_force_growth() {
 }
 
 #[test]
+fn flex_basis_zero_with_grow_takes_row_leftover_space() {
+    // CSS `flex: 1 1 0` shape: the body item starts at zero main size and
+    // grows to fill whatever the fixed-width sibling didn't claim. Without
+    // `flex_basis(0)`, Taffy resolves the body's basis to its content's
+    // natural size — which for wrappable text overflows the row entirely.
+    let mut engine = LayoutEngine::new();
+    let bar = engine.add_leaf(FlexStyle::new().width(4.0));
+    let body = engine.add_leaf(FlexStyle::new().flex_basis(0.0).grow(1.0));
+    let row = engine.add_container(
+        FlexStyle::new().row().width(300.0).height(100.0).gap(12.0),
+        &[bar, body],
+    );
+
+    engine.compute(row, 800.0, 600.0);
+
+    // 300 (row) - 4 (bar) - 12 (gap) = 284 leftover for body.
+    assert_eq!(engine.layout(body).size.width, 284.0);
+    assert_eq!(engine.layout(bar).size.width, 4.0);
+}
+
+#[test]
+fn flex_wrap_wrap_breaks_row_when_children_overflow() {
+    // With wrap enabled, children that don't fit on one line should flow to
+    // the next. With wrap disabled (default) they would all stay on one row
+    // and overflow.
+    let mut engine = LayoutEngine::new();
+    let c1 = engine.add_leaf(FlexStyle::new().width(120.0).height(30.0));
+    let c2 = engine.add_leaf(FlexStyle::new().width(120.0).height(30.0));
+    let c3 = engine.add_leaf(FlexStyle::new().width(120.0).height(30.0));
+    let row = engine.add_container(
+        FlexStyle::new().row().width(250.0).flex_wrap(true),
+        &[c1, c2, c3],
+    );
+
+    engine.compute(row, 800.0, 600.0);
+
+    // First two children fit; third must wrap.
+    assert_eq!(engine.layout(c1).origin.y, 0.0);
+    assert_eq!(engine.layout(c2).origin.y, 0.0);
+    assert!(
+        engine.layout(c3).origin.y >= 30.0,
+        "third child should be on a new line, got y={}",
+        engine.layout(c3).origin.y,
+    );
+}
+
+#[test]
 fn row_align_center_keeps_children_at_natural_height() {
     // Row-direction container with two children of different heights. Default
     // cross-axis alignment (Stretch) would make the shorter child grow to the

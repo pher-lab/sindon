@@ -216,6 +216,23 @@ impl Container {
         self
     }
 
+    /// Set the initial main-axis size (`flex-basis`) in pixels. See
+    /// [`FlexStyle::flex_basis`] for the CSS `flex: 1 1 0` use case — pair
+    /// with [`Self::grow`] to express "this column takes whatever space is
+    /// left over after siblings claim theirs" without expanding to its
+    /// content's natural width first.
+    pub fn flex_basis(mut self, px: f32) -> Self {
+        self.style = self.style.flex_basis(px);
+        self
+    }
+
+    /// Allow children that overflow the container's main axis to wrap onto
+    /// additional lines. Off by default. See [`FlexStyle::flex_wrap`].
+    pub fn flex_wrap(mut self, wrap: bool) -> Self {
+        self.style = self.style.flex_wrap(wrap);
+        self
+    }
+
     /// Register a right-click handler.
     ///
     /// The handler runs on `MouseDown { button: Right }` inside this

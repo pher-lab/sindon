@@ -182,6 +182,18 @@ impl Widget for TextWidget {
             return;
         }
 
+        // Defensive: if layout collapsed the text box to zero width (e.g. an
+        // inner column squeezed by a sibling in a row), bail out instead of
+        // painting glyphs at their natural, unwrapped positions. cosmic-text
+        // treats `Some(0.0)` as an unconstrained shape and emits an overflow
+        // single-line layout that bleeds across whatever sibling boxes happen
+        // to sit to the right — the symptom that first surfaced as the
+        // markdown_demo blockquote text overflow. Width is the only axis that
+        // can cause this; zero height just clips vertically, which is safe.
+        if layout.size.width <= 0.0 {
+            return;
+        }
+
         let font_size = self
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);

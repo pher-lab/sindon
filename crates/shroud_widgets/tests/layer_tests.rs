@@ -699,9 +699,17 @@ fn layer_text_painted_after_scrim() {
             .height(600.0)
             .background(Color::rgb(0.0, 0.0, 0.0)),
     );
+    // Give the layer container an explicit size — the text-paint guard
+    // (Phase 32) bails on layout width = 0, and compute_layout (used here
+    // instead of compute_layout_with_measure) doesn't run the text widget's
+    // measure callback to derive a natural intrinsic width.
     let layer = tree.push_layer(
         LayerOptions::modal(),
-        Container::column().padding(10.0).background(Color::WHITE),
+        Container::column()
+            .width(200.0)
+            .height(100.0)
+            .padding(10.0)
+            .background(Color::WHITE),
     );
     tree.add_child(layer, TextWidget::new("Hi").font_size(20.0));
 

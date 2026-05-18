@@ -202,6 +202,33 @@ impl FlexStyle {
         self
     }
 
+    /// Set the initial main-axis size (`flex-basis`) in pixels.
+    ///
+    /// Pair with [`Self::grow`] and [`Self::shrink`] to express CSS-idiomatic
+    /// patterns like `flex: 1 1 0` (= `.flex_basis(0.0).grow(1.0)`): the item
+    /// starts at zero main size and takes whatever leftover space the row /
+    /// column hands out, *without* expanding to its content's natural width
+    /// first. This is the right shape for "fluid body column next to a
+    /// fixed-width decoration" (e.g. a blockquote bar) — using `width_full()`
+    /// instead would have the body claim the row's entire main axis and
+    /// squeeze siblings to zero.
+    pub fn flex_basis(mut self, px: f32) -> Self {
+        self.style.flex_basis = length(px);
+        self
+    }
+
+    /// Allow flex items that overflow the container's main axis to wrap onto
+    /// additional lines (`flex-wrap: wrap` when `true`, `nowrap` when `false`).
+    ///
+    /// Default is `nowrap` — items stay on a single line and are shrunk per
+    /// `flex-shrink`. Use this for tag chips, toolbar-style overflow lists,
+    /// or any row of `Container::row()` children where the row should grow
+    /// vertically rather than push content off-screen horizontally.
+    pub fn flex_wrap(mut self, wrap: bool) -> Self {
+        self.style.flex_wrap = if wrap { FlexWrap::Wrap } else { FlexWrap::NoWrap };
+        self
+    }
+
     /// Set `display: none`. The node is removed from the layout flow —
     /// it takes zero space and Taffy cascades this to descendants.
     ///

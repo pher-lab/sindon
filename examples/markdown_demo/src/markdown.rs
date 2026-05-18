@@ -115,13 +115,18 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
             // Vertical bar + indented column. The inner column nests recursive
             // block rendering (a blockquote can contain paragraphs, lists…).
             //
-            // KNOWN ISSUE: the bar's cross-axis height collapses to 0 (see
-            // `memory/progress_b2_spike.md` gap #4). The bar therefore
-            // currently doesn't render. Kept as-is so the gap stays visible
-            // until framework fix; do not paper over it here.
+            // `flex_basis(0).grow(1)` on the body is the CSS-idiomatic `flex:
+            // 1 1 0`: body starts at zero main-axis width and takes the row's
+            // leftover space without first expanding to its text's natural
+            // unwrapped width. Without it the body either collapses to width 0
+            // (no basis) or overflows to natural text width (with `grow` but
+            // no zero basis), and the bar ends up squeezed or invisibly short.
             let row = tree.add_child(parent, Container::row().gap(12.0));
             tree.add_child(row, Container::column().width(4.0).background(COLOR_QUOTE_BAR));
-            let body = tree.add_child(row, Container::column().gap(8.0));
+            let body = tree.add_child(
+                row,
+                Container::column().gap(8.0).flex_basis(0.0).grow(1.0),
+            );
             let mut i = start + 1;
             let mut depth = 1;
             let inner_start = i;
@@ -195,7 +200,13 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
                             "\u{2022}".into()
                         };
                         tree.add_child(row, TextWidget::new(marker).color(COLOR_MUTED));
-                        let item_body = tree.add_child(row, Container::column().gap(4.0));
+                        // Same `flex: 1 1 0` shape as the blockquote body —
+                        // long list items should wrap to the row's leftover
+                        // width, not push the marker / overflow horizontally.
+                        let item_body = tree.add_child(
+                            row,
+                            Container::column().gap(4.0).flex_basis(0.0).grow(1.0),
+                        );
                         i = render_list_item(tree, item_body, events, i + 1);
                     }
                     Event::End(TagEnd::List(_)) => break,
