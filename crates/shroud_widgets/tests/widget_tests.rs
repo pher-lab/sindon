@@ -1431,6 +1431,108 @@ fn empty_text_widget_measures_to_zero() {
 }
 
 #[test]
+fn text_widget_rich_total_width_matches_plain_concat() {
+    // End-to-end mirror of `shape_rich_two_default_spans_total_width_matches_concat`
+    // at the widget layer. If TextWidget::rich plumbs the wrong attrs (or
+    // measure forgets to route through shape_rich) this drifts.
+    use shroud_text::{TextEngine, TextSpan};
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    let mut ctx = MeasureContext::new(&mut engine, &theme);
+
+    let plain = <TextWidget as Widget>::measure(
+        &TextWidget::new("Hello world").font_size(16.0),
+        None,
+        &mut ctx,
+    )
+    .unwrap();
+    let rich = <TextWidget as Widget>::measure(
+        &TextWidget::rich(vec![
+            TextSpan::new("Hello "),
+            TextSpan::new("world"),
+        ])
+        .font_size(16.0),
+        None,
+        &mut ctx,
+    )
+    .unwrap();
+
+    assert!(
+        (plain.width - rich.width).abs() < 1.0,
+        "plain measure width {} vs rich measure width {}",
+        plain.width,
+        rich.width
+    );
+    assert_eq!(
+        plain.height, rich.height,
+        "single-line rich should match plain height"
+    );
+}
+
+#[test]
+fn text_widget_rich_empty_spans_measure_to_zero() {
+    use shroud_text::{TextEngine, TextSpan};
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    let mut ctx = MeasureContext::new(&mut engine, &theme);
+
+    // Pure-empty spans must short-circuit to ZERO, same as TextWidget::new("").
+    let size = <TextWidget as Widget>::measure(
+        &TextWidget::rich(vec![TextSpan::new(""), TextSpan::new("")]),
+        None,
+        &mut ctx,
+    )
+    .unwrap();
+    assert_eq!(size.width, 0.0);
+    assert_eq!(size.height, 0.0);
+}
+
+#[test]
+fn text_widget_rich_wraps_when_narrow_available_width() {
+    // Gap #3 raison d'être at widget level: a single bold span that
+    // overflows the available width must wrap and the widget reports a
+    // taller size. Without `shape_rich` the only wrap point would be
+    // between widgets (gap #1's flex_wrap), and a single span would not
+    // wrap at all.
+    use shroud_text::{TextEngine, TextSpan};
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    let mut ctx = MeasureContext::new(&mut engine, &theme);
+
+    let natural = <TextWidget as Widget>::measure(
+        &TextWidget::rich(vec![
+            TextSpan::new("regular text and "),
+            TextSpan::new("a moderately long bold phrase here").bold(),
+        ])
+        .font_size(16.0),
+        None,
+        &mut ctx,
+    )
+    .unwrap();
+    let narrow = <TextWidget as Widget>::measure(
+        &TextWidget::rich(vec![
+            TextSpan::new("regular text and "),
+            TextSpan::new("a moderately long bold phrase here").bold(),
+        ])
+        .font_size(16.0),
+        Some(80.0),
+        &mut ctx,
+    )
+    .unwrap();
+    assert!(
+        narrow.height > natural.height,
+        "narrow available_width should force wrap; natural h={} narrow h={}",
+        natural.height,
+        narrow.height
+    );
+    assert!(
+        narrow.width <= 80.0 + 1.0,
+        "wrapped width {} must respect available_width 80",
+        narrow.width
+    );
+}
+
+#[test]
 fn button_measures_to_label_size() {
     use shroud_text::TextEngine;
     let mut engine = TextEngine::new();

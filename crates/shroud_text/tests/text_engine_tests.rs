@@ -1,4 +1,5 @@
-use shroud_text::{FontWeight, TextAttrs, TextEngine, TextFamily};
+use shroud_core::Color;
+use shroud_text::{FontWeight, TextAttrs, TextEngine, TextFamily, TextSpan};
 
 #[test]
 fn engine_creates_successfully() {
@@ -301,5 +302,164 @@ fn multiple_shape_calls_are_independent() {
         result1.glyphs.len(),
         result2.glyphs.len(),
         "different texts should produce different glyph counts"
+    );
+}
+
+#[test]
+fn shape_rich_with_one_default_span_matches_shape_text() {
+    // Sanity: rich path with a single default-attrs span should produce the
+    // same glyph stream + extents as the plain shape_text path. If they
+    // diverge, the rich path picked up some accidental Attrs default
+    // (alignment, metrics, etc.) that shape_text doesn't.
+    let mut engine = TextEngine::new();
+    let plain = engine.shape_text("Hello", 16.0, 20.0, None);
+    let rich = engine.shape_rich(
+        &[TextSpan::new("Hello")],
+        16.0,
+        20.0,
+        None,
+    );
+    assert_eq!(plain.glyphs.len(), rich.glyphs.len());
+    assert!(
+        (plain.width - rich.width).abs() < 0.01,
+        "width differs: plain={} rich={}",
+        plain.width,
+        rich.width
+    );
+    for (a, b) in plain.glyphs.iter().zip(rich.glyphs.iter()) {
+        assert_eq!(a.cache_key, b.cache_key);
+        assert_eq!(a.x, b.x);
+        assert_eq!(a.y, b.y);
+    }
+}
+
+#[test]
+fn shape_rich_two_default_spans_total_width_matches_concat() {
+    // Splitting "Hello" into ["Hel", "lo"] with the same default attrs
+    // must shape to the same total width as "Hello" in one piece — i.e.
+    // set_rich_text is not introducing inter-span padding.
+    let mut engine = TextEngine::new();
+    let one = engine.shape_text("Hello", 16.0, 20.0, None);
+    let two = engine.shape_rich(
+        &[TextSpan::new("Hel"), TextSpan::new("lo")],
+        16.0,
+        20.0,
+        None,
+    );
+    assert!(
+        (one.width - two.width).abs() < 0.5,
+        "single 'Hello' width {} vs split rich width {}",
+        one.width,
+        two.width
+    );
+    assert_eq!(one.glyphs.len(), two.glyphs.len());
+}
+
+#[test]
+fn shape_rich_with_span_color_propagates_to_glyphs() {
+    // The whole point of plumbing color through `set_rich_text` is so a
+    // per-span color override reaches the glyph. If this regresses,
+    // markdown_demo's inline code stops being a different color from body.
+    let mut engine = TextEngine::new();
+    let red = Color::rgb(1.0, 0.0, 0.0);
+    let shaped = engine.shape_rich(
+        &[
+            TextSpan::new("plain"),
+            TextSpan::new("red").color(red),
+        ],
+        16.0,
+        20.0,
+        None,
+    );
+    // The first ~5 glyphs are "plain" (no color), the next ~3 are "red".
+    // We can't assume exact glyph counts (shaping may cluster), but we can
+    // assert SOME glyph has the red color set and SOME has None.
+    let any_red = shaped
+        .glyphs
+        .iter()
+        .any(|g| g.color.is_some_and(|c| (c.r - 1.0).abs() < 0.01 && c.g < 0.01 && c.b < 0.01));
+    let any_none = shaped.glyphs.iter().any(|g| g.color.is_none());
+    assert!(any_red, "no glyph carried the red span color: {:?}", shaped.glyphs);
+    assert!(any_none, "no glyph carried None color (plain span should not inherit red)");
+}
+
+#[test]
+fn shape_rich_default_glyph_color_is_none() {
+    // Spans without an explicit color must not invent one (else the renderer
+    // can't tell "use widget color" from "use this color").
+    let mut engine = TextEngine::new();
+    let shaped = engine.shape_rich(
+        &[TextSpan::new("hello"), TextSpan::new(" world")],
+        16.0,
+        20.0,
+        None,
+    );
+    assert!(
+        shaped.glyphs.iter().all(|g| g.color.is_none()),
+        "rich spans without color should emit None per-glyph"
+    );
+}
+
+#[test]
+fn shape_rich_monospace_span_glyph_widths_differ_from_default() {
+    // Per-span attrs must actually reach the shaper. A monospace `iii` span
+    // and a proportional `iii` span produce *different* glyph cache keys
+    // (different font face id). If they match, the span attrs were dropped.
+    let mut engine = TextEngine::new();
+    let proportional = engine.shape_rich(
+        &[TextSpan::new("iii")],
+        16.0,
+        20.0,
+        None,
+    );
+    let mono = engine.shape_rich(
+        &[TextSpan::new("iii").monospace()],
+        16.0,
+        20.0,
+        None,
+    );
+    assert_eq!(proportional.glyphs.len(), mono.glyphs.len());
+    // Either the cache key differs (different face resolved) or the
+    // advance widths differ (different metrics). One of those MUST be true
+    // — if both are equal the span attrs never reached cosmic-text.
+    let key_diff = proportional
+        .glyphs
+        .iter()
+        .zip(mono.glyphs.iter())
+        .any(|(a, b)| a.cache_key != b.cache_key);
+    let width_diff = (proportional.width - mono.width).abs() > 1.0;
+    assert!(
+        key_diff || width_diff,
+        "monospace span shaped identically to default — attrs dropped on path through shape_rich"
+    );
+}
+
+#[test]
+fn shape_rich_wrap_breaks_inside_long_attributed_span() {
+    // Gap #3's raison d'être: a row-of-widgets layout could only break
+    // between runs, so "really_long_bold_token" inside one bold widget
+    // couldn't wrap. The inline shaper sees the spans as a single line and
+    // CAN wrap inside an attributed span when no inter-span break fits.
+    //
+    // We approximate the gap-#3 scenario by giving the bold span enough
+    // shape-room to need wrapping under a narrow max_width.
+    let mut engine = TextEngine::new();
+    let spans = [
+        TextSpan::new("a "),
+        TextSpan::new("really really really really long bold phrase").bold(),
+    ];
+    let natural = engine.shape_rich(&spans, 16.0, 20.0, None);
+    let wrapped = engine.shape_rich(&spans, 16.0, 20.0, Some(60.0));
+    assert!(
+        wrapped.height > natural.height,
+        "narrow max_width should force the bold span to wrap (natural h={} wrapped h={})",
+        natural.height,
+        wrapped.height
+    );
+    // And the wrapped width should be <= the max_width we asked for.
+    assert!(
+        wrapped.width <= 60.0 + 0.5,
+        "wrapped width {} exceeds requested max_width 60",
+        wrapped.width
     );
 }

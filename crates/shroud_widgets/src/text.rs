@@ -5,9 +5,16 @@ use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::Reactive;
-use shroud_text::{FontStyle, FontWeight, TextAttrs, TextEngine, TextFamily};
+use shroud_text::{FontStyle, FontWeight, TextAttrs, TextEngine, TextFamily, TextSpan};
 
 const ELLIPSIS: &str = "\u{2026}";
+
+/// Internal text content variant. Either plain reactive text (the original
+/// path, by far the more common case) or an inline rich-text span list.
+enum TextContent {
+    Plain(Reactive<String>),
+    Rich(Vec<TextSpan>),
+}
 
 /// A text display widget.
 ///
@@ -37,7 +44,7 @@ const ELLIPSIS: &str = "\u{2026}";
 /// for sidebar items, file paths, or any row where height stability matters
 /// more than showing the full string.
 pub struct TextWidget {
-    text: Reactive<String>,
+    content: TextContent,
     font_size: Option<f32>,
     line_height: Option<f32>,
     color: Option<Reactive<Color>>,
@@ -53,7 +60,7 @@ impl TextWidget {
     /// blanket `Into<Reactive<String>>` conversion if callers prefer).
     pub fn new(text: impl Into<String>) -> Self {
         Self {
-            text: Reactive::Static(text.into()),
+            content: TextContent::Plain(Reactive::Static(text.into())),
             font_size: None,
             line_height: None,
             color: None,
@@ -69,7 +76,32 @@ impl TextWidget {
     /// reactivity.
     pub fn reactive(f: impl Fn() -> String + 'static) -> Self {
         Self {
-            text: Reactive::derive(f),
+            content: TextContent::Plain(Reactive::derive(f)),
+            font_size: None,
+            line_height: None,
+            color: None,
+            truncate: false,
+            attrs: TextAttrs::default(),
+        }
+    }
+
+    /// Create a text widget from an inline rich-text span list.
+    ///
+    /// Each [`TextSpan`] carries its own font family / weight / style and an
+    /// optional color override. The shaper lays them out as a single line of
+    /// text and wraps either at run boundaries *or* inside an individual
+    /// span if no inter-span break fits — closing the limitation that
+    /// `Container::row().flex_wrap()` of per-run text widgets could not.
+    ///
+    /// Widget-level `.bold()` / `.italic()` / `.family()` / `.weight()` /
+    /// `.style()` / `.monospace()` builders are ignored in rich mode (each
+    /// span owns its own attrs). `.color(...)` still applies as the fallback
+    /// color for spans whose own `.color(...)` is unset. `.truncate(true)`
+    /// is **not supported** in rich mode (markdown_demo does not use it; if
+    /// you need a truncated rich line, file a follow-up).
+    pub fn rich(spans: Vec<TextSpan>) -> Self {
+        Self {
+            content: TextContent::Rich(spans),
             font_size: None,
             line_height: None,
             color: None,
@@ -145,9 +177,14 @@ impl TextWidget {
     /// Get the current text content.
     ///
     /// For reactive widgets this invokes the closure to produce a fresh
-    /// value; for static widgets it clones the stored string.
+    /// value; for static widgets it clones the stored string. For rich-text
+    /// widgets the span texts are concatenated (no styling preserved) so
+    /// callers that probe the displayed text see something reasonable.
     pub fn text(&self) -> String {
-        self.text.get()
+        match &self.content {
+            TextContent::Plain(r) => r.get(),
+            TextContent::Rich(spans) => spans.iter().map(|s| s.text.as_str()).collect(),
+        }
     }
 }
 
@@ -158,10 +195,6 @@ impl Widget for TextWidget {
     }
 
     fn measure(&self, available_width: Option<f32>, ctx: &mut MeasureContext) -> Option<Size> {
-        let text = self.text.get();
-        if text.is_empty() {
-            return Some(Size::ZERO);
-        }
         let font_size = self
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);
@@ -169,57 +202,85 @@ impl Widget for TextWidget {
             .line_height
             .unwrap_or(ctx.theme.typography.body.line_height);
 
-        let natural =
-            ctx.text_engine
-                .shape_text_attrs(&text, font_size, line_height, None, &self.attrs);
+        match &self.content {
+            TextContent::Plain(r) => {
+                let text = r.get();
+                if text.is_empty() {
+                    return Some(Size::ZERO);
+                }
+                let natural = ctx.text_engine.shape_text_attrs(
+                    &text,
+                    font_size,
+                    line_height,
+                    None,
+                    &self.attrs,
+                );
 
-        if self.truncate {
-            // Single-line height regardless of natural — truncate's contract
-            // is row-height stability. Width caps at whichever of natural /
-            // available_width is smaller so the row never claims unused space.
-            let w = match available_width {
-                Some(aw) => natural.width.min(aw),
-                None => natural.width,
-            };
-            return Some(Size::new(w.ceil(), line_height.ceil()));
-        }
+                if self.truncate {
+                    // Single-line height regardless of natural — truncate's
+                    // contract is row-height stability. Width caps at
+                    // whichever of natural / available_width is smaller so
+                    // the row never claims unused space.
+                    let w = match available_width {
+                        Some(aw) => natural.width.min(aw),
+                        None => natural.width,
+                    };
+                    return Some(Size::new(w.ceil(), line_height.ceil()));
+                }
 
-        // Compute max-content first. Taffy may call us with a narrow
-        // `available_width` during its min-content / flex probing passes;
-        // naively shaping with that as `max_width` would wrap every space
-        // and return a tall, thin size that then gets used as the widget's
-        // natural size — producing the bug where "Count: 0" becomes two
-        // lines. So: only wrap when our natural width actually overflows
-        // the available width.
-        let shaped = if let Some(aw) = available_width {
-            if natural.width > aw {
-                ctx.text_engine
-                    .shape_text_attrs(&text, font_size, line_height, Some(aw), &self.attrs)
-            } else {
-                natural
+                // Compute max-content first. Taffy may call us with a narrow
+                // `available_width` during its min-content / flex probing
+                // passes; naively shaping with that as `max_width` would wrap
+                // every space and return a tall, thin size that then gets
+                // used as the widget's natural size — producing the bug
+                // where "Count: 0" becomes two lines. So: only wrap when our
+                // natural width actually overflows the available width.
+                let shaped = if let Some(aw) = available_width {
+                    if natural.width > aw {
+                        ctx.text_engine.shape_text_attrs(
+                            &text,
+                            font_size,
+                            line_height,
+                            Some(aw),
+                            &self.attrs,
+                        )
+                    } else {
+                        natural
+                    }
+                } else {
+                    natural
+                };
+                // Ceil so downstream integer rounding (Taffy's pixel rounding)
+                // never leaves the widget a fractional pixel short of its
+                // natural width; otherwise paint's `max_width = layout.size.width`
+                // re-shaping would wrap at the last whitespace. Reproducer:
+                // "Count: 0" at 32px shapes to width 118.578, Taffy rounds
+                // layout to 118, paint passes max_width=118 to cosmic-text,
+                // which wraps before "0".
+                Some(Size::new(shaped.width.ceil(), shaped.height.ceil()))
             }
-        } else {
-            natural
-        };
-        // Ceil so downstream integer rounding (Taffy's pixel rounding) never
-        // leaves the widget a fractional pixel short of its natural width;
-        // otherwise paint's `max_width = layout.size.width` re-shaping
-        // would wrap at the last whitespace. Reproducer: "Count: 0" at
-        // 32px shapes to width 118.578, Taffy rounds layout to 118, paint
-        // passes max_width=118 to cosmic-text, which wraps before "0".
-        Some(Size::new(shaped.width.ceil(), shaped.height.ceil()))
+            TextContent::Rich(spans) => {
+                if spans.iter().all(|s| s.text.is_empty()) {
+                    return Some(Size::ZERO);
+                }
+                let natural =
+                    ctx.text_engine.shape_rich(spans, font_size, line_height, None);
+                let shaped = if let Some(aw) = available_width {
+                    if natural.width > aw {
+                        ctx.text_engine
+                            .shape_rich(spans, font_size, line_height, Some(aw))
+                    } else {
+                        natural
+                    }
+                } else {
+                    natural
+                };
+                Some(Size::new(shaped.width.ceil(), shaped.height.ceil()))
+            }
+        }
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
-        // Materialize the current text. For Dynamic variants this reads
-        // the latest signal values each paint; for Static variants it is
-        // just a clone of the stored string.
-        let text = self.text.get();
-
-        if text.is_empty() {
-            return;
-        }
-
         // Defensive: if layout collapsed the text box to zero width (e.g. an
         // inner column squeezed by a sibling in a row), bail out instead of
         // painting glyphs at their natural, unwrapped positions. cosmic-text
@@ -244,62 +305,88 @@ impl Widget for TextWidget {
             .map(|c| c.get())
             .unwrap_or(ctx.theme.colors.on_background);
 
-        if self.truncate {
-            // Single-line, may need ellipsis. Clip to layout so any sub-pixel
-            // slop on the right edge can't bleed past the row.
-            ctx.push_clip(layout);
-
-            let natural = ctx.text_engine.shape_text_attrs(
-                &text,
-                font_size,
-                line_height,
-                None,
-                &self.attrs,
-            );
-            let to_paint = if natural.width <= layout.size.width {
-                natural
-            } else {
-                let display = ellipsize_to_fit(
-                    &text,
-                    &mut ctx.text_engine,
-                    font_size,
-                    line_height,
-                    layout.size.width,
-                    &self.attrs,
-                );
-                if display.is_empty() {
-                    ctx.pop_clip();
-                    return;
-                }
-                ctx.text_engine
-                    .shape_text_attrs(&display, font_size, line_height, None, &self.attrs)
-            };
-
-            for glyph in &to_paint.glyphs {
-                if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
-                    ctx.draw_glyph(
-                        layout.origin.x as i32 + glyph.x,
-                        layout.origin.y as i32 + glyph.y,
-                        image,
-                        color,
-                        glyph.cache_key,
-                    );
-                }
+        let spans = match &self.content {
+            TextContent::Rich(spans) => spans,
+            TextContent::Plain(_) => {
+                paint_plain(self, layout, ctx, font_size, line_height, color);
+                return;
             }
+        };
 
-            ctx.pop_clip();
+        // Rich path: shape all spans as one inline run; cosmic-text propagates
+        // each span's color into the per-glyph `color_opt`, which we lift back
+        // out into `ShapedGlyph::color` and apply per-draw. Glyphs without a
+        // span-level color fall back to the widget-level `color`.
+        if spans.iter().all(|s| s.text.is_empty()) {
             return;
         }
-
-        let shaped = ctx.text_engine.shape_text_attrs(
-            &text,
-            font_size,
-            line_height,
-            Some(layout.size.width),
-            &self.attrs,
-        );
-
+        let shaped = ctx
+            .text_engine
+            .shape_rich(spans, font_size, line_height, Some(layout.size.width));
         for glyph in &shaped.glyphs {
+            if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
+                ctx.draw_glyph(
+                    layout.origin.x as i32 + glyph.x,
+                    layout.origin.y as i32 + glyph.y,
+                    image,
+                    glyph.color.unwrap_or(color),
+                    glyph.cache_key,
+                );
+            }
+        }
+    }
+}
+
+/// Original plain-text paint path, extracted so the rich path doesn't have to
+/// thread an extra branch through every step. Behavior is verbatim what the
+/// inline path was before Phase 34 (truncate + wrap support, ellipsis, etc.).
+fn paint_plain(
+    widget: &TextWidget,
+    layout: Rect,
+    ctx: &mut PaintContext,
+    font_size: f32,
+    line_height: f32,
+    color: Color,
+) {
+    let TextContent::Plain(text_src) = &widget.content else {
+        return;
+    };
+    let text = text_src.get();
+    if text.is_empty() {
+        return;
+    }
+
+    let truncate = widget.truncate;
+    let attrs = &widget.attrs;
+
+    if truncate {
+        // Single-line, may need ellipsis. Clip to layout so any sub-pixel
+        // slop on the right edge can't bleed past the row.
+        ctx.push_clip(layout);
+
+        let natural =
+            ctx.text_engine
+                .shape_text_attrs(&text, font_size, line_height, None, attrs);
+        let to_paint = if natural.width <= layout.size.width {
+            natural
+        } else {
+            let display = ellipsize_to_fit(
+                &text,
+                &mut ctx.text_engine,
+                font_size,
+                line_height,
+                layout.size.width,
+                attrs,
+            );
+            if display.is_empty() {
+                ctx.pop_clip();
+                return;
+            }
+            ctx.text_engine
+                .shape_text_attrs(&display, font_size, line_height, None, attrs)
+        };
+
+        for glyph in &to_paint.glyphs {
             if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                 ctx.draw_glyph(
                     layout.origin.x as i32 + glyph.x,
@@ -309,6 +396,29 @@ impl Widget for TextWidget {
                     glyph.cache_key,
                 );
             }
+        }
+
+        ctx.pop_clip();
+        return;
+    }
+
+    let shaped = ctx.text_engine.shape_text_attrs(
+        &text,
+        font_size,
+        line_height,
+        Some(layout.size.width),
+        attrs,
+    );
+
+    for glyph in &shaped.glyphs {
+        if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
+            ctx.draw_glyph(
+                layout.origin.x as i32 + glyph.x,
+                layout.origin.y as i32 + glyph.y,
+                image,
+                color,
+                glyph.cache_key,
+            );
         }
     }
 }

@@ -1,7 +1,9 @@
 //! Core text engine: shaping + rasterization.
 
 use crate::attrs::TextAttrs;
+use crate::span::{cosmic_to_shroud, shroud_to_cosmic, TextSpan};
 use cosmic_text::{Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
+use shroud_core::Color;
 
 /// A positioned glyph ready for rasterization.
 #[derive(Debug, Clone)]
@@ -12,6 +14,11 @@ pub struct ShapedGlyph {
     pub x: i32,
     /// Pixel Y position (integer, after subpixel binning).
     pub y: i32,
+    /// Per-glyph color override. `Some` only when the glyph came from a
+    /// `TextSpan` with a color set in [`TextEngine::shape_rich`]; the
+    /// single-attrs `shape_text` / `shape_text_attrs` paths always emit `None`
+    /// (the renderer falls back to the widget-level color in that case).
+    pub color: Option<Color>,
 }
 
 /// Result of shaping a text string.
@@ -142,6 +149,75 @@ impl TextEngine {
                     cache_key: physical.cache_key,
                     x: physical.x,
                     y: physical.y,
+                    color: None,
+                });
+            }
+        }
+
+        ShapedText {
+            glyphs,
+            width: total_width,
+            height: total_height,
+        }
+    }
+
+    /// Shape an inline rich-text run made of `spans`.
+    ///
+    /// All spans share `font_size` and `line_height` — per-span size is not
+    /// modeled (it has no use case in the inline rich text we ship; block-
+    /// level size variations are expressed by stacking multiple widgets).
+    /// Per-span `family`, `weight`, `style`, and `color` are honored.
+    ///
+    /// Wraps inside a single span when needed (the whole reason this exists
+    /// rather than `Container::row().flex_wrap()` of per-run `TextWidget`s).
+    /// `max_width = None` reports the natural max-content width.
+    pub fn shape_rich(
+        &mut self,
+        spans: &[TextSpan],
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> ShapedText {
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_size(&mut self.font_system, max_width, None);
+
+        // Build cosmic-text spans on the fly. The iterator borrows from
+        // `spans` (for the text and the family name), which lives through the
+        // call — `set_rich_text` consumes the iterator immediately.
+        let default_attrs = TextAttrs::default();
+        let default_cosmic = default_attrs.as_cosmic();
+        let cosmic_spans = spans.iter().map(|s| {
+            let mut a = s.attrs.as_cosmic();
+            if let Some(c) = s.color {
+                a = a.color(shroud_to_cosmic(c));
+            }
+            (s.text.as_str(), a)
+        });
+        buffer.set_rich_text(
+            &mut self.font_system,
+            cosmic_spans,
+            &default_cosmic,
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+
+        let mut glyphs = Vec::new();
+        let mut total_width: f32 = 0.0;
+        let mut total_height: f32 = 0.0;
+
+        for run in buffer.layout_runs() {
+            total_width = total_width.max(run.line_w);
+            total_height = run.line_top + run.line_height;
+            for glyph in run.glyphs.iter() {
+                let color = glyph.color_opt.map(cosmic_to_shroud);
+                let physical = glyph.physical((0.0, run.line_y), 1.0);
+                glyphs.push(ShapedGlyph {
+                    cache_key: physical.cache_key,
+                    x: physical.x,
+                    y: physical.y,
+                    color,
                 });
             }
         }

@@ -8,9 +8,11 @@
 
 mod attrs;
 mod engine;
+mod span;
 
 pub use attrs::{FontStyle, FontWeight, TextAttrs, TextFamily};
 pub use engine::{GlyphImage, ShapedGlyph, ShapedText, TextEngine};
+pub use span::TextSpan;
 
 // Re-export cosmic-text types that consumers need
 pub use cosmic_text::{Attrs, CacheKey, FontSystem, Metrics, Shaping};

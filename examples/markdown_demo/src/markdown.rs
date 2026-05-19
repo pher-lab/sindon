@@ -12,6 +12,7 @@
 
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 use shroud::core::Color;
+use shroud::text::TextSpan;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Container, TextWidget};
 
@@ -293,14 +294,13 @@ fn collect_inline(
 /// Emit one paragraph- or heading-shaped block from `runs`.
 ///
 /// Strategy:
-/// - **0 or 1 plain runs**: emit a single `TextWidget`, which wraps natively.
-///   This is the common case and lays out cleanly.
-/// - **Mixed inline styling**: emit a `Container::row().flex_wrap(true)` of
-///   per-run `TextWidget`s, each styled with its own weight/style/family.
-///   `flex_wrap` (Phase 32) breaks the row between runs when it overflows;
-///   bold/italic/code now visibly differ in font (Phase 33). What still does
-///   *not* work is wrapping *inside* a single run (gap #3 — needs inline
-///   rich text with `Vec<TextSpan>` so the shaper can break across spans).
+/// - **0 or 1 plain runs**: emit a single `TextWidget::new` for cleanest path
+///   (no rich-text overhead, no per-glyph color flag).
+/// - **Mixed inline styling**: emit a single `TextWidget::rich(Vec<TextSpan>)`.
+///   The shaper sees all spans as one logical line, so it wraps either at
+///   span boundaries *or* inside an attributed span — the gap-#3 win over
+///   the earlier `Container::row().flex_wrap()` approach, which could only
+///   break between widgets.
 fn emit_inline_block(
     tree: &mut WidgetTree,
     parent: usize,
@@ -320,22 +320,35 @@ fn emit_inline_block(
         return;
     }
 
-    // Multi-run path. `flex_wrap(true)` breaks the row between runs when it
-    // overflows the parent's width; per-run weight/style/family makes each
-    // run's font visibly distinct.
-    let row = tree.add_child(parent, Container::row().gap(0.0).flex_wrap(true));
-    for run in runs {
-        let mut w = TextWidget::new(run.text).color(COLOR_BODY);
-        match run.style {
-            InlineStyle::Plain => {}
-            InlineStyle::Bold => w = w.bold(),
-            InlineStyle::Italic => w = w.italic(),
-            InlineStyle::Code => w = w.monospace().color(COLOR_CODE_FG),
-            InlineStyle::Link => w = w.color(COLOR_LINK),
-        }
-        if let Some(s) = font_size {
-            w = w.font_size(s).bold();
-        }
-        tree.add_child(row, w);
+    // Multi-run path: one TextWidget::rich, one span per run. The widget-level
+    // `.color(COLOR_BODY)` is the fallback for spans that don't override
+    // color (Plain/Bold/Italic); Code/Link set their own per-span color, which
+    // wins for those glyphs only.
+    let spans: Vec<TextSpan> = runs
+        .into_iter()
+        .map(|run| {
+            let mut span = TextSpan::new(run.text);
+            match run.style {
+                InlineStyle::Plain => {}
+                InlineStyle::Bold => span = span.bold(),
+                InlineStyle::Italic => span = span.italic(),
+                InlineStyle::Code => span = span.monospace().color(COLOR_CODE_FG),
+                InlineStyle::Link => span = span.color(COLOR_LINK),
+            }
+            if font_size.is_some() {
+                // Headings inside a mixed run (rare) inherit the bold weight
+                // applied to the wrapping TextWidget above, but spans don't
+                // know about the widget's `.bold()` — so we set it per-span
+                // too. Italic / monospace stay span-local.
+                span = span.bold();
+            }
+            span
+        })
+        .collect();
+
+    let mut w = TextWidget::rich(spans).color(COLOR_BODY);
+    if let Some(s) = font_size {
+        w = w.font_size(s);
     }
+    tree.add_child(parent, w);
 }
