@@ -1202,6 +1202,114 @@ fn scroll_view_gutter_composes_with_user_padding() {
     assert_eq!(child_rect.origin.x, root_rect.origin.x + 10.0);
 }
 
+#[test]
+fn scroll_view_auto_content_height_sums_children() {
+    // Without an explicit `content_height`, ScrollView should pick up the
+    // total height of its laid-out children after `compute_layout`.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(ScrollView::new().width(200.0).height(300.0));
+    tree.add_child(root, Container::column().width(200.0).height(500.0));
+    tree.add_child(root, Container::column().width(200.0).height(400.0));
+    tree.compute_layout(400.0, 400.0);
+
+    // 500 + 400 = 900 of content; viewport is 300 → 600 px of scroll.
+    let sv = tree.widget_as::<ScrollView>(root).expect("ScrollView root");
+    assert_eq!(sv.max_scroll_y(300.0), 600.0);
+}
+
+#[test]
+fn scroll_view_explicit_content_height_overrides_auto() {
+    // An explicit `.content_height(h)` pins the value even when children
+    // measure differently — virtualized lists rely on this.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        ScrollView::new()
+            .width(200.0)
+            .height(300.0)
+            .content_height(2000.0),
+    );
+    // Children measuring 100 px total: auto would give 100, explicit wins.
+    tree.add_child(root, Container::column().width(200.0).height(100.0));
+    tree.compute_layout(400.0, 400.0);
+
+    let sv = tree.widget_as::<ScrollView>(root).expect("ScrollView root");
+    // max_scroll = 2000 - 300 = 1700 (the explicit value, not 0 from auto).
+    assert_eq!(sv.max_scroll_y(300.0), 1700.0);
+}
+
+#[test]
+fn scroll_view_auto_content_height_includes_bottom_padding() {
+    // Top + bottom padding should both appear in the scrollable extent so a
+    // fully scrolled viewport leaves the bottom padding flush with the last
+    // child (matching what a static `content_height` caller used to hand-tune).
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        ScrollView::new()
+            .width(200.0)
+            .height(300.0)
+            .padding(20.0),
+    );
+    tree.add_child(root, Container::column().width(50.0).height(500.0));
+    tree.compute_layout(400.0, 400.0);
+
+    let sv = tree.widget_as::<ScrollView>(root).expect("ScrollView root");
+    // Child y starts at top-padding (20), height 500 → bottom = 520.
+    // Auto height adds bottom padding (20) → 540. max_scroll = 540 - 300 = 240.
+    assert_eq!(sv.max_scroll_y(300.0), 240.0);
+}
+
+#[test]
+fn scroll_view_auto_content_height_recomputes_on_relayout() {
+    // Re-running compute_layout after adding a child should grow the
+    // measured content_height — the value tracks the current tree, not a
+    // one-shot snapshot.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(ScrollView::new().width(200.0).height(300.0));
+    tree.add_child(root, Container::column().width(200.0).height(400.0));
+    tree.compute_layout(400.0, 400.0);
+
+    {
+        let sv = tree.widget_as::<ScrollView>(root).expect("ScrollView root");
+        assert_eq!(sv.max_scroll_y(300.0), 100.0);
+    }
+
+    tree.add_child(root, Container::column().width(200.0).height(600.0));
+    tree.compute_layout(400.0, 400.0);
+
+    let sv = tree.widget_as::<ScrollView>(root).expect("ScrollView root");
+    // 400 + 600 = 1000 content; viewport 300 → 700 scroll.
+    assert_eq!(sv.max_scroll_y(300.0), 700.0);
+}
+
+#[test]
+fn scroll_view_auto_content_height_skips_invisible_children() {
+    let visible_sig = Signal::new(true);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(ScrollView::new().width(200.0).height(300.0));
+    tree.add_child(root, Container::column().width(200.0).height(400.0));
+    tree.add_child(
+        root,
+        Container::column()
+            .width(200.0)
+            .height(500.0)
+            .visible(visible_sig),
+    );
+    tree.compute_layout(400.0, 400.0);
+
+    {
+        let sv = tree.widget_as::<ScrollView>(root).expect("ScrollView root");
+        // 400 + 500 = 900 visible content.
+        assert_eq!(sv.max_scroll_y(300.0), 600.0);
+    }
+
+    visible_sig.set(false);
+    tree.compute_layout(400.0, 400.0);
+
+    let sv = tree.widget_as::<ScrollView>(root).expect("ScrollView root");
+    // Hidden child drops out → only 400 of content, viewport 300, scroll 100.
+    assert_eq!(sv.max_scroll_y(300.0), 100.0);
+}
+
 // ── Reactive TextWidget ───────────────────────────────────────────
 
 #[test]

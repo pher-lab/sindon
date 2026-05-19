@@ -8,6 +8,7 @@ use crate::event::{
 use crate::focus::{FocusDirection, FocusManager};
 use crate::layer::{LayerAnchor, LayerEntry, LayerOptions, Placement};
 use crate::paint::PaintContext;
+use crate::scroll_view::ScrollView;
 use crate::shortcut::ShortcutRouter;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Point, Rect, SecurityLevel, Size, Theme};
@@ -438,6 +439,14 @@ impl WidgetTree {
         if !initial_visible {
             style = style.display_none();
         }
+        if Self::is_scroll_view_idx(&self.nodes, parent) {
+            // Direct children of a `ScrollView` must keep their natural
+            // intrinsic size — Taffy's default `flex-shrink: 1` on a
+            // fixed-height column would otherwise squash them to fit the
+            // viewport, defeating the whole point of a scrollable container
+            // (this is what `overflow: scroll` does for free in CSS).
+            style = style.shrink(0.0);
+        }
         let layout_node = self.layout.add_leaf(style);
         let idx = self.nodes.len();
         self.nodes.push(Some(WidgetNode {
@@ -675,6 +684,22 @@ impl WidgetTree {
             self.layers[i].offset = offset;
             let _ = root;
         }
+
+        self.sync_scroll_view_content_heights();
+    }
+
+    /// Returns whether the node at `idx` holds a `ScrollView` widget. Used
+    /// when adding children / re-applying styles to keep direct children
+    /// of a scroll container unshrinkable.
+    fn is_scroll_view_idx(nodes: &[Option<WidgetNode>], idx: usize) -> bool {
+        nodes
+            .get(idx)
+            .and_then(|slot| slot.as_ref())
+            .map(|n| {
+                let w: &dyn Widget = n.widget.as_ref();
+                (w as &dyn std::any::Any).is::<ScrollView>()
+            })
+            .unwrap_or(false)
     }
 
     /// Re-apply Taffy styles for widgets whose `visible()` flipped since the
@@ -682,18 +707,40 @@ impl WidgetTree {
     /// that came back visible gets its real style re-installed. Stable-visible
     /// nodes are left alone (their install-time style still applies) to avoid
     /// redundant `set_style` churn every frame.
+    ///
+    /// Children of a `ScrollView` keep the `flex-shrink: 0` override that
+    /// `add_child_boxed` installed at insert time — re-emit it so a widget
+    /// going visible-again does not start shrinking under a fixed-height
+    /// scroll viewport.
     fn refresh_visibility_styles(&mut self) {
-        let WidgetTree { nodes, layout, .. } = self;
-        for slot in nodes.iter_mut() {
-            let Some(node) = slot.as_mut() else { continue };
+        // Snapshot dirty indices first so we can read `is_scroll_view_idx`
+        // (borrows `self.nodes`) without overlapping the per-node mut borrow
+        // we need for `set_style`.
+        let dirty: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                let node = slot.as_ref()?;
+                (node.widget.visible() != node.last_applied_visible).then_some(i)
+            })
+            .collect();
+        for i in dirty {
+            let parent_is_scroll = self.nodes[i]
+                .as_ref()
+                .and_then(|n| n.parent)
+                .map(|p| Self::is_scroll_view_idx(&self.nodes, p))
+                .unwrap_or(false);
+            let Some(node) = self.nodes[i].as_mut() else { continue };
             let vis = node.widget.visible();
-            if vis == node.last_applied_visible {
-                continue;
+            let mut style = node.widget.style();
+            if parent_is_scroll {
+                style = style.shrink(0.0);
             }
-            let style = node.widget.style();
             let style = if vis { style } else { style.display_none() };
-            layout.set_style(node.layout_node, style);
+            let layout_node = node.layout_node;
             node.last_applied_visible = vis;
+            self.layout.set_style(layout_node, style);
         }
     }
 
@@ -783,6 +830,67 @@ impl WidgetTree {
             self.layers[i].measured_size = size;
             self.layers[i].offset = offset;
             let _ = root;
+        }
+
+        self.sync_scroll_view_content_heights();
+    }
+
+    /// Walk every live widget; for each `ScrollView`, sum the relative
+    /// bottoms of its visible direct children and write the result (plus the
+    /// scroll view's bottom padding) back into its `auto_content_height`.
+    ///
+    /// Called at the end of both `compute_layout` and
+    /// `compute_layout_with_measure` so callers who never pinned an explicit
+    /// content height get a scrollable extent that tracks the laid-out
+    /// children — wrapped text, dynamic lists, markdown previews all "just
+    /// scroll" without the caller having to guess the right slack value.
+    ///
+    /// Children's `engine.layout(...).origin.y` is relative to the parent's
+    /// border-box origin and already includes the scroll view's top padding,
+    /// so we only need to add the bottom padding to keep the bottom margin
+    /// flush with the last child when fully scrolled.
+    fn sync_scroll_view_content_heights(&mut self) {
+        let candidates: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                let node = slot.as_ref()?;
+                let w: &dyn Widget = node.widget.as_ref();
+                (w as &dyn std::any::Any)
+                    .downcast_ref::<ScrollView>()
+                    .map(|_| i)
+            })
+            .collect();
+
+        for sv_idx in candidates {
+            let Some(node) = self.node(sv_idx) else {
+                continue;
+            };
+            let children = node.children.clone();
+            let mut max_bottom: f32 = 0.0;
+            for child in &children {
+                let Some(child_node) = self.node(*child) else {
+                    continue;
+                };
+                if !child_node.widget.visible() {
+                    continue;
+                }
+                let rect = self.layout.layout(child_node.layout_node);
+                let bottom = rect.origin.y + rect.size.height;
+                if bottom > max_bottom {
+                    max_bottom = bottom;
+                }
+            }
+
+            let sv_node = self
+                .node_mut(sv_idx)
+                .expect("scroll-view slot vanished between read and write");
+            let widget_any: &mut dyn std::any::Any = sv_node.widget.as_mut();
+            if let Some(sv) = widget_any.downcast_mut::<ScrollView>() {
+                let bottom_pad = sv.measured_bottom_padding();
+                sv.set_measured_content_height(max_bottom + bottom_pad);
+            }
         }
     }
 

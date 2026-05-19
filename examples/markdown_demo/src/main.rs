@@ -96,23 +96,11 @@ fn main() {
                     .background(Color::rgb(0.10, 0.10, 0.13)),
             );
 
-            // ScrollView still needs an explicit content_height (pre-existing
-            // gap). Markdown blocks are taller than plain lines, so the
-            // estimate is intentionally generous — extra blank space at the
-            // bottom of the scrollable area is the known artifact.
-            let approx_lines = SAMPLE.lines().count().max(1) as f32;
-            let approx_height = approx_lines * 36.0 + 320.0;
-
-            // ScrollView has no `height_full()` today (incidental gap not
-            // related to B-2); use a fixed height tuned to the 720x600
-            // window's usable area instead.
-            let scroll = tree.add_child(
-                root,
-                ScrollView::new()
-                    .width_full()
-                    .height(540.0)
-                    .content_height(approx_height),
-            );
+            // Phase 35: ScrollView measures children every layout pass, so
+            // wrapped markdown blocks no longer need a hand-tuned content
+            // height. Height of the viewport itself is still hardcoded
+            // (ScrollView has no `height_full()` yet — incidental gap).
+            let scroll = tree.add_child(root, ScrollView::new().width_full().height(540.0));
 
             let body_col = tree.add_child(scroll, Container::column().width_full().gap(12.0));
             markdown::render(&mut tree, body_col, SAMPLE);

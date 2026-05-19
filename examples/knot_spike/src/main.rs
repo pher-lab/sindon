@@ -359,25 +359,15 @@ fn build_note_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         }),
     );
 
-    // Body — wrapped inside a ScrollView. ScrollView (Phase 11) requires an
-    // explicit content_height; we approximate from line count. This is
-    // gap-worthy: a real port wants "auto from laid-out children".
+    // Body — wrapped inside a ScrollView. Phase 35 made `ScrollView` measure
+    // its laid-out children every layout pass, so the caller no longer has
+    // to hand-tune `content_height` for wrapped text.
     let body_text = match &state.borrow().phase {
         AppPhase::Unlocked { note } => note.body.clone(),
         _ => String::new(),
     };
-    let approx_lines = body_text.lines().count().max(1) as f32;
-    // Generous slack so wrapped lines don't overflow the declared content
-    // height. Line height ~22 + buffer for wraps.
-    let approx_height = approx_lines * 24.0 + 240.0;
 
-    let scroll = tree.add_child(
-        root,
-        ScrollView::new()
-            .width_full()
-            .height(480.0)
-            .content_height(approx_height),
-    );
+    let scroll = tree.add_child(root, ScrollView::new().width_full().height(480.0));
 
     tree.add_child(scroll, TextWidget::new(body_text));
 }

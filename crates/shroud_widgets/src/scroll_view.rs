@@ -25,7 +25,17 @@ use shroud_layout::FlexStyle;
 /// ```
 pub struct ScrollView {
     scroll_y: f32,
-    content_height: f32,
+    /// Caller-pinned content height. `None` means "auto" — the widget tree
+    /// writes the laid-out children's max bottom into [`Self::auto_content_height`]
+    /// after each layout pass and that value is used for scroll clamp /
+    /// scrollbar.
+    explicit_content_height: Option<f32>,
+    /// Measured total content extent in pixels, populated by the tree after
+    /// every layout pass (see `WidgetTree::sync_scroll_view_content_heights`).
+    /// Includes the ScrollView's top + bottom base padding so a fully scrolled
+    /// viewport shows the bottom padding flush with the last child. Ignored
+    /// when [`Self::explicit_content_height`] is `Some`.
+    auto_content_height: f32,
     style: FlexStyle,
     show_scrollbar: bool,
     /// User-supplied uniform padding (set via [`Self::padding`]). Stored
@@ -44,7 +54,8 @@ impl ScrollView {
     pub fn new() -> Self {
         Self {
             scroll_y: 0.0,
-            content_height: 0.0,
+            explicit_content_height: None,
+            auto_content_height: 0.0,
             style: FlexStyle::new().column(),
             show_scrollbar: true,
             base_padding: 0.0,
@@ -54,14 +65,35 @@ impl ScrollView {
         }
     }
 
-    /// Declare the total height of the scrollable content.
+    /// Pin the total height of the scrollable content.
     ///
-    /// This is used to clamp scrolling. In Phase 11 the caller supplies this
-    /// value explicitly; future iterations may derive it from the laid-out
-    /// children.
+    /// By default a `ScrollView` measures its laid-out children every layout
+    /// pass and uses the max bottom as `content_height` — call this only when
+    /// you need to lock the value (e.g. virtualized lists where the rendered
+    /// subtree is shorter than the logical content).
     pub fn content_height(mut self, h: f32) -> Self {
-        self.content_height = h;
+        self.explicit_content_height = Some(h);
         self
+    }
+
+    /// Effective content extent — explicit value if set, otherwise the value
+    /// the tree wrote after the last layout pass.
+    fn effective_content_height(&self) -> f32 {
+        self.explicit_content_height.unwrap_or(self.auto_content_height)
+    }
+
+    /// Tree-side hook (same crate) for writing the measured content extent.
+    /// Always updates `auto_content_height`; a caller's explicit
+    /// [`Self::content_height`] still wins via [`Self::effective_content_height`].
+    pub(crate) fn set_measured_content_height(&mut self, h: f32) {
+        self.auto_content_height = h;
+    }
+
+    /// Padding the tree should add to the children's measured bottom to
+    /// produce the total content extent (matches the top padding that Taffy
+    /// has already baked into each child's relative y).
+    pub(crate) fn measured_bottom_padding(&self) -> f32 {
+        self.base_padding
     }
 
     /// Set the fixed viewport height.
@@ -127,7 +159,7 @@ impl ScrollView {
 
     /// Maximum allowed scroll offset given the current viewport height.
     pub fn max_scroll_y(&self, viewport_height: f32) -> f32 {
-        (self.content_height - viewport_height).max(0.0)
+        (self.effective_content_height() - viewport_height).max(0.0)
     }
 }
 
@@ -192,7 +224,8 @@ impl Widget for ScrollView {
             return;
         }
         let viewport_h = layout.size.height;
-        if self.content_height <= viewport_h || viewport_h <= 0.0 {
+        let content_h = self.effective_content_height();
+        if content_h <= viewport_h || viewport_h <= 0.0 {
             return;
         }
 
@@ -206,9 +239,9 @@ impl Widget for ScrollView {
         ctx.fill_rect(track_rect, track_color);
 
         // Thumb size proportional to viewport/content ratio.
-        let thumb_h = ((viewport_h / self.content_height) * viewport_h).max(SCROLLBAR_THUMB_MIN);
+        let thumb_h = ((viewport_h / content_h) * viewport_h).max(SCROLLBAR_THUMB_MIN);
         let thumb_h = thumb_h.min(viewport_h);
-        let max_scroll = (self.content_height - viewport_h).max(0.0);
+        let max_scroll = (content_h - viewport_h).max(0.0);
         let progress = if max_scroll > 0.0 {
             (self.scroll_y / max_scroll).clamp(0.0, 1.0)
         } else {
