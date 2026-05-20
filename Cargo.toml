@@ -54,6 +54,11 @@ argon2 = "0.5"
 chacha20poly1305 = "0.10"
 sys-locale = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Pinned to 0.8.0 because 0.8.1 ICEs rustc 1.93.0 stable on the
+# `defaults::PQ_LUT_TABLE` const-eval ("`is_signed` on non-scalar ABI
+# ScalarPair"). image 0.25.10 requires `^0.8.0` so 0.8.0 still resolves.
+# Revisit when rustc fixes the const-eval ABI bug.
+moxcms = "=0.8.0"
 rfd = "0.15"
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
