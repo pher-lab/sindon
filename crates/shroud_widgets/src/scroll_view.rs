@@ -114,6 +114,20 @@ impl ScrollView {
         self
     }
 
+    /// Fill available height.
+    pub fn height_full(mut self) -> Self {
+        self.style = self.style.height_full();
+        self
+    }
+
+    /// Flex-grow factor — the scroll view claims this share of any leftover
+    /// space along the parent's main axis. Pair with `.grow(1.0)` siblings
+    /// for the common "viewport fills whatever the header leaves" layout.
+    pub fn grow(mut self, factor: f32) -> Self {
+        self.style = self.style.grow(factor);
+        self
+    }
+
     /// Set gap between children.
     pub fn gap(mut self, px: f32) -> Self {
         self.style = self.style.gap(px);

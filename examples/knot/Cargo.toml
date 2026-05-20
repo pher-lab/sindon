@@ -1,0 +1,12 @@
+[package]
+name = "knot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+shroud = { path = "../../crates/shroud" }
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+zeroize = { workspace = true }

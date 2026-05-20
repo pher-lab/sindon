@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use shroud_core::{Point, Theme};
-use shroud_platform::{PlatformWindow, SystemTheme};
+use shroud_platform::{PlatformWindow, SecureClipboard, SystemTheme};
 use shroud_reactive::{Reactive, Signal};
 use shroud_render::renderer::Renderer;
 use shroud_security::hardening;
@@ -12,7 +12,7 @@ use shroud_widgets::paint::PaintContext;
 use shroud_widgets::shortcut::{Shortcut, ShortcutContext, ShortcutId};
 use shroud_widgets::tree::WidgetTree;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, StartCause, WindowEvent};
+use winit::event::{ElementState, Ime, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WinitKey, NamedKey as WinitNamedKey};
 use winit::window::WindowId;
@@ -480,6 +480,28 @@ impl Default for App {
 ///
 /// Held in this isolated form so it can be unit-tested without spinning up
 /// a winit instance (see [`feedback_test_translation_layer`] convention).
+/// True for the Ctrl+V / Cmd+V key combos that conventionally mean paste.
+///
+/// `s` is winit's `Character` payload — when the OS reports Ctrl+V it
+/// arrives as `"v"` (lowercase) plus the Ctrl modifier flag. Shift+Ctrl+V
+/// is *not* paste (it is a different binding in many apps); we only
+/// match the pure-Ctrl / pure-Logo cases.
+///
+/// Held in this isolated form so it can be unit-tested without a real
+/// keyboard, mirroring [`translate_character`].
+fn is_paste_combo(s: &str, mods: Modifiers) -> bool {
+    if mods.shift || mods.alt {
+        return false;
+    }
+    // Either Ctrl-only (Windows/Linux) or Logo/Cmd-only (macOS).
+    let ctrl_only = mods.ctrl && !mods.logo;
+    let logo_only = mods.logo && !mods.ctrl;
+    if !(ctrl_only || logo_only) {
+        return false;
+    }
+    matches!(s, "v" | "V")
+}
+
 fn translate_character(s: &str, mods: Modifiers) -> Vec<WidgetEvent> {
     if mods.has_non_shift() {
         s.chars()
@@ -556,6 +578,27 @@ impl ShroudEventLoop {
             window.request_redraw();
         }
     }
+
+    /// Read clipboard text and replay it as a burst of `CharInput` events
+    /// against the current focus. Used by the Ctrl+V interceptor above.
+    /// A read failure (clipboard unavailable, non-text content) is silently
+    /// ignored — paste is a best-effort UX, not a critical path.
+    fn dispatch_paste(&mut self) {
+        let Some(tree) = self.tree.as_mut() else {
+            return;
+        };
+        let clipboard = SecureClipboard::new();
+        let Ok(text) = clipboard.read() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        for ch in text.chars() {
+            tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut self.event_ctx);
+        }
+        self.request_redraw();
+    }
 }
 
 impl ApplicationHandler<AppEvent> for ShroudEventLoop {
@@ -609,6 +652,14 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 log::warn!("Screen capture prevention not available: {:?}", result);
             }
         }
+
+        // Enable IME for composed-script input (Japanese, Chinese, Korean,
+        // etc.) Without this winit drops composition events on the floor on
+        // Windows / macOS / X11 and CJK users can't type at all — the
+        // canonical "no Japanese input" symptom every framework eventually
+        // discovers. Apps that need to disable IME per-flow can call
+        // `PlatformWindow::set_ime_allowed(false)` directly.
+        platform_window.set_ime_allowed(true);
 
         // Publish the initial OS theme snapshot. winit also fires
         // `ThemeChanged` shortly after window creation on most
@@ -673,6 +724,18 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     alt: state.alt_key(),
                     logo: state.super_key(),
                 };
+            }
+
+            // Window gained focus — re-apply IME open status. Windows
+            // resets IME open on focus changes for some configurations
+            // (Win11 + Microsoft IME for Japanese in particular), so
+            // calling `set_ime_allowed(true)` again here re-runs both
+            // the IACE_DEFAULT path and our `ImmSetOpenStatus(true)`
+            // override.
+            WindowEvent::Focused(true) => {
+                if let Some(window) = &self.window {
+                    window.set_ime_allowed(true);
+                }
             }
 
             WindowEvent::Resized(size) => {
@@ -752,6 +815,17 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     // non-shift modifier is held, so the shortcut router
                     // sees Ctrl+letter combos before they reach Input).
                     WinitKey::Character(s) => {
+                        // Ctrl+V (or Cmd+V on macOS) intercepts paste before
+                        // it ever becomes a KeyDown: the clipboard text is
+                        // injected as a sequence of CharInput events, which
+                        // every focused Input / SecureInput already handles.
+                        // Apps that need a custom Ctrl+V handler can opt out
+                        // by disabling default paste at app build time (not
+                        // yet wired — file an issue if you need it).
+                        if is_paste_combo(s, self.event_ctx.modifiers) {
+                            self.dispatch_paste();
+                            return;
+                        }
                         let events = translate_character(s, self.event_ctx.modifiers);
                         if !events.is_empty() {
                             if let Some(tree) = &mut self.tree {
@@ -777,6 +851,32 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
 
                     _ => {}
                 }
+            }
+
+            // ── IME events ───────────────────────────────────────
+            //
+            // Composed text from an IME (Japanese, Chinese, Korean, …)
+            // arrives as `Ime::Commit(text)` after the user finishes
+            // composing. We splat each char into the existing
+            // `CharInput` path so Input / SecureInput don't need a new
+            // event variant. Preedit / Enabled / Disabled are ignored
+            // for M1 — Preedit display is a polish item (the OS still
+            // shows its native composition window in the meantime).
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                if let Some(tree) = &mut self.tree {
+                    for ch in text.chars() {
+                        tree.dispatch_event(
+                            &WidgetEvent::CharInput { ch },
+                            &mut self.event_ctx,
+                        );
+                    }
+                    self.request_redraw();
+                }
+            }
+            WindowEvent::Ime(_) => {
+                // Preedit / Enabled / Disabled are ignored for M1. The OS
+                // shows its native composition window during typing, and
+                // the final Commit lands via the arm above.
             }
 
             // ── Render ───────────────────────────────────────────
@@ -932,6 +1032,56 @@ mod tests {
         assert_eq!(sig.get(), Some(SystemTheme::Light));
         sig.set(Some(SystemTheme::Dark));
         assert_eq!(sig.get(), Some(SystemTheme::Dark));
+    }
+
+    #[test]
+    fn ctrl_v_is_paste_combo() {
+        // Pure Ctrl+V on Windows/Linux is the canonical paste binding —
+        // event_loop intercepts before translate_character so the KeyDown
+        // never actually fires.
+        assert!(is_paste_combo("v", Modifiers::CTRL));
+        assert!(is_paste_combo("V", Modifiers::CTRL));
+    }
+
+    #[test]
+    fn cmd_v_is_paste_combo() {
+        // macOS uses Cmd (= logo). Same intercept rule applies.
+        assert!(is_paste_combo("v", Modifiers::LOGO));
+        assert!(is_paste_combo("V", Modifiers::LOGO));
+    }
+
+    #[test]
+    fn shift_modified_ctrl_v_is_not_paste() {
+        // Shift+Ctrl+V is a distinct binding in many apps ("paste without
+        // formatting", etc.) — make sure we leave it alone so users /
+        // apps can wire it up via the shortcut router.
+        let mods = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert!(!is_paste_combo("v", mods));
+    }
+
+    #[test]
+    fn ctrl_other_letter_is_not_paste() {
+        // Only V / v counts — guards against typo regressions in the
+        // matcher (e.g., accidentally pasting on Ctrl+B).
+        assert!(!is_paste_combo("b", Modifiers::CTRL));
+        assert!(!is_paste_combo("c", Modifiers::CTRL));
+    }
+
+    #[test]
+    fn plain_v_is_not_paste() {
+        // Sanity: regular typing of 'v' must not be hijacked.
+        assert!(!is_paste_combo("v", Modifiers::default()));
+        assert!(!is_paste_combo(
+            "V",
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            }
+        ));
     }
 
     #[test]

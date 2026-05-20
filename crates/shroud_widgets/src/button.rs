@@ -34,6 +34,10 @@ pub struct Button {
     focus_ring_color: Option<Reactive<Color>>,
     radius: f32,
     visible: Reactive<bool>,
+    /// flex-grow factor — `0.0` (default) means the button sizes to its
+    /// intrinsic label width; positive values make it claim its share of
+    /// leftover space along the parent's main axis. See [`Button::grow`].
+    flex_grow: f32,
 }
 
 impl Button {
@@ -57,6 +61,7 @@ impl Button {
             focus_ring_color: None,
             radius: 0.0,
             visible: Reactive::Static(true),
+            flex_grow: 0.0,
         }
     }
 
@@ -80,6 +85,7 @@ impl Button {
             focus_ring_color: None,
             radius: 0.0,
             visible: Reactive::Static(true),
+            flex_grow: 0.0,
         }
     }
 
@@ -145,6 +151,18 @@ impl Button {
         self
     }
 
+    /// Flex-grow factor along the parent container's main axis.
+    ///
+    /// `0.0` (the default) leaves the button at its intrinsic label width.
+    /// `1.0` (the common case) makes it claim the remaining space after
+    /// non-grow siblings have taken theirs — the natural shape for a
+    /// "row title that fills until the trailing trash icon" sidebar
+    /// pattern. Negative values are clamped to `0.0`.
+    pub fn grow(mut self, factor: f32) -> Self {
+        self.flex_grow = factor.max(0.0);
+        self
+    }
+
     /// Toggle visibility. `false` gives `display: none` semantics — the
     /// button is removed from the layout flow, not painted, and does not
     /// receive events.
@@ -169,9 +187,13 @@ impl Widget for Button {
 
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
-        FlexStyle::new()
+        let mut style = FlexStyle::new()
             .padding(8.0)
-            .center()
+            .center();
+        if self.flex_grow > 0.0 {
+            style = style.grow(self.flex_grow);
+        }
+        style
             .min_height(font_size + 16.0)
     }
 
