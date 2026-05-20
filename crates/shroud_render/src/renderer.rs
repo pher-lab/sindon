@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::atlas::{DEFAULT_ATLAS_SIZE, TextureAtlas};
+use crate::image::{DecodedImage, ImageId};
 use crate::secure_atlas::SecureTextureAtlas;
 use shroud_core::{Color, Rect};
 use shroud_text::GlyphImage;
@@ -127,12 +129,58 @@ pub struct DrawRect {
     pub clip_rect: Option<Rect>,
 }
 
+/// A decoded image to draw at a screen-space rect.
+///
+/// `image` is shared via `Arc` so multiple paints of the same asset
+/// reference identical bytes and resolve to a single GPU texture in the
+/// renderer's [`ImageCache`].
+///
+/// `tint` is multiplied with the sampled RGBA; pass `Color::WHITE` for an
+/// unmodified image. Use the alpha component of `tint` for cross-fade or
+/// "loading" overlay effects.
+pub struct DrawImage {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub image: Arc<DecodedImage>,
+    pub tint: Color,
+    /// Scissor region in screen pixels; `None` means no clipping.
+    pub clip_rect: Option<Rect>,
+}
+
+/// Per-layer paint-command counts captured at the moment an overlay layer
+/// begins painting. The renderer slices the flat command vecs by these
+/// snapshots so each layer renders as its own z-ordered batch.
+///
+/// Each field is the cumulative `len()` of the corresponding command
+/// vec at the boundary — i.e. the *start* index of the layer being
+/// pushed (everything strictly below this is "below the layer").
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct LayerSnapshot {
+    pub rect: usize,
+    pub glyph: usize,
+    pub secure_glyph: usize,
+    pub image: usize,
+}
+
 /// Render error.
 #[derive(Debug)]
 pub enum RenderError {
     SurfaceLost,
     SurfaceTimeout,
     SurfaceOutdated,
+}
+
+/// GPU resources for a single uploaded image. One entry per unique
+/// [`ImageId`] lives in [`Renderer::image_cache`].
+struct GpuImage {
+    /// Kept alive so the bind group's `TextureView` stays valid; never
+    /// read directly (sampling is via the view that backs the bind
+    /// group).
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
 }
 
 /// GPU renderer for shroud.
@@ -153,6 +201,15 @@ pub struct Renderer {
     // Secure atlas — cleared every frame after rendering
     secure_atlas: SecureTextureAtlas,
     secure_text_bind_group: wgpu::BindGroup,
+    // Image pipeline — same vertex layout + bind group layout as text,
+    // but a separate pipeline because the shader samples RGBA and
+    // multiplies by a tint (rather than treating the texel as an alpha
+    // mask).
+    image_pipeline: wgpu::RenderPipeline,
+    /// Per-`ImageId` GPU textures. Persists across frames; a future
+    /// LRU eviction pass can drop entries by inspecting weak Arc counts
+    /// supplied by widget paints (out of scope for the initial cut).
+    image_cache: HashMap<ImageId, GpuImage>,
 }
 
 impl Renderer {
@@ -349,6 +406,52 @@ impl Renderer {
             cache: None,
         });
 
+        // ── Image pipeline ───────────────────────────────────────
+        // Reuses `text_bind_group_layout` (Float-filterable Texture +
+        // Filtering sampler — the layout doesn't constrain the texture's
+        // pixel format) and `TextVertex` (position + uv + tint). Only
+        // the fragment shader differs.
+        let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shroud_image_shader"),
+            source: wgpu::ShaderSource::Wgsl(IMAGE_SHADER.into()),
+        });
+
+        let image_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("shroud_image_pipeline_layout"),
+                bind_group_layouts: &[Some(&text_bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shroud_image_pipeline"),
+            layout: Some(&image_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &image_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[TextVertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &image_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Self {
             device,
             queue,
@@ -362,6 +465,8 @@ impl Renderer {
             atlas,
             secure_atlas,
             secure_text_bind_group,
+            image_pipeline,
+            image_cache: HashMap::new(),
         }
     }
 
@@ -424,13 +529,84 @@ impl Renderer {
         });
     }
 
+    /// Upload a decoded image to the GPU and create its bind group, if
+    /// this `ImageId` hasn't been seen before. Idempotent.
+    fn ensure_image_uploaded(&mut self, image: &DecodedImage) {
+        if self.image_cache.contains_key(&image.id()) {
+            return;
+        }
+        let extent = wgpu::Extent3d {
+            width: image.width(),
+            height: image.height(),
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shroud_image_texture"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // sRGB so the shader sees linear-light values when sampling.
+            // The render target is also sRGB, so the final write
+            // re-encodes linearly composited results back to sRGB. This
+            // matches what the rect/text path does implicitly via the
+            // surface format.
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            image.rgba(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * image.width()),
+                rows_per_image: Some(image.height()),
+            },
+            extent,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shroud_image_bind_group"),
+            layout: &self.text_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.image_cache.insert(
+            image.id(),
+            GpuImage {
+                texture,
+                bind_group,
+            },
+        );
+    }
+
+    /// Number of GPU textures currently cached. For tests / diagnostics.
+    pub fn image_cache_len(&self) -> usize {
+        self.image_cache.len()
+    }
+
     pub fn render(
         &mut self,
         clear_color: Color,
         rects: &[DrawRect],
         glyphs: &[DrawGlyph],
         secure_glyphs: &[DrawGlyph],
-        layer_starts: &[(usize, usize, usize)],
+        images: &[DrawImage],
+        layer_starts: &[LayerSnapshot],
     ) -> Result<(), RenderError> {
         // Upload standard glyphs to the standard atlas (cached)
         for glyph in glyphs {
@@ -452,6 +628,12 @@ impl Renderer {
                 glyph.image.width,
                 glyph.image.height,
             );
+        }
+
+        // Upload any unseen images. Subsequent frames find them in the
+        // cache and skip the GPU copy.
+        for img in images {
+            self.ensure_image_uploaded(&img.image);
         }
 
         if self.atlas.is_dirty() {
@@ -480,25 +662,28 @@ impl Renderer {
 
         // Split the flat command vecs into per-layer slices. The first
         // slice is the main tree; each subsequent one is an overlay
-        // layer in push order. Each batch is rendered as rects → text
-        // → secure text in turn, so a layer's content never gets
-        // overdrawn by the main tree's glyphs (which would happen if
-        // every rect drew before every glyph globally).
-        let mut batch_ranges: Vec<(
-            std::ops::Range<usize>,
-            std::ops::Range<usize>,
-            std::ops::Range<usize>,
-        )> = Vec::with_capacity(layer_starts.len() + 1);
-        let mut prev = (0usize, 0usize, 0usize);
-        for &(r, g, s) in layer_starts {
-            batch_ranges.push((prev.0..r, prev.1..g, prev.2..s));
-            prev = (r, g, s);
+        // layer in push order. Within a layer the order is
+        // rects → images → text → secure text, so a layer's content
+        // never gets overdrawn by the main tree's glyphs (which would
+        // happen if every rect drew before every glyph globally).
+        let mut batch_ranges: Vec<[std::ops::Range<usize>; 4]> =
+            Vec::with_capacity(layer_starts.len() + 1);
+        let mut prev = LayerSnapshot::default();
+        for snap in layer_starts {
+            batch_ranges.push([
+                prev.rect..snap.rect,
+                prev.glyph..snap.glyph,
+                prev.secure_glyph..snap.secure_glyph,
+                prev.image..snap.image,
+            ]);
+            prev = *snap;
         }
-        batch_ranges.push((
-            prev.0..rects.len(),
-            prev.1..glyphs.len(),
-            prev.2..secure_glyphs.len(),
-        ));
+        batch_ranges.push([
+            prev.rect..rects.len(),
+            prev.glyph..glyphs.len(),
+            prev.secure_glyph..secure_glyphs.len(),
+            prev.image..images.len(),
+        ]);
 
         struct BatchBuffers {
             rect_vb: wgpu::Buffer,
@@ -510,14 +695,19 @@ impl Renderer {
             sec_vb: wgpu::Buffer,
             sec_ib: wgpu::Buffer,
             sec_batches: Vec<DrawBatch>,
+            image_vb: wgpu::Buffer,
+            image_ib: wgpu::Buffer,
+            image_batches: Vec<ImageBatch>,
         }
 
         let mut batches: Vec<BatchBuffers> = Vec::with_capacity(batch_ranges.len());
-        for (rr, gr, sr) in &batch_ranges {
+        for r in &batch_ranges {
+            let [rr, gr, sr, ir] = r;
             let (rv, ri, rb) = self.build_rect_geometry(&rects[rr.clone()]);
             let (tv, ti, tb) = self.build_text_geometry(&glyphs[gr.clone()], &self.atlas);
             let (sv, si, sb) =
                 self.build_text_geometry(&secure_glyphs[sr.clone()], self.secure_atlas.as_atlas());
+            let (iv, ii, ib) = self.build_image_geometry(&images[ir.clone()]);
             batches.push(BatchBuffers {
                 rect_vb: self.create_vertex_buffer("rect_vb", bytemuck::cast_slice(&rv)),
                 rect_ib: self.create_index_buffer("rect_ib", bytemuck::cast_slice(&ri)),
@@ -528,6 +718,9 @@ impl Renderer {
                 sec_vb: self.create_vertex_buffer("sec_text_vb", bytemuck::cast_slice(&sv)),
                 sec_ib: self.create_index_buffer("sec_text_ib", bytemuck::cast_slice(&si)),
                 sec_batches: sb,
+                image_vb: self.create_vertex_buffer("image_vb", bytemuck::cast_slice(&iv)),
+                image_ib: self.create_index_buffer("image_ib", bytemuck::cast_slice(&ii)),
+                image_batches: ib,
             });
         }
 
@@ -567,6 +760,24 @@ impl Renderer {
                     pass.set_vertex_buffer(0, batch.rect_vb.slice(..));
                     pass.set_index_buffer(batch.rect_ib.slice(..), wgpu::IndexFormat::Uint16);
                     for b in &batch.rect_batches {
+                        apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
+                        let end = b.index_start + b.index_count;
+                        pass.draw_indexed(b.index_start..end, 0, 0..1);
+                    }
+                }
+
+                if !batch.image_batches.is_empty() {
+                    pass.set_pipeline(&self.image_pipeline);
+                    pass.set_vertex_buffer(0, batch.image_vb.slice(..));
+                    pass.set_index_buffer(batch.image_ib.slice(..), wgpu::IndexFormat::Uint16);
+                    for b in &batch.image_batches {
+                        // `ensure_image_uploaded` ran above for every
+                        // DrawImage; the cache lookup is therefore total.
+                        let gpu = self
+                            .image_cache
+                            .get(&b.image_id)
+                            .expect("image was not uploaded before draw");
+                        pass.set_bind_group(0, &gpu.bind_group, &[]);
                         apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
                         pass.draw_indexed(b.index_start..end, 0, 0..1);
@@ -830,6 +1041,82 @@ struct DrawBatch {
     index_count: u32,
 }
 
+/// A contiguous index range sharing both a scissor rectangle *and* an
+/// image bind group. Images can't share a single bind group across the
+/// whole frame because each unique `ImageId` has its own texture, so a
+/// new entry is appended whenever the bind group must change.
+struct ImageBatch {
+    image_id: ImageId,
+    clip_rect: Option<Rect>,
+    index_start: u32,
+    index_count: u32,
+}
+
+impl Renderer {
+    fn build_image_geometry(
+        &self,
+        images: &[DrawImage],
+    ) -> (Vec<TextVertex>, Vec<u16>, Vec<ImageBatch>) {
+        let sw = self.surface_config.width as f32;
+        let sh = self.surface_config.height as f32;
+
+        let mut vertices = Vec::with_capacity(images.len() * 4);
+        let mut indices = Vec::with_capacity(images.len() * 6);
+        let mut batches: Vec<ImageBatch> = Vec::new();
+
+        for img in images {
+            let base = vertices.len() as u16;
+            let index_start = indices.len() as u32;
+
+            let x0 = (img.x / sw) * 2.0 - 1.0;
+            let y0 = 1.0 - (img.y / sh) * 2.0;
+            let x1 = ((img.x + img.width) / sw) * 2.0 - 1.0;
+            let y1 = 1.0 - ((img.y + img.height) / sh) * 2.0;
+
+            let tint = img.tint.to_array();
+
+            // UV (0,0) at top-left → (1,1) at bottom-right.
+            vertices.push(TextVertex {
+                position: [x0, y0],
+                uv: [0.0, 0.0],
+                color: tint,
+            });
+            vertices.push(TextVertex {
+                position: [x1, y0],
+                uv: [1.0, 0.0],
+                color: tint,
+            });
+            vertices.push(TextVertex {
+                position: [x1, y1],
+                uv: [1.0, 1.0],
+                color: tint,
+            });
+            vertices.push(TextVertex {
+                position: [x0, y1],
+                uv: [0.0, 1.0],
+                color: tint,
+            });
+
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            let id = img.image.id();
+            match batches.last_mut() {
+                Some(last) if last.image_id == id && last.clip_rect == img.clip_rect => {
+                    last.index_count += 6;
+                }
+                _ => batches.push(ImageBatch {
+                    image_id: id,
+                    clip_rect: img.clip_rect,
+                    index_start,
+                    index_count: 6,
+                }),
+            }
+        }
+
+        (vertices, indices, batches)
+    }
+}
+
 /// Apply a scissor rectangle to the render pass, clamped to the surface bounds.
 fn apply_scissor(pass: &mut wgpu::RenderPass, clip: Option<Rect>, surface_w: u32, surface_h: u32) {
     let (x, y, w, h) = match clip {
@@ -926,5 +1213,39 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let alpha = textureSample(t_atlas, s_atlas, in.uv).r;
     return vec4<f32>(in.color.rgb, in.color.a * alpha);
+}
+"#;
+
+const IMAGE_SHADER: &str = r#"
+@group(0) @binding(0)
+var t_image: texture_2d<f32>;
+@group(0) @binding(1)
+var s_image: sampler;
+
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(in.position, 0.0, 1.0);
+    out.uv = in.uv;
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let texel = textureSample(t_image, s_image, in.uv);
+    return texel * in.color;
 }
 "#;

@@ -1,13 +1,15 @@
 //! Paint context — accumulates draw commands during widget painting.
 
+use std::sync::Arc;
+
 use shroud_core::{Color, Rect, Theme};
-use shroud_render::{DrawGlyph, DrawRect};
+use shroud_render::{DecodedImage, DrawGlyph, DrawImage, DrawRect, LayerSnapshot};
 use shroud_text::{GlyphImage, TextEngine};
 
 /// Accumulates draw commands produced by widget `paint()` calls.
 ///
-/// After painting the entire widget tree, the collected rects and glyphs
-/// are passed to the Renderer.
+/// After painting the entire widget tree, the collected rects, glyphs,
+/// and images are passed to the Renderer.
 ///
 /// Also provides access to the `TextEngine` for text shaping/rasterization.
 pub struct PaintContext {
@@ -16,6 +18,10 @@ pub struct PaintContext {
     /// Glyphs from secure widgets — rendered via the secure atlas
     /// which is cleared every frame after presentation.
     pub secure_glyphs: Vec<DrawGlyph>,
+    /// Images, rendered after rects but before text within each layer
+    /// (so an icon paints over its background but a label still sits on
+    /// top of the icon if they overlap).
+    pub images: Vec<DrawImage>,
     pub text_engine: TextEngine,
     /// Active theme — widgets read defaults from here.
     pub theme: Theme,
@@ -23,15 +29,15 @@ pub struct PaintContext {
     clip_stack: Vec<Rect>,
     /// Stack of accumulated translation offsets.
     offset_stack: Vec<(f32, f32)>,
-    /// Boundaries between paint *layers* — each tuple is the
-    /// `(rects.len(), glyphs.len(), secure_glyphs.len())` snapshot at
-    /// the moment the corresponding overlay layer started painting.
+    /// Boundaries between paint *layers* — each entry snapshots the
+    /// command-vec lengths at the moment the corresponding overlay
+    /// layer started painting.
     ///
     /// Renders the main tree as one logical batch and every overlay
     /// layer as its own; the renderer iterates these spans in z order
     /// so a layer rect never gets overdrawn by the main tree's text.
     /// Empty when no layers were pushed in the current frame.
-    layer_starts: Vec<(usize, usize, usize)>,
+    layer_starts: Vec<LayerSnapshot>,
 }
 
 impl PaintContext {
@@ -40,6 +46,7 @@ impl PaintContext {
             rects: Vec::new(),
             glyphs: Vec::new(),
             secure_glyphs: Vec::new(),
+            images: Vec::new(),
             text_engine: TextEngine::new(),
             theme,
             clip_stack: Vec::new(),
@@ -49,22 +56,24 @@ impl PaintContext {
     }
 
     /// Mark the start of an overlay layer's paint batch. Subsequent
-    /// `fill_rect` / `draw_glyph` calls become part of this layer's
-    /// batch, which the renderer draws after every previously-recorded
-    /// batch. Called by [`WidgetTree::paint`](crate::tree::WidgetTree::paint)
-    /// once per layer; widget code does not invoke this directly.
+    /// `fill_rect` / `draw_glyph` / `draw_image` calls become part of
+    /// this layer's batch, which the renderer draws after every
+    /// previously-recorded batch. Called by
+    /// [`WidgetTree::paint`](crate::tree::WidgetTree::paint) once per
+    /// layer; widget code does not invoke this directly.
     pub fn begin_layer(&mut self) {
-        self.layer_starts.push((
-            self.rects.len(),
-            self.glyphs.len(),
-            self.secure_glyphs.len(),
-        ));
+        self.layer_starts.push(LayerSnapshot {
+            rect: self.rects.len(),
+            glyph: self.glyphs.len(),
+            secure_glyph: self.secure_glyphs.len(),
+            image: self.images.len(),
+        });
     }
 
     /// Read the recorded layer-batch boundaries. Renderer-facing —
-    /// each entry is the cumulative `(rect_count, glyph_count,
-    /// secure_glyph_count)` at the start of one overlay layer.
-    pub fn layer_starts(&self) -> &[(usize, usize, usize)] {
+    /// each entry is the cumulative command-vec lengths at the start of
+    /// one overlay layer.
+    pub fn layer_starts(&self) -> &[LayerSnapshot] {
         &self.layer_starts
     }
 
@@ -149,6 +158,22 @@ impl PaintContext {
         });
     }
 
+    /// Record a draw call for `image` at the given rect, tinted by
+    /// `tint` (use [`Color::WHITE`] for unmodified pixels). The active
+    /// offset and clip stack are applied automatically.
+    pub fn draw_image(&mut self, rect: Rect, image: Arc<DecodedImage>, tint: Color) {
+        let (ox, oy) = self.current_offset();
+        self.images.push(DrawImage {
+            x: rect.origin.x + ox,
+            y: rect.origin.y + oy,
+            width: rect.size.width,
+            height: rect.size.height,
+            image,
+            tint,
+            clip_rect: self.current_clip(),
+        });
+    }
+
     /// Draw a glyph into the secure atlas (cleared every frame).
     ///
     /// Use this for glyphs from `SecureText` / `SecureInput` widgets.
@@ -202,6 +227,7 @@ impl PaintContext {
         self.rects.clear();
         self.glyphs.clear();
         self.secure_glyphs.clear();
+        self.images.clear();
         self.layer_starts.clear();
     }
 }

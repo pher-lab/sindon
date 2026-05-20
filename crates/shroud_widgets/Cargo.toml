@@ -12,3 +12,6 @@ shroud_reactive = { workspace = true }
 shroud_render = { workspace = true }
 shroud_text = { workspace = true }
 shroud_layout = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true }

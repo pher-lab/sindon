@@ -679,14 +679,14 @@ fn layer_starts_recorded_for_each_layer() {
 
     let starts = ctx.layer_starts();
     assert_eq!(starts.len(), 1, "one layer → one breakpoint");
-    let (r0, g0, _s0) = starts[0];
+    let snap = starts[0];
     // Main contributed at least the root rect and the label's glyphs.
-    assert!(r0 >= 1, "main batch rect count = {r0}");
-    assert!(g0 >= 1, "main batch glyph count = {g0}");
+    assert!(snap.rect >= 1, "main batch rect count = {}", snap.rect);
+    assert!(snap.glyph >= 1, "main batch glyph count = {}", snap.glyph);
     // The layer batch follows the breakpoint and contributes its own
     // commands (scrim + layer bg + layer text glyphs).
-    assert!(ctx.rects.len() > r0);
-    assert!(ctx.glyphs.len() > g0);
+    assert!(ctx.rects.len() > snap.rect);
+    assert!(ctx.glyphs.len() > snap.glyph);
 }
 
 #[test]

@@ -6,9 +6,11 @@
 //!   memory never retains sensitive glyph data between redraws
 
 pub mod atlas;
+pub mod image;
 pub mod renderer;
 pub mod secure_atlas;
 
 pub use atlas::{AtlasRegion, TextureAtlas};
-pub use renderer::{DrawGlyph, DrawRect, RenderError, Renderer};
+pub use image::{DecodedImage, ImageError, ImageId};
+pub use renderer::{DrawGlyph, DrawImage, DrawRect, LayerSnapshot, RenderError, Renderer};
 pub use secure_atlas::SecureTextureAtlas;
