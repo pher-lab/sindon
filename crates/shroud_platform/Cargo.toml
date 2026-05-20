@@ -14,6 +14,10 @@ arboard = { workspace = true }
 log = { workspace = true }
 zeroize = { workspace = true }
 sys-locale = { workspace = true }
+rfd = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

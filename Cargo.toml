@@ -13,6 +13,7 @@ members = [
     "crates/shroud_app",
     "examples/clock",
     "examples/counter",
+    "examples/dialog_settings_demo",
     "examples/font_size_demo",
     "examples/hello_world",
     "examples/hover_demo",
@@ -53,6 +54,10 @@ argon2 = "0.5"
 chacha20poly1305 = "0.10"
 sys-locale = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rfd = "0.15"
+dirs = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Internal
 shroud_core = { path = "crates/shroud_core" }

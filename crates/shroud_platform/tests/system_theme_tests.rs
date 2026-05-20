@@ -10,7 +10,10 @@ use winit::window::Theme as WinitTheme;
 
 #[test]
 fn from_winit_maps_light_to_light() {
-    assert_eq!(SystemTheme::from_winit(WinitTheme::Light), SystemTheme::Light);
+    assert_eq!(
+        SystemTheme::from_winit(WinitTheme::Light),
+        SystemTheme::Light
+    );
 }
 
 #[test]
