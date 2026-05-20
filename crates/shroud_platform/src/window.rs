@@ -84,15 +84,15 @@ impl PlatformWindow {
     /// flow (e.g. a numeric-only PIN entry) can call this with `false`
     /// directly on the platform window.
     ///
-    /// On Windows we also force-attach a fresh IME context via the IMM32
-    /// API — winit 0.30's `set_ime_allowed(true)` calls
-    /// `ImmAssociateContextEx(hwnd, NULL, IACE_DEFAULT)` which is meant to
-    /// restore the thread's default IME context, but on Windows 11 with
-    /// Microsoft IME for Japanese the call silently no-ops (no `Ime::Enabled`
-    /// fires, raw Hankaku / Zenkaku keys reach the app as `KeyboardInput`).
-    /// Calling `ImmCreateContext` + `ImmAssociateContext` directly attaches
-    /// a guaranteed-valid context and is what the user's IME starts
-    /// intercepting keystrokes against.
+    /// On Windows we also call `ImmSetOpenStatus(true)` so a freshly focused
+    /// window with a Japanese keyboard layout starts composing immediately
+    /// instead of waiting for the user to press 半角/全角 — see
+    /// [`force_attach_ime_windows`] for the IMM32 specifics. The composition
+    /// path itself only works when [`App::exploit_mitigation`] is left at its
+    /// default (`false`); turning that on activates
+    /// `ProcessExtensionPointDisablePolicy`, which blocks the extension-DLL
+    /// plumbing the IME relies on. The trade-off is documented on that
+    /// builder.
     pub fn set_ime_allowed(&self, allowed: bool) {
         self.window.set_ime_allowed(allowed);
         #[cfg(target_os = "windows")]
@@ -117,23 +117,18 @@ impl PlatformWindow {
 /// Best-effort IME bring-up for the given window on Windows.
 ///
 /// Forces the IME open status to `true` via `ImmSetOpenStatus` so a freshly
-/// focused window with a Japanese keyboard layout would compose immediately
-/// instead of waiting for the user to press 半角/全角.
+/// focused window with a Japanese keyboard layout starts composing
+/// immediately instead of waiting for the user to press 半角/全角.
 ///
-/// **Known limitation (2026-05):** on Win11 + Microsoft IME for Japanese +
-/// winit 0.30, even with the IME context attached and `ImmSetOpenStatus`
-/// reporting success, the OS IME hook does not intercept `WM_KEYDOWN` for
-/// shroud windows. Diagnostic findings (`GetKeyboardLayout` returns
-/// Japanese, `ImmGetContext` returns a valid HIMC at every keystroke,
-/// `ImmGetOpenStatus` returns `true`, `ImmGetConversionStatus` returns the
-/// expected Native+Roman+Fullshape) all line up — yet `Hankaku` / `Zenkaku`
-/// / `Convert` named keys reach `KeyboardInput` as raw events, and
-/// `WindowEvent::Ime(_)` is never produced. The Win32 API setup looks
-/// correct end-to-end; the breakage is somewhere between winit's message
-/// dispatch and the IME hook. Tracked as a follow-up phase candidate
-/// (custom `msg_hook`, or a winit alternative). Users can paste Japanese
-/// text via Ctrl+V in the meantime — the paste path uses the system
-/// clipboard and does not go through IME.
+/// History note: a long deep-dive (2026-05) chased an apparent winit /
+/// Win11 IME breakage where `WindowEvent::Ime(_)` never fired even though
+/// every IMM32 status query reported success. Root cause turned out to be
+/// shroud's own `App::exploit_mitigation` default —
+/// `ProcessExtensionPointDisablePolicy` blocks the IME's extension-DLL
+/// hooks, so the OS IME would silently degrade to ASCII-only passthrough.
+/// Flipping that default to `false` restored composition; this function
+/// stays as a UX nicety (auto-open on focus) rather than a workaround for
+/// a winit bug.
 ///
 /// Failures are deliberately silent because IME activation is a UX feature,
 /// not a correctness one: a no-op here just means the existing keystroke

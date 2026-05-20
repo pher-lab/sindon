@@ -244,7 +244,14 @@ impl Default for AppConfig {
             height: 600,
             disable_core_dumps: true,
             ptrace_protection: true,
-            exploit_mitigation: true,
+            // Off by default because `ProcessExtensionPointDisablePolicy` on
+            // Windows blocks the extension-DLL plumbing the Microsoft IME for
+            // Japanese (and other CJK IMEs) loads through — flipping it on at
+            // App start would silently break Japanese / Chinese / Korean
+            // typing in every shroud app. Security-strict deployments opt in
+            // explicitly via `App::exploit_mitigation(true)` after deciding
+            // they don't need IME (numeric kiosks, English-only flows).
+            exploit_mitigation: false,
             capture_prevention: false,
             theme: Reactive::Static(Theme::default()),
             tick_interval: DEFAULT_TICK_INTERVAL,
@@ -359,7 +366,16 @@ impl App {
     /// - Linux / macOS: no-op today; reserved for future seccomp / sandbox
     ///   hooks.
     ///
-    /// Defaults to `true`.
+    /// **Defaults to `false`** because the Windows policy also blocks the
+    /// extension-DLL plumbing that the Microsoft IME for Japanese (and
+    /// other CJK IMEs) needs in order to deliver composition events to the
+    /// window — turning it on would silently break Japanese / Chinese /
+    /// Korean typing in every shroud app. Opt in explicitly for flows that
+    /// don't accept text input (numeric kiosks, English-only utilities)
+    /// where the added defence-in-depth against legacy DLL injection is
+    /// worth losing IME support. A more granular replacement
+    /// (`ProcessImageLoadPolicy` restricted to System32 / signed images,
+    /// say) is a future-phase candidate.
     pub fn exploit_mitigation(mut self, on: bool) -> Self {
         self.config.exploit_mitigation = on;
         self
@@ -727,11 +743,10 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             }
 
             // Window gained focus — re-apply IME open status. Windows
-            // resets IME open on focus changes for some configurations
-            // (Win11 + Microsoft IME for Japanese in particular), so
-            // calling `set_ime_allowed(true)` again here re-runs both
-            // the IACE_DEFAULT path and our `ImmSetOpenStatus(true)`
-            // override.
+            // resets IME open on focus transitions in some configurations,
+            // so calling `set_ime_allowed(true)` again here re-runs both
+            // the winit IACE_DEFAULT path and our `ImmSetOpenStatus(true)`
+            // override, keeping IME live across focus loss/regain.
             WindowEvent::Focused(true) => {
                 if let Some(window) = &self.window {
                     window.set_ime_allowed(true);
