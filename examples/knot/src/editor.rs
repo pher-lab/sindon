@@ -120,7 +120,9 @@ pub fn build(
     );
 }
 
-/// Apply `f` to the currently selected note's mutable state. No-op when no
+/// Apply `f` to the currently selected note's mutable state and mark
+/// it dirty so the auto-save tick (`AppState::flush_dirty`) writes the
+/// change back to SQLCipher within a tick interval. No-op when no
 /// note is selected or the app is not in `Unlocked`.
 fn write_selected<F>(state: &Rc<RefCell<AppState>>, f: F)
 where
@@ -137,4 +139,8 @@ where
     if let Some(note) = notes.iter_mut().find(|n| n.id == sel) {
         f(note);
     }
+    // Drop the borrow before mark_selected_dirty takes another mut
+    // borrow. (RefCell will panic on overlapping borrows.)
+    drop(s);
+    state.borrow_mut().mark_selected_dirty();
 }

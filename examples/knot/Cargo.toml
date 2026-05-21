@@ -10,3 +10,9 @@ shroud = { path = "../../crates/shroud" }
 argon2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
 zeroize = { workspace = true }
+# SQLCipher 4.x via rusqlite. `bundled-sqlcipher-vendored-openssl` keeps
+# the toolchain fully reproducible — everything (SQLite, the SQLCipher
+# patch set, and OpenSSL) builds from source so we don't depend on a
+# system OpenSSL install or a vcpkg checkout. First build is slow
+# (~minutes) but subsequent builds are cached.
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }

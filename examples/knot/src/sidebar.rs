@@ -266,6 +266,14 @@ fn create_note(
     };
     title_sig.set(String::new());
     body_sig.set(String::new());
+    // Mark the new (empty) note dirty so the next auto-save tick writes
+    // its row to SQLCipher — without this, a brand-new note that the
+    // user never edits would silently disappear at lock time (no row
+    // ever inserted, lock_and_seal's rewrite would catch it but only
+    // for *that* lock cycle).
+    if let Some(id) = new_id {
+        state.borrow_mut().mark_dirty(id);
+    }
     new_id
 }
 
@@ -275,30 +283,33 @@ fn delete_note(
     title_sig: &Signal<String>,
     body_sig: &Signal<String>,
 ) {
-    let next_selection_payload = {
-        let mut s = state.borrow_mut();
-        let Phase::Unlocked {
-            notes, selected, ..
-        } = &mut s.phase
-        else {
-            return;
+    // `delete_note_persisted` updates the in-memory vec, drops the
+    // row from SQLCipher, and re-selects a sibling if the deleted
+    // note was the active one — all atomically under one borrow_mut.
+    let was_selected_before =
+        matches!(&state.borrow().phase, Phase::Unlocked { selected, .. } if *selected == Some(note_id));
+
+    if let Err(e) = state.borrow_mut().delete_note_persisted(note_id) {
+        eprintln!("knot: failed to delete note {} from storage: {}", note_id, e);
+        return;
+    }
+
+    if was_selected_before {
+        let payload = {
+            let s = state.borrow();
+            match &s.phase {
+                Phase::Unlocked {
+                    notes, selected, ..
+                } => selected
+                    .and_then(|sel| notes.iter().find(|n| n.id == sel))
+                    .map(|n| (n.title.clone(), n.body.clone()))
+                    .or(Some((String::new(), String::new()))),
+                _ => None,
+            }
         };
-        notes.retain(|n| n.id != note_id);
-        let was_selected = *selected == Some(note_id);
-        if was_selected {
-            *selected = notes.first().map(|n| n.id);
+        if let Some((t, b)) = payload {
+            title_sig.set(t);
+            body_sig.set(b);
         }
-        if was_selected {
-            selected
-                .and_then(|sel| notes.iter().find(|n| n.id == sel))
-                .map(|n| (n.title.clone(), n.body.clone()))
-                .or(Some((String::new(), String::new())))
-        } else {
-            None
-        }
-    };
-    if let Some((t, b)) = next_selection_payload {
-        title_sig.set(t);
-        body_sig.set(b);
     }
 }
