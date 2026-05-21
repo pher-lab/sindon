@@ -79,7 +79,8 @@ impl ScrollView {
     /// Effective content extent — explicit value if set, otherwise the value
     /// the tree wrote after the last layout pass.
     fn effective_content_height(&self) -> f32 {
-        self.explicit_content_height.unwrap_or(self.auto_content_height)
+        self.explicit_content_height
+            .unwrap_or(self.auto_content_height)
     }
 
     /// Tree-side hook (same crate) for writing the measured content extent.

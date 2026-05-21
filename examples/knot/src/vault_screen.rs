@@ -13,8 +13,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use shroud::reactive::Signal;
-use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::Container;
+use shroud::widgets::tree::WidgetTree;
 
 use crate::editor;
 use crate::sidebar;
@@ -36,11 +36,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let title_sig = Signal::new(initial_title);
     let body_sig = Signal::new(initial_body);
 
-    let root = tree.set_root(
-        Container::row()
-            .width_full()
-            .height_full(),
-    );
+    let root = tree.set_root(Container::row().width_full().height_full());
 
     sidebar::build(tree, root, Rc::clone(&state), title_sig, body_sig);
 

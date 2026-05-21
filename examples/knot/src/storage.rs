@@ -351,7 +351,9 @@ mod tests {
 
         {
             let mut store = VaultStorage::open(&path, &key_a).expect("open with key_a");
-            store.save_all_notes(&[make_note(1, &key_a, b"hi")]).unwrap();
+            store
+                .save_all_notes(&[make_note(1, &key_a, b"hi")])
+                .unwrap();
         }
 
         let result = VaultStorage::open(&path, &key_b);
@@ -396,10 +398,7 @@ mod tests {
         let mut store = VaultStorage::open(&path, &key).expect("open");
 
         store
-            .save_all_notes(&[
-                make_note(1, &key, b"keep"),
-                make_note(2, &key, b"drop"),
-            ])
+            .save_all_notes(&[make_note(1, &key, b"keep"), make_note(2, &key, b"drop")])
             .unwrap();
         store.delete_note(2).unwrap();
 
@@ -409,5 +408,4 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
-
 }

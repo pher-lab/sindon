@@ -70,8 +70,7 @@ fn main() {
 
             tree.add_child(
                 root,
-                TextWidget::new("Phase 30 \u{2014} live theme swap")
-                    .font_size(22.0),
+                TextWidget::new("Phase 30 \u{2014} live theme swap").font_size(22.0),
             );
 
             tree.add_child(
@@ -92,10 +91,7 @@ fn main() {
                 .font_size(14.0),
             );
 
-            let buttons_row = tree.add_child(
-                root,
-                Container::row().gap(12.0),
-            );
+            let buttons_row = tree.add_child(root, Container::row().gap(12.0));
 
             for (label, choice) in [
                 ("Light", ThemeChoice::Light),

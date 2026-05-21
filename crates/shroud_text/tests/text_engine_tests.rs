@@ -218,8 +218,7 @@ fn shape_text_delegates_to_shape_text_attrs_with_default() {
 fn cursor_position_delegates_to_cursor_position_attrs_with_default() {
     let mut engine = TextEngine::new();
     let plain = engine.cursor_position("abc\ndef", 16.0, 20.0, None);
-    let attrs =
-        engine.cursor_position_attrs("abc\ndef", 16.0, 20.0, None, &TextAttrs::default());
+    let attrs = engine.cursor_position_attrs("abc\ndef", 16.0, 20.0, None, &TextAttrs::default());
     assert_eq!(plain, attrs);
 }
 
@@ -313,12 +312,7 @@ fn shape_rich_with_one_default_span_matches_shape_text() {
     // (alignment, metrics, etc.) that shape_text doesn't.
     let mut engine = TextEngine::new();
     let plain = engine.shape_text("Hello", 16.0, 20.0, None);
-    let rich = engine.shape_rich(
-        &[TextSpan::new("Hello")],
-        16.0,
-        20.0,
-        None,
-    );
+    let rich = engine.shape_rich(&[TextSpan::new("Hello")], 16.0, 20.0, None);
     assert_eq!(plain.glyphs.len(), rich.glyphs.len());
     assert!(
         (plain.width - rich.width).abs() < 0.01,
@@ -363,10 +357,7 @@ fn shape_rich_with_span_color_propagates_to_glyphs() {
     let mut engine = TextEngine::new();
     let red = Color::rgb(1.0, 0.0, 0.0);
     let shaped = engine.shape_rich(
-        &[
-            TextSpan::new("plain"),
-            TextSpan::new("red").color(red),
-        ],
+        &[TextSpan::new("plain"), TextSpan::new("red").color(red)],
         16.0,
         20.0,
         None,
@@ -374,13 +365,20 @@ fn shape_rich_with_span_color_propagates_to_glyphs() {
     // The first ~5 glyphs are "plain" (no color), the next ~3 are "red".
     // We can't assume exact glyph counts (shaping may cluster), but we can
     // assert SOME glyph has the red color set and SOME has None.
-    let any_red = shaped
-        .glyphs
-        .iter()
-        .any(|g| g.color.is_some_and(|c| (c.r - 1.0).abs() < 0.01 && c.g < 0.01 && c.b < 0.01));
+    let any_red = shaped.glyphs.iter().any(|g| {
+        g.color
+            .is_some_and(|c| (c.r - 1.0).abs() < 0.01 && c.g < 0.01 && c.b < 0.01)
+    });
     let any_none = shaped.glyphs.iter().any(|g| g.color.is_none());
-    assert!(any_red, "no glyph carried the red span color: {:?}", shaped.glyphs);
-    assert!(any_none, "no glyph carried None color (plain span should not inherit red)");
+    assert!(
+        any_red,
+        "no glyph carried the red span color: {:?}",
+        shaped.glyphs
+    );
+    assert!(
+        any_none,
+        "no glyph carried None color (plain span should not inherit red)"
+    );
 }
 
 #[test]
@@ -406,18 +404,8 @@ fn shape_rich_monospace_span_glyph_widths_differ_from_default() {
     // and a proportional `iii` span produce *different* glyph cache keys
     // (different font face id). If they match, the span attrs were dropped.
     let mut engine = TextEngine::new();
-    let proportional = engine.shape_rich(
-        &[TextSpan::new("iii")],
-        16.0,
-        20.0,
-        None,
-    );
-    let mono = engine.shape_rich(
-        &[TextSpan::new("iii").monospace()],
-        16.0,
-        20.0,
-        None,
-    );
+    let proportional = engine.shape_rich(&[TextSpan::new("iii")], 16.0, 20.0, None);
+    let mono = engine.shape_rich(&[TextSpan::new("iii").monospace()], 16.0, 20.0, None);
     assert_eq!(proportional.glyphs.len(), mono.glyphs.len());
     // Either the cache key differs (different face resolved) or the
     // advance widths differ (different metrics). One of those MUST be true

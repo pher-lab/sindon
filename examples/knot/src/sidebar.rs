@@ -54,18 +54,16 @@ pub fn build(
     let new_cell = Rc::clone(&list_cell);
     tree.add_child(
         header,
-        Button::new("+ New")
-            .radius(6.0)
-            .on_click(move |ctx| {
-                if create_note(&new_state, &title_sig, &body_sig).is_some() {
-                    let parent_idx = new_cell.get();
-                    let s = Rc::clone(&new_state);
-                    let c = Rc::clone(&new_cell);
-                    ctx.rebuild_children(parent_idx, move |tree, parent| {
-                        rebuild_list_into(tree, parent, s, title_sig, body_sig, c);
-                    });
-                }
-            }),
+        Button::new("+ New").radius(6.0).on_click(move |ctx| {
+            if create_note(&new_state, &title_sig, &body_sig).is_some() {
+                let parent_idx = new_cell.get();
+                let s = Rc::clone(&new_state);
+                let c = Rc::clone(&new_cell);
+                ctx.rebuild_children(parent_idx, move |tree, parent| {
+                    rebuild_list_into(tree, parent, s, title_sig, body_sig, c);
+                });
+            }
+        }),
     );
 
     let scroll = tree.add_child(pane, ScrollView::new().width_full().grow(1.0));
@@ -286,11 +284,13 @@ fn delete_note(
     // `delete_note_persisted` updates the in-memory vec, drops the
     // row from SQLCipher, and re-selects a sibling if the deleted
     // note was the active one — all atomically under one borrow_mut.
-    let was_selected_before =
-        matches!(&state.borrow().phase, Phase::Unlocked { selected, .. } if *selected == Some(note_id));
+    let was_selected_before = matches!(&state.borrow().phase, Phase::Unlocked { selected, .. } if *selected == Some(note_id));
 
     if let Err(e) = state.borrow_mut().delete_note_persisted(note_id) {
-        eprintln!("knot: failed to delete note {} from storage: {}", note_id, e);
+        eprintln!(
+            "knot: failed to delete note {} from storage: {}",
+            note_id, e
+        );
         return;
     }
 

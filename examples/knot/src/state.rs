@@ -75,12 +75,7 @@ impl AppState {
     /// Transition into `Unlocked` with the given decrypted state.
     /// Called by both the lock screen (after a successful password
     /// attempt) and the first-launch seed path in `main.rs`.
-    pub fn become_unlocked(
-        &mut self,
-        key: MasterKey,
-        notes: Vec<Note>,
-        storage: VaultStorage,
-    ) {
+    pub fn become_unlocked(&mut self, key: MasterKey, notes: Vec<Note>, storage: VaultStorage) {
         // Pick the highest existing id + 1 as the next allocation point
         // so a relaunch doesn't recycle ids that crashed before saving.
         let max_id = notes.iter().map(|n| n.id).max().unwrap_or(0);

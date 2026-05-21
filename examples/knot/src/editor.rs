@@ -43,7 +43,9 @@ pub fn build(
     tree.add_child(
         header,
         TextWidget::reactive(move || match &status_state.borrow().phase {
-            Phase::Unlocked { notes, selected, .. } => {
+            Phase::Unlocked {
+                notes, selected, ..
+            } => {
                 if let Some(sel) = selected {
                     if let Some(note) = notes.iter().find(|n| n.id == *sel) {
                         let title = if note.title.is_empty() {

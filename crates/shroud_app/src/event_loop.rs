@@ -206,7 +206,7 @@ impl AppScope {
 
     /// One-shot snapshot of the OS locale, as a BCP-47 tag (e.g.
     /// `"ja-JP"`, `"en-US"`). Convenience re-export of
-    /// [`shroud_platform::system_locale`] so apps can read it through
+    /// [`shroud_platform::system_locale()`] so apps can read it through
     /// the same `AppScope` they already hold inside `App::run`.
     ///
     /// Returns `None` if the OS could not be queried. Locale changes
@@ -887,10 +887,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             WindowEvent::Ime(Ime::Commit(text)) => {
                 if let Some(tree) = &mut self.tree {
                     for ch in text.chars() {
-                        tree.dispatch_event(
-                            &WidgetEvent::CharInput { ch },
-                            &mut self.event_ctx,
-                        );
+                        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut self.event_ctx);
                     }
                     self.request_redraw();
                 }
@@ -965,9 +962,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 // Dedupe redundant pushes — most frames repaint without
                 // the caret moving (mouse hover, theme reads, etc.).
                 if current_ime_area != self.last_ime_cursor_area {
-                    if let (Some(rect), Some(window)) =
-                        (current_ime_area, &self.window)
-                    {
+                    if let (Some(rect), Some(window)) = (current_ime_area, &self.window) {
                         window.set_ime_cursor_area(
                             rect.origin.x,
                             rect.origin.y,

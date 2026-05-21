@@ -263,8 +263,9 @@ impl Widget for TextWidget {
                 if spans.iter().all(|s| s.text.is_empty()) {
                     return Some(Size::ZERO);
                 }
-                let natural =
-                    ctx.text_engine.shape_rich(spans, font_size, line_height, None);
+                let natural = ctx
+                    .text_engine
+                    .shape_rich(spans, font_size, line_height, None);
                 let shaped = if let Some(aw) = available_width {
                     if natural.width > aw {
                         ctx.text_engine
@@ -320,9 +321,9 @@ impl Widget for TextWidget {
         if spans.iter().all(|s| s.text.is_empty()) {
             return;
         }
-        let shaped = ctx
-            .text_engine
-            .shape_rich(spans, font_size, line_height, Some(layout.size.width));
+        let shaped =
+            ctx.text_engine
+                .shape_rich(spans, font_size, line_height, Some(layout.size.width));
         for glyph in &shaped.glyphs {
             if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                 ctx.draw_glyph(
@@ -364,9 +365,9 @@ fn paint_plain(
         // slop on the right edge can't bleed past the row.
         ctx.push_clip(layout);
 
-        let natural =
-            ctx.text_engine
-                .shape_text_attrs(&text, font_size, line_height, None, attrs);
+        let natural = ctx
+            .text_engine
+            .shape_text_attrs(&text, font_size, line_height, None, attrs);
         let to_paint = if natural.width <= layout.size.width {
             natural
         } else {

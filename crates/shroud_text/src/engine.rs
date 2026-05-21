@@ -1,7 +1,7 @@
 //! Core text engine: shaping + rasterization.
 
 use crate::attrs::TextAttrs;
-use crate::span::{cosmic_to_shroud, shroud_to_cosmic, TextSpan};
+use crate::span::{TextSpan, cosmic_to_shroud, shroud_to_cosmic};
 use cosmic_text::{Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
 use shroud_core::Color;
 
@@ -98,7 +98,13 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> ShapedText {
-        self.shape_text_attrs(text, font_size, line_height, max_width, &TextAttrs::default())
+        self.shape_text_attrs(
+            text,
+            font_size,
+            line_height,
+            max_width,
+            &TextAttrs::default(),
+        )
     }
 
     /// Shape a text string into positioned glyphs with the given font

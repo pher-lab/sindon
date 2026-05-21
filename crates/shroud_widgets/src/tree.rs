@@ -731,7 +731,9 @@ impl WidgetTree {
                 .and_then(|n| n.parent)
                 .map(|p| Self::is_scroll_view_idx(&self.nodes, p))
                 .unwrap_or(false);
-            let Some(node) = self.nodes[i].as_mut() else { continue };
+            let Some(node) = self.nodes[i].as_mut() else {
+                continue;
+            };
             let vis = node.widget.visible();
             let mut style = node.widget.style();
             if parent_is_scroll {

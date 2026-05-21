@@ -36,10 +36,11 @@ use shroud_render::{DecodedImage, ImageError};
 /// Mirrors CSS `object-fit`. Source pixels are never resampled to a
 /// different image — the GPU does bilinear sampling at draw time, so
 /// "fit" only affects the destination rect.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum ImageFit {
     /// Scale uniformly to fit inside the box, preserving aspect ratio.
     /// Leaves letterbox bars when the aspect ratios differ. Default.
+    #[default]
     Contain,
     /// Scale uniformly to cover the box, preserving aspect ratio. Crops
     /// the overflowing axis (paint pushes a clip equal to the layout
@@ -50,12 +51,6 @@ pub enum ImageFit {
     /// Use intrinsic decoded dimensions, centered. Clips to the layout
     /// rect if the image is larger than the box.
     None,
-}
-
-impl Default for ImageFit {
-    fn default() -> Self {
-        ImageFit::Contain
-    }
 }
 
 /// Image widget. Construct with [`Image::from_bytes`].
@@ -130,11 +125,7 @@ impl Image {
     /// is just defense in depth.
     fn aspect(&self) -> f32 {
         let (w, h) = self.intrinsic_size();
-        if h == 0.0 {
-            1.0
-        } else {
-            w / h
-        }
+        if h == 0.0 { 1.0 } else { w / h }
     }
 
     /// Resolve the size the widget reports to layout. Honors explicit

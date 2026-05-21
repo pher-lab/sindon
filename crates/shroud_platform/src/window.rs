@@ -128,7 +128,6 @@ impl PlatformWindow {
     pub fn system_theme(&self) -> Option<SystemTheme> {
         self.window.theme().map(SystemTheme::from_winit)
     }
-
 }
 
 /// Best-effort IME bring-up for the given window on Windows.

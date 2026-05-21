@@ -225,7 +225,11 @@ impl FlexStyle {
     /// or any row of `Container::row()` children where the row should grow
     /// vertically rather than push content off-screen horizontally.
     pub fn flex_wrap(mut self, wrap: bool) -> Self {
-        self.style.flex_wrap = if wrap { FlexWrap::Wrap } else { FlexWrap::NoWrap };
+        self.style.flex_wrap = if wrap {
+            FlexWrap::Wrap
+        } else {
+            FlexWrap::NoWrap
+        };
         self
     }
 

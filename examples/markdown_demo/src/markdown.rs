@@ -83,9 +83,8 @@ pub fn render(tree: &mut WidgetTree, parent: usize, source: &str) {
 fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: usize) -> usize {
     match &events[start] {
         Event::Start(Tag::Heading { level, .. }) => {
-            let (runs, end) = collect_inline(events, start + 1, |t| {
-                matches!(t, TagEnd::Heading(_))
-            });
+            let (runs, end) =
+                collect_inline(events, start + 1, |t| matches!(t, TagEnd::Heading(_)));
             let size = match level {
                 HeadingLevel::H1 => 32.0,
                 HeadingLevel::H2 => 26.0,
@@ -96,9 +95,7 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
             end + 1
         }
         Event::Start(Tag::Paragraph) => {
-            let (runs, end) = collect_inline(events, start + 1, |t| {
-                matches!(t, TagEnd::Paragraph)
-            });
+            let (runs, end) = collect_inline(events, start + 1, |t| matches!(t, TagEnd::Paragraph));
             emit_inline_block(tree, parent, runs, None);
             end + 1
         }
@@ -113,11 +110,11 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
             // (no basis) or overflows to natural text width (with `grow` but
             // no zero basis), and the bar ends up squeezed or invisibly short.
             let row = tree.add_child(parent, Container::row().gap(12.0));
-            tree.add_child(row, Container::column().width(4.0).background(COLOR_QUOTE_BAR));
-            let body = tree.add_child(
+            tree.add_child(
                 row,
-                Container::column().gap(8.0).flex_basis(0.0).grow(1.0),
+                Container::column().width(4.0).background(COLOR_QUOTE_BAR),
             );
+            let body = tree.add_child(row, Container::column().gap(8.0).flex_basis(0.0).grow(1.0));
             let mut i = start + 1;
             let mut depth = 1;
             let inner_start = i;
@@ -195,10 +192,8 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
                         // Same `flex: 1 1 0` shape as the blockquote body —
                         // long list items should wrap to the row's leftover
                         // width, not push the marker / overflow horizontally.
-                        let item_body = tree.add_child(
-                            row,
-                            Container::column().gap(4.0).flex_basis(0.0).grow(1.0),
-                        );
+                        let item_body = tree
+                            .add_child(row, Container::column().gap(4.0).flex_basis(0.0).grow(1.0));
                         i = render_list_item(tree, item_body, events, i + 1);
                     }
                     Event::End(TagEnd::List(_)) => break,
@@ -219,12 +214,7 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
 /// Render the inside of a `<li>` — typically one paragraph, sometimes
 /// nested blocks (sublists). Returns the index *after* the closing
 /// `TagEnd::Item`.
-fn render_list_item(
-    tree: &mut WidgetTree,
-    parent: usize,
-    events: &[Event],
-    start: usize,
-) -> usize {
+fn render_list_item(tree: &mut WidgetTree, parent: usize, events: &[Event], start: usize) -> usize {
     let mut i = start;
     while i < events.len() {
         match &events[i] {
@@ -232,18 +222,20 @@ fn render_list_item(
             // pulldown-cmark wraps loose item text in a paragraph; tight
             // lists emit raw inline events directly inside Item.
             Event::Start(Tag::Paragraph) => {
-                let (runs, end) = collect_inline(events, i + 1, |t| {
-                    matches!(t, TagEnd::Paragraph)
-                });
+                let (runs, end) = collect_inline(events, i + 1, |t| matches!(t, TagEnd::Paragraph));
                 emit_inline_block(tree, parent, runs, None);
                 i = end + 1;
             }
-            Event::Text(_) | Event::Code(_) | Event::Start(Tag::Emphasis | Tag::Strong | Tag::Link { .. }) => {
+            Event::Text(_)
+            | Event::Code(_)
+            | Event::Start(Tag::Emphasis | Tag::Strong | Tag::Link { .. }) => {
                 let (runs, end) = collect_inline(events, i, |t| matches!(t, TagEnd::Item));
                 emit_inline_block(tree, parent, runs, None);
                 i = end;
             }
-            Event::Start(Tag::List(_)) | Event::Start(Tag::CodeBlock(_)) | Event::Start(Tag::BlockQuote) => {
+            Event::Start(Tag::List(_))
+            | Event::Start(Tag::CodeBlock(_))
+            | Event::Start(Tag::BlockQuote) => {
                 i = render_block(tree, parent, events, i);
             }
             _ => i += 1,
@@ -268,7 +260,10 @@ fn collect_inline(
             Event::End(t) if is_end(t) => return (runs, i),
             Event::Text(s) => {
                 let style = *style_stack.last().unwrap();
-                runs.push(InlineRun { text: s.to_string(), style });
+                runs.push(InlineRun {
+                    text: s.to_string(),
+                    style,
+                });
             }
             Event::Code(s) => runs.push(InlineRun {
                 text: s.to_string(),
@@ -307,8 +302,7 @@ fn emit_inline_block(
     runs: Vec<InlineRun>,
     font_size: Option<f32>,
 ) {
-    let single = matches!(runs.len(), 0 | 1)
-        || runs.iter().all(|r| r.style == InlineStyle::Plain);
+    let single = matches!(runs.len(), 0 | 1) || runs.iter().all(|r| r.style == InlineStyle::Plain);
     if single {
         let text: String = runs.into_iter().map(|r| r.text).collect();
         let mut w = TextWidget::new(text).color(COLOR_BODY);

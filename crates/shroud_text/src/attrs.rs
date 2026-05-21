@@ -12,9 +12,10 @@ pub use cosmic_text::{Style as FontStyle, Weight as FontWeight};
 /// map to cosmic-text's generic families and resolve against whatever the
 /// platform considers a font of that class. `Named` picks a specific family by
 /// name (e.g. `"Noto Sans JP"`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum TextFamily {
     Serif,
+    #[default]
     SansSerif,
     Monospace,
     Cursive,
@@ -22,12 +23,6 @@ pub enum TextFamily {
     /// A specific font family by name. Falls back to the platform default if
     /// the named family is not installed.
     Named(String),
-}
-
-impl Default for TextFamily {
-    fn default() -> Self {
-        Self::SansSerif
-    }
 }
 
 impl TextFamily {

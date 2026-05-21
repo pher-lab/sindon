@@ -187,14 +187,11 @@ impl Widget for Button {
 
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
-        let mut style = FlexStyle::new()
-            .padding(8.0)
-            .center();
+        let mut style = FlexStyle::new().padding(8.0).center();
         if self.flex_grow > 0.0 {
             style = style.grow(self.flex_grow);
         }
-        style
-            .min_height(font_size + 16.0)
+        style.min_height(font_size + 16.0)
     }
 
     fn visible(&self) -> bool {

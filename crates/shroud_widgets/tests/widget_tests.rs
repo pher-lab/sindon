@@ -113,8 +113,7 @@ fn text_widget_skips_paint_when_layout_width_is_zero() {
     // only the width to recreate the overflow scenario.
     let _text = tree.add_child(
         root,
-        TextWidget::new("This long string would overflow if painted unwrapped.")
-            .font_size(16.0),
+        TextWidget::new("This long string would overflow if painted unwrapped.").font_size(16.0),
     );
     // Pre-flight: a normal layout should produce glyphs.
     tree.compute_layout(400.0, 300.0);
@@ -133,8 +132,7 @@ fn text_widget_skips_paint_when_layout_width_is_zero() {
     let root = tree.set_root(Container::column().width(0.0).height(300.0));
     let _text = tree.add_child(
         root,
-        TextWidget::new("This long string would overflow if painted unwrapped.")
-            .font_size(16.0),
+        TextWidget::new("This long string would overflow if painted unwrapped.").font_size(16.0),
     );
     tree.compute_layout(400.0, 300.0);
     let mut ctx = PaintContext::default();
@@ -157,14 +155,8 @@ fn blockquote_body_flex_basis_zero_grow_one_wraps_long_text() {
     let root = tree.set_root(Container::column().width(720.0).height(600.0).padding(24.0));
     let body_col = tree.add_child(root, Container::column().width_full().gap(12.0));
     let row = tree.add_child(body_col, Container::row().gap(12.0));
-    let bar = tree.add_child(
-        row,
-        Container::column().width(4.0).background(Color::WHITE),
-    );
-    let body = tree.add_child(
-        row,
-        Container::column().gap(8.0).flex_basis(0.0).grow(1.0),
-    );
+    let bar = tree.add_child(row, Container::column().width(4.0).background(Color::WHITE));
+    let body = tree.add_child(row, Container::column().gap(8.0).flex_basis(0.0).grow(1.0));
     let text = tree.add_child(
         body,
         TextWidget::new(
@@ -1243,12 +1235,7 @@ fn scroll_view_auto_content_height_includes_bottom_padding() {
     // fully scrolled viewport leaves the bottom padding flush with the last
     // child (matching what a static `content_height` caller used to hand-tune).
     let mut tree = WidgetTree::new();
-    let root = tree.set_root(
-        ScrollView::new()
-            .width(200.0)
-            .height(300.0)
-            .padding(20.0),
-    );
+    let root = tree.set_root(ScrollView::new().width(200.0).height(300.0).padding(20.0));
     tree.add_child(root, Container::column().width(50.0).height(500.0));
     tree.compute_layout(400.0, 400.0);
 
@@ -1504,18 +1491,12 @@ fn text_widget_monospace_normalizes_iii_and_mmm_widths() {
     );
 
     // Contrast: without `.monospace()` the same chars shape proportionally.
-    let iii_prop = <TextWidget as Widget>::measure(
-        &TextWidget::new("iii").font_size(16.0),
-        None,
-        &mut ctx,
-    )
-    .unwrap();
-    let mmm_prop = <TextWidget as Widget>::measure(
-        &TextWidget::new("mmm").font_size(16.0),
-        None,
-        &mut ctx,
-    )
-    .unwrap();
+    let iii_prop =
+        <TextWidget as Widget>::measure(&TextWidget::new("iii").font_size(16.0), None, &mut ctx)
+            .unwrap();
+    let mmm_prop =
+        <TextWidget as Widget>::measure(&TextWidget::new("mmm").font_size(16.0), None, &mut ctx)
+            .unwrap();
     assert!(
         iii_prop.width < mmm_prop.width * 0.6,
         "proportional widget iii ({}) should be much narrower than mmm ({})",
@@ -1555,11 +1536,7 @@ fn text_widget_rich_total_width_matches_plain_concat() {
     )
     .unwrap();
     let rich = <TextWidget as Widget>::measure(
-        &TextWidget::rich(vec![
-            TextSpan::new("Hello "),
-            TextSpan::new("world"),
-        ])
-        .font_size(16.0),
+        &TextWidget::rich(vec![TextSpan::new("Hello "), TextSpan::new("world")]).font_size(16.0),
         None,
         &mut ctx,
     )
