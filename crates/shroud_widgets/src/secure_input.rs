@@ -95,7 +95,7 @@ pub struct SecureInput {
 
 impl SecureInput {
     /// Create a new empty secure input with the default capacity
-    /// ([`DEFAULT_SECURE_INPUT_MAX_BYTES`]). Use
+    /// (`DEFAULT_SECURE_INPUT_MAX_BYTES`). Use
     /// [`max_bytes`](Self::max_bytes) to override.
     pub fn new() -> Self {
         Self::with_max_bytes(DEFAULT_SECURE_INPUT_MAX_BYTES)

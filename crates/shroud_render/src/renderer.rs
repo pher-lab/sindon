@@ -133,7 +133,7 @@ pub struct DrawRect {
 ///
 /// `image` is shared via `Arc` so multiple paints of the same asset
 /// reference identical bytes and resolve to a single GPU texture in the
-/// renderer's [`ImageCache`].
+/// renderer's `ImageCache`.
 ///
 /// `tint` is multiplied with the sampled RGBA; pass `Color::WHITE` for an
 /// unmodified image. Use the alpha component of `tint` for cross-fade or

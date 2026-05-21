@@ -40,7 +40,7 @@ impl FocusManager {
     }
 
     /// Set the focused widget. Returns the previously focused index so
-    /// the caller (typically [`WidgetTree`]) can dispatch `FocusLost`
+    /// the caller (typically `WidgetTree`) can dispatch `FocusLost`
     /// to it before dispatching `FocusGained` to the new one.
     pub fn set(&mut self, idx: Option<usize>) -> Option<usize> {
         let prev = self.focused;

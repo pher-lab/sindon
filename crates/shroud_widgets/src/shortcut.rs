@@ -1,6 +1,6 @@
 //! App-level keyboard shortcut routing.
 //!
-//! Shortcuts are registered against [`AppScope::on_shortcut`] (in
+//! Shortcuts are registered against `AppScope::on_shortcut` (in
 //! `shroud_app`) and dispatched by the widget tree *before* the
 //! Escape/Tab interceptors, so an app-level binding wins over both layer
 //! dismiss and focus navigation.
@@ -13,7 +13,7 @@
 //!   input is focused or a non-trapping modal is up. Right for
 //!   lock/panic/quit.
 //! - [`ShortcutScope::WhenNoTextInput`] (default) — suppressed while the
-//!   focused widget reports [`Widget::accepts_text`] true. Right for
+//!   focused widget reports `Widget::accepts_text` true. Right for
 //!   shortcuts like Ctrl+N where the literal key in a textarea should
 //!   reach the widget instead.
 //!
@@ -139,7 +139,7 @@ impl ShortcutRouter {
     /// Register a binding and return its handle.
     ///
     /// Bindings of raw `Tab`/`Enter`/`Escape` (no modifier) are stored
-    /// but never fire — [`try_dispatch`](Self::try_dispatch) skips them
+    /// but never fire — `try_dispatch` skips them
     /// so focus nav and layer dismiss keep working. A `debug_assert`
     /// trips in debug builds so the bad registration surfaces early.
     pub fn register<F>(&mut self, shortcut: Shortcut, handler: F) -> ShortcutId

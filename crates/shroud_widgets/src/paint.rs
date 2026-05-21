@@ -235,7 +235,7 @@ impl PaintContext {
     }
 
     /// Record where the focused text widget's caret currently sits, in
-    /// the same widget-paint coordinate space as [`fill_rect`]
+    /// the same widget-paint coordinate space as `fill_rect`
     /// (i.e. the active offset stack is applied here just like draw
     /// calls). The IME then anchors its candidate window near this rect
     /// instead of falling back to a screen-corner default.
@@ -258,7 +258,7 @@ impl PaintContext {
         ));
     }
 
-    /// Read back the caret rect set by [`set_ime_cursor_area`] for the
+    /// Read back the caret rect set by `set_ime_cursor_area` for the
     /// current frame. `None` if no focused text widget recorded one.
     pub fn ime_cursor_area(&self) -> Option<Rect> {
         self.ime_cursor_area

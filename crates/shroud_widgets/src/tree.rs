@@ -754,7 +754,7 @@ impl WidgetTree {
     ///
     /// Each active overlay layer is laid out as its own independent root
     /// against the viewport; the resulting size + anchor-derived offset
-    /// is cached on the [`LayerEntry`] for paint and event dispatch.
+    /// is cached on the `LayerEntry` for paint and event dispatch.
     pub fn compute_layout_with_measure(
         &mut self,
         width: f32,
