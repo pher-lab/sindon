@@ -363,11 +363,23 @@ impl Widget for SecureInput {
                 } else {
                     text_x + shaped.width
                 };
-                ctx.fill_rect(Rect::new(cursor_x, text_y, 2.0, font_size), text_color);
+                let caret = Rect::new(cursor_x, text_y, 2.0, font_size);
+                ctx.fill_rect(caret, text_color);
+                // Anchor IME candidate window at the caret. The masked
+                // glyphs (●●●) don't leak the secret to the OS — only
+                // the rect coords go through this API.
+                ctx.set_ime_cursor_area(caret);
             }
         }
 
         if self.focused {
+            // Empty + focused case: no visible caret is painted (matches
+            // legacy behavior), but the IME still needs an anchor so the
+            // candidate window appears near the field once typing starts.
+            // Idempotent with the in-branch set above when non-empty.
+            if value.is_empty() {
+                ctx.set_ime_cursor_area(Rect::new(text_x, text_y, 2.0, font_size));
+            }
             ctx.paint_focus_ring(layout, self.focus_ring_color);
         }
     }

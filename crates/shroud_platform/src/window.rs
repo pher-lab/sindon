@@ -4,7 +4,7 @@ use crate::display_protection::{DisplayProtection, DisplayProtectionResult};
 use crate::system_theme::SystemTheme;
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
@@ -99,6 +99,23 @@ impl PlatformWindow {
         if allowed {
             force_attach_ime_windows(&self.window);
         }
+    }
+
+    /// Anchor the OS IME composition / candidate window near the given
+    /// rectangle (in logical window coordinates). Forwards directly to
+    /// winit's [`Window::set_ime_cursor_area`].
+    ///
+    /// shroud calls this once per paint when a text widget is focused —
+    /// the widget writes its caret rect into `PaintContext` via
+    /// `set_ime_cursor_area`, and the event loop forwards the resulting
+    /// `Option<Rect>` here after each render so the IME stays anchored
+    /// to the live caret. Without this the candidate window defaults to
+    /// a screen-corner position on Windows.
+    pub fn set_ime_cursor_area(&self, x: f32, y: f32, width: f32, height: f32) {
+        self.window.set_ime_cursor_area(
+            LogicalPosition::new(x, y),
+            LogicalSize::new(width.max(1.0), height.max(1.0)),
+        );
     }
 
     /// Best-effort snapshot of the OS theme preference for this window.

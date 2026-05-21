@@ -2,7 +2,7 @@ use std::cell::OnceCell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use shroud_core::{Point, Theme};
+use shroud_core::{Point, Rect, Theme};
 use shroud_platform::{PlatformWindow, SecureClipboard, SystemTheme};
 use shroud_reactive::{Reactive, Signal};
 use shroud_render::renderer::Renderer;
@@ -459,6 +459,7 @@ impl App {
             cursor_position: Point::new(0.0, 0.0),
             frame_hook,
             next_tick: None,
+            last_ime_cursor_area: None,
         };
 
         event_loop.run_app(&mut handler).expect("event loop error");
@@ -586,6 +587,12 @@ struct ShroudEventLoop {
     /// even when unrelated events (mouse moves, focus changes) cause
     /// extra `about_to_wait` calls.
     next_tick: Option<Instant>,
+    /// Most recent IME cursor area pushed to the platform window.
+    /// Used to dedupe redundant `set_ime_cursor_area` calls when the
+    /// same caret rect gets repainted across many frames (mouse moves,
+    /// idle repaints) without the caret actually moving. `None` means
+    /// nothing has been pushed yet this session.
+    last_ime_cursor_area: Option<Rect>,
 }
 
 impl ShroudEventLoop {
@@ -935,6 +942,8 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 paint_ctx.clear();
                 tree.paint(paint_ctx);
 
+                let current_ime_area = paint_ctx.ime_cursor_area();
+
                 let renderer = self.renderer.as_mut().unwrap();
                 match renderer.render(
                     paint_ctx.theme.colors.background,
@@ -948,6 +957,25 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     Err(e) => {
                         log::error!("Render error: {:?}", e);
                     }
+                }
+
+                // Forward the focused text widget's caret rect to the OS
+                // so the IME candidate / composition window anchors near
+                // the cursor instead of defaulting to a screen corner.
+                // Dedupe redundant pushes — most frames repaint without
+                // the caret moving (mouse hover, theme reads, etc.).
+                if current_ime_area != self.last_ime_cursor_area {
+                    if let (Some(rect), Some(window)) =
+                        (current_ime_area, &self.window)
+                    {
+                        window.set_ime_cursor_area(
+                            rect.origin.x,
+                            rect.origin.y,
+                            rect.size.width,
+                            rect.size.height,
+                        );
+                    }
+                    self.last_ime_cursor_area = current_ime_area;
                 }
             }
 

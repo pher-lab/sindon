@@ -38,6 +38,17 @@ pub struct PaintContext {
     /// so a layer rect never gets overdrawn by the main tree's text.
     /// Empty when no layers were pushed in the current frame.
     layer_starts: Vec<LayerSnapshot>,
+    /// Window-relative rectangle of the next-character / caret area for
+    /// IME composition. The focused text widget writes this during paint
+    /// via [`set_ime_cursor_area`](Self::set_ime_cursor_area); the event
+    /// loop then forwards it to the OS so the IME candidate window
+    /// anchors near the cursor instead of defaulting to a screen corner.
+    ///
+    /// `None` when nothing focused needs IME positioning. Reset to
+    /// `None` on every frame by [`clear`](Self::clear) — the focused
+    /// widget re-establishes it on the very next paint, so a transient
+    /// blip during focus transitions stays one frame at most.
+    ime_cursor_area: Option<Rect>,
 }
 
 impl PaintContext {
@@ -52,6 +63,7 @@ impl PaintContext {
             clip_stack: Vec::new(),
             offset_stack: Vec::new(),
             layer_starts: Vec::new(),
+            ime_cursor_area: None,
         }
     }
 
@@ -222,6 +234,36 @@ impl PaintContext {
         self.fill_rect(Rect::new(ox + width - w, oy, w, height), color);
     }
 
+    /// Record where the focused text widget's caret currently sits, in
+    /// the same widget-paint coordinate space as [`fill_rect`]
+    /// (i.e. the active offset stack is applied here just like draw
+    /// calls). The IME then anchors its candidate window near this rect
+    /// instead of falling back to a screen-corner default.
+    ///
+    /// Called by `Input::paint` / `SecureInput::paint` (and any future
+    /// text widget) when focused. Last-writer-wins within a frame —
+    /// only one input has IME focus at a time, so multiple writes
+    /// shouldn't happen in practice; the contract is "the focused
+    /// widget's caret rect."
+    ///
+    /// The event loop reads [`ime_cursor_area`](Self::ime_cursor_area)
+    /// after paint and forwards the rect to the platform window.
+    pub fn set_ime_cursor_area(&mut self, rect: Rect) {
+        let (ox, oy) = self.current_offset();
+        self.ime_cursor_area = Some(Rect::new(
+            rect.origin.x + ox,
+            rect.origin.y + oy,
+            rect.size.width,
+            rect.size.height,
+        ));
+    }
+
+    /// Read back the caret rect set by [`set_ime_cursor_area`] for the
+    /// current frame. `None` if no focused text widget recorded one.
+    pub fn ime_cursor_area(&self) -> Option<Rect> {
+        self.ime_cursor_area
+    }
+
     /// Clear all accumulated commands.
     pub fn clear(&mut self) {
         self.rects.clear();
@@ -229,11 +271,66 @@ impl PaintContext {
         self.secure_glyphs.clear();
         self.images.clear();
         self.layer_starts.clear();
+        self.ime_cursor_area = None;
     }
 }
 
 impl Default for PaintContext {
     fn default() -> Self {
         Self::new(Theme::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ime_cursor_area_defaults_to_none() {
+        // Fresh PaintContext has nothing anchored — the event loop
+        // relies on this to skip the OS push when nothing focused.
+        let ctx = PaintContext::default();
+        assert_eq!(ctx.ime_cursor_area(), None);
+    }
+
+    #[test]
+    fn ime_cursor_area_round_trips_through_set() {
+        // The setter records the rect verbatim when no offset is active;
+        // the getter hands it back unchanged. Used by the event loop to
+        // diff between frames and dedupe OS calls.
+        let mut ctx = PaintContext::default();
+        ctx.set_ime_cursor_area(Rect::new(10.0, 20.0, 2.0, 16.0));
+        assert_eq!(
+            ctx.ime_cursor_area(),
+            Some(Rect::new(10.0, 20.0, 2.0, 16.0))
+        );
+    }
+
+    #[test]
+    fn ime_cursor_area_applies_current_offset() {
+        // The active offset stack must be folded in just like fill_rect /
+        // draw_glyph — a text widget inside a ScrollView or a layer
+        // reports its caret in widget-local coords, and the OS needs
+        // window-relative coords for the IME anchor to land correctly.
+        let mut ctx = PaintContext::default();
+        ctx.push_offset(100.0, 50.0);
+        ctx.set_ime_cursor_area(Rect::new(10.0, 20.0, 2.0, 16.0));
+        assert_eq!(
+            ctx.ime_cursor_area(),
+            Some(Rect::new(110.0, 70.0, 2.0, 16.0))
+        );
+        ctx.pop_offset();
+    }
+
+    #[test]
+    fn clear_resets_ime_cursor_area() {
+        // Every frame starts fresh — clear() (called by the tree's paint
+        // pass before traversal) must drop the stale anchor so a widget
+        // that lost focus this frame doesn't leave the IME pinned to
+        // last frame's caret.
+        let mut ctx = PaintContext::default();
+        ctx.set_ime_cursor_area(Rect::new(10.0, 20.0, 2.0, 16.0));
+        ctx.clear();
+        assert_eq!(ctx.ime_cursor_area(), None);
     }
 }

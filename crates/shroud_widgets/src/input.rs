@@ -609,7 +609,12 @@ impl Widget for Input {
 
             // Cursor at start when focused and empty
             if self.focused {
-                ctx.fill_rect(Rect::new(text_x, text_y, 2.0, font_size), text_color);
+                let caret = Rect::new(text_x, text_y, 2.0, font_size);
+                ctx.fill_rect(caret, text_color);
+                // Anchor the IME candidate window at the caret. The OS
+                // positions composition UI relative to this rect; without
+                // it Win11 IMEs default to a screen-corner location.
+                ctx.set_ime_cursor_area(caret);
             }
         } else {
             let shaped = ctx
@@ -640,10 +645,12 @@ impl Widget for Input {
                         wrap_width,
                     )
                 };
-                ctx.fill_rect(
-                    Rect::new(text_x + cx, text_y + cy, 2.0, font_size),
-                    text_color,
-                );
+                let caret = Rect::new(text_x + cx, text_y + cy, 2.0, font_size);
+                ctx.fill_rect(caret, text_color);
+                // See the empty-buffer branch above for the rationale —
+                // every focused paint re-anchors the IME so it follows
+                // the caret as the user types or arrow-keys around.
+                ctx.set_ime_cursor_area(caret);
             }
         }
 
