@@ -1,0 +1,6 @@
+[build]
+# Match CI's strictness so rustdoc lints surface locally before they
+# fail CI. CI runs `cargo doc --no-deps --workspace` with this flag in
+# its env block; mirroring it here closes the local/CI gap that lets
+# broken intra-doc / private-link warnings accumulate silently.
+rustdocflags = ["-D", "warnings"]
