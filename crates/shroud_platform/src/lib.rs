@@ -6,7 +6,7 @@
 //!   macOS/Linux are no-ops (no equivalent API)
 //! - [`dialog`]: native file/folder dialogs (`rfd` wrapper)
 //! - [`storage`]: per-user JSON config helpers (atomic write via rename)
-//! - [`system_locale`]: best-effort OS locale tag (BCP-47)
+//! - [`system_locale()`]: best-effort OS locale tag (BCP-47)
 //! - [`system_theme`]: OS light/dark preference enum (paired with
 //!   `AppScope::system_theme` for reactive updates)
 

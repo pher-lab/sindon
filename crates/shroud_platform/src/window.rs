@@ -87,8 +87,9 @@ impl PlatformWindow {
     /// On Windows we also call `ImmSetOpenStatus(true)` so a freshly focused
     /// window with a Japanese keyboard layout starts composing immediately
     /// instead of waiting for the user to press 半角/全角 — see
-    /// [`force_attach_ime_windows`] for the IMM32 specifics. The composition
-    /// path itself only works when [`App::exploit_mitigation`] is left at its
+    /// `force_attach_ime_windows` (below, cfg(windows)) for the IMM32
+    /// specifics. The composition path itself only works when
+    /// `App::exploit_mitigation` (in `shroud_app`) is left at its
     /// default (`false`); turning that on activates
     /// `ProcessExtensionPointDisablePolicy`, which blocks the extension-DLL
     /// plumbing the IME relies on. The trade-off is documented on that
