@@ -18,9 +18,9 @@ use shroud_text::TextEngine;
 
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Memory::{
-    MEM_COMMIT, MEM_IMAGE, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ,
-    PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS,
-    PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQueryEx,
+    MEM_COMMIT, MEM_IMAGE, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+    PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
+    PAGE_WRITECOPY, VirtualQueryEx,
 };
 use windows::Win32::System::Threading::GetCurrentProcess;
 
@@ -107,9 +107,7 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
     while addr < max_addr {
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
         let mbi_size = std::mem::size_of::<MEMORY_BASIC_INFORMATION>();
-        let queried = unsafe {
-            VirtualQueryEx(hproc, Some(addr as *const _), &mut mbi, mbi_size)
-        };
+        let queried = unsafe { VirtualQueryEx(hproc, Some(addr as *const _), &mut mbi, mbi_size) };
         if queried == 0 {
             break;
         }
@@ -185,8 +183,7 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
 #[test]
 fn cosmic_text_residue_after_drop() {
     let canary = build_canary();
-    let canary_str = std::str::from_utf8(&canary)
-        .expect("canary is valid ASCII by construction");
+    let canary_str = std::str::from_utf8(&canary).expect("canary is valid ASCII by construction");
 
     // Pre-allocate the scanner so we don't create/drop the scratch
     // buffer (and its containing region) between phases.
@@ -223,8 +220,9 @@ fn cosmic_text_residue_after_drop() {
 
     // -- Report --------------------------------------------------------------
     let initial_copies = live.matches.saturating_sub(baseline.matches);
-    let after_engine_only_residue =
-        initial_residue_floor.matches.saturating_sub(baseline.matches);
+    let after_engine_only_residue = initial_residue_floor
+        .matches
+        .saturating_sub(baseline.matches);
     let final_residue = after_drop.matches.saturating_sub(baseline.matches);
 
     eprintln!("=== cosmic-text residue verification ===");
@@ -249,9 +247,7 @@ fn cosmic_text_residue_after_drop() {
     );
     eprintln!(
         "  private={} image={} mapped={}",
-        after_drop.matches_in_private,
-        after_drop.matches_in_image,
-        after_drop.matches_in_mapped
+        after_drop.matches_in_private, after_drop.matches_in_image, after_drop.matches_in_mapped
     );
     eprintln!(
         "regions scanned: {}, bytes scanned: {:.1} MiB",
