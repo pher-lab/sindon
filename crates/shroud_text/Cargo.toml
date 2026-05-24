@@ -9,3 +9,10 @@ description = "Text rendering for the shroud UI framework"
 shroud_core = { workspace = true }
 shroud_security = { workspace = true }
 cosmic-text = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.61", features = [
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+] }

@@ -3135,6 +3135,7 @@ dependencies = [
  "cosmic-text",
  "shroud_core",
  "shroud_security",
+ "windows 0.61.3",
 ]
 
 [[package]]
