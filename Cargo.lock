@@ -3149,6 +3149,7 @@ dependencies = [
  "shroud_render",
  "shroud_security",
  "shroud_text",
+ "windows 0.61.3",
 ]
 
 [[package]]
