@@ -49,6 +49,21 @@ pub struct PaintContext {
     /// widget re-establishes it on the very next paint, so a transient
     /// blip during focus transitions stays one frame at most.
     ime_cursor_area: Option<Rect>,
+    /// Whether any widget painted this frame asked the OS IME to stay
+    /// off for the rest of the frame.
+    ///
+    /// `SecureInput` flips this when focused so the OS-level IME is
+    /// disconnected from the window while a password / master key is
+    /// being typed — keystrokes bypass IME entirely and arrive as raw
+    /// characters instead of going through a composition window an
+    /// IME engine (or a malicious replacement IME) could observe.
+    ///
+    /// Default `false` (allow IME). Reset every frame by
+    /// [`clear`](Self::clear) so a widget that loses focus this frame
+    /// gives the IME back next frame; the event loop folds the value
+    /// into a `set_ime_allowed(bool)` push after paint with the same
+    /// dedup discipline used for [`ime_cursor_area`](Self::ime_cursor_area).
+    suppress_ime: bool,
 }
 
 impl PaintContext {
@@ -64,6 +79,7 @@ impl PaintContext {
             offset_stack: Vec::new(),
             layer_starts: Vec::new(),
             ime_cursor_area: None,
+            suppress_ime: false,
         }
     }
 
@@ -264,6 +280,31 @@ impl PaintContext {
         self.ime_cursor_area
     }
 
+    /// Ask the event loop to disconnect the OS IME from this window for
+    /// the rest of the current frame.
+    ///
+    /// Called by [`SecureInput::paint`](crate::secure_input::SecureInput)
+    /// when focused so a password / master-key entry bypasses the IME
+    /// entirely — keystrokes arrive as raw chars rather than going through
+    /// a composition window the IME engine (or a malicious replacement
+    /// IME) could observe. Idempotent within a frame; the event loop
+    /// reads back via [`ime_suppressed`](Self::ime_suppressed) once paint
+    /// finishes and pushes the result through `set_ime_allowed(!suppress)`.
+    ///
+    /// Other text widgets (`Input`, future `TextArea`) deliberately do
+    /// not call this — IME stays live for them so CJK users can type
+    /// composed characters into notes and similar plain text fields.
+    pub fn suppress_ime(&mut self) {
+        self.suppress_ime = true;
+    }
+
+    /// Read back whether any widget asked for IME suppression this frame.
+    /// Consumed by the event loop after paint to drive a deduped
+    /// `set_ime_allowed(bool)` push on the platform window.
+    pub fn ime_suppressed(&self) -> bool {
+        self.suppress_ime
+    }
+
     /// Clear all accumulated commands.
     pub fn clear(&mut self) {
         self.rects.clear();
@@ -272,6 +313,7 @@ impl PaintContext {
         self.images.clear();
         self.layer_starts.clear();
         self.ime_cursor_area = None;
+        self.suppress_ime = false;
     }
 }
 
@@ -332,5 +374,46 @@ mod tests {
         ctx.set_ime_cursor_area(Rect::new(10.0, 20.0, 2.0, 16.0));
         ctx.clear();
         assert_eq!(ctx.ime_cursor_area(), None);
+    }
+
+    #[test]
+    fn ime_suppressed_defaults_to_false() {
+        // Fresh PaintContext leaves IME enabled — the event loop reads
+        // this on every paint to decide whether to push set_ime_allowed,
+        // so the default must match "IME on" (the platform's start state
+        // after resumed()).
+        let ctx = PaintContext::default();
+        assert!(!ctx.ime_suppressed());
+    }
+
+    #[test]
+    fn suppress_ime_flips_the_flag() {
+        // SecureInput.paint calls this when focused; the value is then
+        // read by the event loop after paint via ime_suppressed().
+        let mut ctx = PaintContext::default();
+        ctx.suppress_ime();
+        assert!(ctx.ime_suppressed());
+    }
+
+    #[test]
+    fn suppress_ime_is_idempotent_within_a_frame() {
+        // Two SecureInputs in the same tree (or paint passing through the
+        // widget twice via some future double-dispatch) must not toggle
+        // the flag back off — only `clear()` resets it.
+        let mut ctx = PaintContext::default();
+        ctx.suppress_ime();
+        ctx.suppress_ime();
+        assert!(ctx.ime_suppressed());
+    }
+
+    #[test]
+    fn clear_resets_suppress_ime() {
+        // Every frame starts with IME re-allowed. Without this, a
+        // SecureInput that lost focus would still leave the OS IME
+        // disabled because no widget would re-assert "allow".
+        let mut ctx = PaintContext::default();
+        ctx.suppress_ime();
+        ctx.clear();
+        assert!(!ctx.ime_suppressed());
     }
 }

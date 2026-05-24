@@ -460,6 +460,7 @@ impl App {
             frame_hook,
             next_tick: None,
             last_ime_cursor_area: None,
+            last_ime_allowed: None,
         };
 
         event_loop.run_app(&mut handler).expect("event loop error");
@@ -593,6 +594,14 @@ struct ShroudEventLoop {
     /// idle repaints) without the caret actually moving. `None` means
     /// nothing has been pushed yet this session.
     last_ime_cursor_area: Option<Rect>,
+    /// Most recent `set_ime_allowed` value pushed to the platform
+    /// window. Tracks the Tier 2 IME-bypass state so we only call
+    /// `set_ime_allowed` when the desired value actually flips —
+    /// otherwise every paint with a focused `SecureInput` would push
+    /// the same `false` to the OS, and every paint without one would
+    /// push the same `true`. `None` means nothing has been pushed yet;
+    /// the first paint always pushes whatever the current focus dictates.
+    last_ime_allowed: Option<bool>,
 }
 
 impl ShroudEventLoop {
@@ -754,10 +763,18 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             // so calling `set_ime_allowed(true)` again here re-runs both
             // the winit IACE_DEFAULT path and our `ImmSetOpenStatus(true)`
             // override, keeping IME live across focus loss/regain.
+            //
+            // We also record the value we just pushed in `last_ime_allowed`
+            // so the Tier 2 dedup in `RedrawRequested` sees the platform's
+            // current state — otherwise a focused SecureInput's
+            // `target_allowed = false` would match a stale `Some(false)`
+            // from before the focus loss and skip the re-disable push,
+            // leaving the OS IME alive while a password is being typed.
             WindowEvent::Focused(true) => {
                 if let Some(window) = &self.window {
                     window.set_ime_allowed(true);
                 }
+                self.last_ime_allowed = Some(true);
             }
 
             WindowEvent::Resized(size) => {
@@ -971,6 +988,19 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                         );
                     }
                     self.last_ime_cursor_area = current_ime_area;
+                }
+
+                // Tier 2 IME bypass: drive `set_ime_allowed` from the
+                // paint result so a focused SecureInput disconnects the
+                // OS IME, and any other focus (or no focus) leaves it
+                // alive. Deduped against the last value we pushed so
+                // most frames are a no-op.
+                let target_allowed = !paint_ctx.ime_suppressed();
+                if self.last_ime_allowed != Some(target_allowed) {
+                    if let Some(window) = &self.window {
+                        window.set_ime_allowed(target_allowed);
+                    }
+                    self.last_ime_allowed = Some(target_allowed);
                 }
             }
 

@@ -246,6 +246,87 @@ fn secure_input_renders_masked() {
     );
 }
 
+// ── Tier 2 IME bypass ─────────────────────────────────────────────
+
+#[test]
+fn focused_secure_input_suppresses_ime() {
+    // Tier 2: a focused SecureInput asks the event loop to disconnect
+    // the OS IME from the window so keystrokes bypass the composition
+    // window an IME engine (or a malicious replacement IME) could
+    // observe. The event loop reads `ime_suppressed()` after paint and
+    // pushes `set_ime_allowed(false)` to the platform window.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let input_idx = tree.add_child(root, SecureInput::new());
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ctx = EventContext::new();
+    let rect = tree.layout_rect(input_idx);
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    let mut paint_ctx = PaintContext::default();
+    tree.paint(&mut paint_ctx);
+    assert!(
+        paint_ctx.ime_suppressed(),
+        "focused SecureInput must suppress IME"
+    );
+}
+
+#[test]
+fn unfocused_secure_input_leaves_ime_alone() {
+    // Without focus the widget still paints (placeholder + border) but
+    // does not ask for IME suppression. The event loop's dedup then
+    // leaves IME in whatever state the previous frame left it.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let _ = tree.add_child(root, SecureInput::new());
+    tree.compute_layout(800.0, 600.0);
+
+    let mut paint_ctx = PaintContext::default();
+    tree.paint(&mut paint_ctx);
+    assert!(
+        !paint_ctx.ime_suppressed(),
+        "unfocused SecureInput must not suppress IME"
+    );
+}
+
+#[test]
+fn focused_secure_input_does_not_set_ime_cursor_area() {
+    // Tier 2 companion: while IME is disabled there is no candidate
+    // window to anchor, so SecureInput must stop pushing a cursor area
+    // every frame. Skipping the push also avoids leaking the caret
+    // position to an OS surface that has nothing to do during password
+    // entry.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let input_idx = tree.add_child(root, SecureInput::new());
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ctx = EventContext::new();
+    let rect = tree.layout_rect(input_idx);
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    let mut paint_ctx = PaintContext::default();
+    tree.paint(&mut paint_ctx);
+    assert_eq!(
+        paint_ctx.ime_cursor_area(),
+        None,
+        "focused SecureInput must not set IME cursor area (IME is off)"
+    );
+}
+
 // ── SecurityLevel propagation ─────────────────────────────────────
 
 #[test]

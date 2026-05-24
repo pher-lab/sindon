@@ -633,6 +633,37 @@ fn input_on_change_fires() {
 }
 
 #[test]
+fn focused_input_does_not_suppress_ime() {
+    // Tier 2 regression: only `SecureInput` is allowed to disconnect the
+    // OS IME (see `secure_widget_tests::focused_secure_input_suppresses_ime`).
+    // Plain `Input` must leave IME alive so CJK users can keep typing
+    // composed characters into note bodies, search fields, and similar
+    // plain-text inputs. If this test ever fails, Japanese / Chinese /
+    // Korean input is silently broken anywhere a regular Input has focus.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let input_idx = tree.add_child(root, Input::new());
+    tree.compute_layout(400.0, 100.0);
+
+    let mut event_ctx = EventContext::new();
+    let rect = tree.layout_rect(input_idx);
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    let mut paint_ctx = PaintContext::default();
+    tree.paint(&mut paint_ctx);
+    assert!(
+        !paint_ctx.ime_suppressed(),
+        "focused Input must not suppress IME (would break CJK typing)"
+    );
+}
+
+#[test]
 fn input_on_submit_fires() {
     let submitted = Rc::new(Cell::new(false));
     let submitted2 = submitted.clone();
