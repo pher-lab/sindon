@@ -1,11 +1,12 @@
-//! Knot M2 state.
+//! Knot state.
 //!
 //! Holds a `Phase::Unlocked` carrying the live `VaultStorage` connection
-//! alongside the resident plaintext notes, master key, and a `dirty`
-//! set of note ids that the auto-save tick will flush back to disk.
-//! Locking drops the entire `Unlocked` variant — connection, key, notes,
-//! and dirty set all go in one move, which is what makes "lock" actually
-//! release plaintext / re-seal the on-disk DB.
+//! alongside the resident plaintext notes, the DEK (data-encryption key
+//! that SQLCipher and the per-note `seal` use), and a `dirty` set of note
+//! ids that the auto-save tick will flush back to disk. Locking drops the
+//! entire `Unlocked` variant — connection, DEK, notes, and dirty set all
+//! go in one move, which is what makes "lock" actually release plaintext /
+//! re-seal the on-disk DB.
 
 use std::collections::HashSet;
 
@@ -42,12 +43,19 @@ pub enum Phase {
     /// No vault loaded. `error` carries the most recent unlock-attempt
     /// failure so the lock screen can echo it back as red status text.
     Locked { error: Option<String> },
+    /// Forgot-password flow: the user supplies their BIP39 recovery key
+    /// plus a new password. `error` carries the most recent recovery
+    /// failure (bad mnemonic, mismatch, no recovery wrapping on disk).
+    Recovery { error: Option<String> },
     /// Vault decrypted and resident. The `VaultStorage` connection stays
     /// open for the entire unlocked session — auto-save uses it on
     /// every flush tick, and locking drops it (closing the conn +
     /// re-sealing the file) by replacing this whole variant.
     Unlocked {
-        key: MasterKey,
+        /// Data-encryption key: keys SQLCipher and every note `seal`/`open`.
+        /// Generated once at setup, wrapped on disk under the password and
+        /// recovery KEKs — never derived from the password directly.
+        dek: MasterKey,
         notes: Vec<Note>,
         selected: Option<NoteId>,
         storage: VaultStorage,
@@ -89,17 +97,18 @@ impl AppState {
         }
     }
 
-    /// Transition into `Unlocked` with the given decrypted state.
-    /// Called by both the lock screen (after a successful password
-    /// attempt) and the first-launch seed path in `main.rs`.
-    pub fn become_unlocked(&mut self, key: MasterKey, notes: Vec<Note>, storage: VaultStorage) {
+    /// Transition into `Unlocked` with the given decrypted state. `dek` is
+    /// the data-encryption key (unwrapped from `dek.enc` / `recovery.enc`),
+    /// not the password. Called by the lock screen, the recovery screen,
+    /// and the first-launch setup path.
+    pub fn become_unlocked(&mut self, dek: MasterKey, notes: Vec<Note>, storage: VaultStorage) {
         // Pick the highest existing id + 1 as the next allocation point
         // so a relaunch doesn't recycle ids that crashed before saving.
         let max_id = notes.iter().map(|n| n.id).max().unwrap_or(0);
         self.next_id = max_id.saturating_add(1);
         let selected = notes.first().map(|n| n.id);
         self.phase = Phase::Unlocked {
-            key,
+            dek,
             notes,
             selected,
             storage,
@@ -115,12 +124,12 @@ impl AppState {
     pub fn complete_setup(
         &mut self,
         salt: [u8; SALT_SIZE],
-        key: MasterKey,
+        dek: MasterKey,
         notes: Vec<Note>,
         storage: VaultStorage,
     ) {
         self.salt = salt;
-        self.become_unlocked(key, notes, storage);
+        self.become_unlocked(dek, notes, storage);
     }
 
     /// Mark a note as needing to be written back on the next auto-save
@@ -160,7 +169,7 @@ impl AppState {
     /// the user yet (no banner / toast widget in scope for M2).
     pub fn flush_dirty(&mut self) -> Result<usize, StorageError> {
         let Phase::Unlocked {
-            key,
+            dek,
             notes,
             storage,
             dirty,
@@ -186,7 +195,7 @@ impl AppState {
                 continue;
             };
             let payload = join_payload(&note.title, &note.body);
-            let (nonce, ciphertext) = seal(key, &payload);
+            let (nonce, ciphertext) = seal(dek, &payload);
             let row = EncryptedNote {
                 id: note.id,
                 nonce,
@@ -205,7 +214,7 @@ impl AppState {
     /// connection). Clears `dirty` on success.
     pub fn rewrite_vault_to_storage(&mut self) -> Result<(), StorageError> {
         let Phase::Unlocked {
-            key,
+            dek,
             notes,
             storage,
             dirty,
@@ -218,7 +227,7 @@ impl AppState {
             .iter()
             .map(|note| {
                 let payload = join_payload(&note.title, &note.body);
-                let (nonce, ciphertext) = seal(key, &payload);
+                let (nonce, ciphertext) = seal(dek, &payload);
                 EncryptedNote {
                     id: note.id,
                     nonce,
@@ -287,14 +296,14 @@ impl AppState {
     }
 }
 
-/// Decrypt every entry under `key`. Returns `None` if any single row
-/// fails to authenticate (= wrong password). Pulled out of `AppState`
-/// because the lock-screen flow needs it before any `Unlocked` state
-/// exists.
-pub fn decrypt_all(key: &MasterKey, vault: &[EncryptedNote]) -> Option<Vec<Note>> {
+/// Decrypt every entry under `dek`. Returns `None` if any single row
+/// fails to authenticate (= tampered DB, since the DEK is already proven
+/// correct by SQLCipher opening). Pulled out of `AppState` because the
+/// lock / recovery flows need it before any `Unlocked` state exists.
+pub fn decrypt_all(dek: &MasterKey, vault: &[EncryptedNote]) -> Option<Vec<Note>> {
     let mut out = Vec::with_capacity(vault.len());
     for enc in vault {
-        let pt = open(key, &enc.nonce, &enc.ciphertext)?;
+        let pt = open(dek, &enc.nonce, &enc.ciphertext)?;
         let (title, body) = split_payload(&pt)?;
         out.push(Note {
             id: enc.id,

@@ -10,14 +10,19 @@
 //!
 //! ```text
 //! config/knot/
-//!   vault.db     — SQLCipher 4 database (page-encrypted)
-//!   vault.salt   — 32 raw bytes, Argon2 salt for the master KDF
+//!   vault.db      — SQLCipher 4 database (page-encrypted under the DEK)
+//!   vault.salt    — 32 raw bytes, Argon2 salt for the password KDF
+//!   dek.enc       — DEK wrapped under the password-derived KEK
+//!   recovery.enc  — DEK wrapped under the BIP39 recovery KEK
 //! ```
 //!
-//! Salt sits next to the DB rather than inside it because the master
-//! key (and thus the SQLCipher key) needs the salt *before* the DB can
-//! be opened — embedding the salt in `vault_meta` would be a
-//! chicken-and-egg circle.
+//! The DB is keyed with the random **DEK**, not the password. The salt +
+//! `dek.enc` are what the password unlocks: derive the KEK from the
+//! password + salt, unwrap the DEK from `dek.enc`, then open the DB. The
+//! salt sits next to the DB rather than inside it because the KEK (needed
+//! to unwrap the DEK) requires the salt *before* the DB can be opened.
+//! `recovery.enc` is a second wrapping of the same DEK, so a forgotten
+//! password can be replaced without re-encrypting the database.
 
 use std::fmt::Write as _;
 use std::io;
@@ -32,6 +37,13 @@ use crate::state::{EncryptedNote, NoteId};
 const APP_NAME: &str = "knot";
 const DB_FILENAME: &str = "vault.db";
 const SALT_FILENAME: &str = "vault.salt";
+const DEK_FILENAME: &str = "dek.enc";
+const RECOVERY_FILENAME: &str = "recovery.enc";
+
+/// Upper bound on a wrapped-DEK blob. A wrap is `nonce(24) +
+/// ciphertext(32) + tag(16) = 72` bytes; the cap rejects an obviously
+/// corrupt / oversized file before we hand it to the AEAD layer.
+const MAX_WRAPPED_DEK_LEN: usize = 256;
 
 /// Resolves the on-disk paths for the Knot vault. Held as a struct so
 /// the lock screen can do `vault_exists()` once and the unlock flow can
@@ -41,6 +53,8 @@ const SALT_FILENAME: &str = "vault.salt";
 pub struct VaultPaths {
     pub db: PathBuf,
     pub salt: PathBuf,
+    pub dek: PathBuf,
+    pub recovery: PathBuf,
 }
 
 impl VaultPaths {
@@ -54,14 +68,24 @@ impl VaultPaths {
         Some(Self {
             db: dir.join(DB_FILENAME),
             salt: dir.join(SALT_FILENAME),
+            dek: dir.join(DEK_FILENAME),
+            recovery: dir.join(RECOVERY_FILENAME),
         })
     }
 
-    /// True iff *both* files exist. Either one missing means we treat
-    /// this as a fresh install — partial state from a crashed first-run
-    /// gets reset rather than asking the user to repair it manually.
+    /// True iff the db, salt, and wrapped DEK all exist. Any one missing
+    /// means we treat this as a fresh install — partial state from a
+    /// crashed first-run gets reset rather than asking the user to repair
+    /// it manually. (`recovery.enc` is intentionally not required here: a
+    /// vault is usable without it; it only gates the recovery flow.)
     pub fn vault_exists(&self) -> bool {
-        self.db.exists() && self.salt.exists()
+        self.db.exists() && self.salt.exists() && self.dek.exists()
+    }
+
+    /// Whether a recovery wrapping was written at setup. The lock screen
+    /// uses this to decide whether to offer the "forgot password?" entry.
+    pub fn recovery_exists(&self) -> bool {
+        self.recovery.exists()
     }
 
     pub fn read_salt(&self) -> Result<[u8; SALT_SIZE], StorageError> {
@@ -79,10 +103,46 @@ impl VaultPaths {
     }
 
     pub fn write_salt(&self, salt: &[u8; SALT_SIZE]) -> Result<(), StorageError> {
-        if let Some(parent) = self.salt.parent() {
+        self.write_file(&self.salt, salt)
+    }
+
+    /// Read the password-wrapped DEK blob (`nonce || ciphertext+tag`).
+    pub fn read_wrapped_dek(&self) -> Result<Vec<u8>, StorageError> {
+        Self::read_wrapped(&self.dek)
+    }
+
+    pub fn write_wrapped_dek(&self, wrapped: &[u8]) -> Result<(), StorageError> {
+        self.write_file(&self.dek, wrapped)
+    }
+
+    /// Read the recovery-wrapped DEK blob. `Io` (not found) surfaces to the
+    /// caller, which reports "no recovery key set up" rather than treating
+    /// it as a wrong-key failure.
+    pub fn read_wrapped_recovery(&self) -> Result<Vec<u8>, StorageError> {
+        Self::read_wrapped(&self.recovery)
+    }
+
+    pub fn write_wrapped_recovery(&self, wrapped: &[u8]) -> Result<(), StorageError> {
+        self.write_file(&self.recovery, wrapped)
+    }
+
+    fn read_wrapped(path: &Path) -> Result<Vec<u8>, StorageError> {
+        let bytes = std::fs::read(path)?;
+        if bytes.len() > MAX_WRAPPED_DEK_LEN {
+            return Err(StorageError::Corrupt(format!(
+                "wrapped key file is {} bytes, exceeds {} cap",
+                bytes.len(),
+                MAX_WRAPPED_DEK_LEN
+            )));
+        }
+        Ok(bytes)
+    }
+
+    fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+        if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.salt, salt)?;
+        std::fs::write(path, bytes)?;
         Ok(())
     }
 }

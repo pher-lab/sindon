@@ -24,16 +24,17 @@ use shroud::core::Color;
 use shroud::reactive::Reactive;
 use shroud::security::SecureString;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{ClearTrigger, Container, SecureInput, TextWidget};
+use shroud::widgets::{Button, ClearTrigger, Container, SecureInput, TextWidget};
+use zeroize::Zeroizing;
 
-use crate::crypto::{derive_key, random_salt};
+use crate::crypto::{derive_key, generate_dek, random_salt, recovery, wrap_dek};
 use crate::state::{AppState, Phase};
 use crate::storage::{VaultPaths, VaultStorage};
 use crate::vault_screen;
 
-/// Minimum master-password length (characters). There is no recovery
-/// flow yet (BIP39 is a later milestone), so the floor is a typo guard,
-/// not a strength policy.
+/// Minimum master-password length (characters). A typo guard, not a
+/// strength policy — recovery via the BIP39 key is the real safety net
+/// against a forgotten password.
 const MIN_PASSWORD_LEN: usize = 8;
 
 pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
@@ -87,7 +88,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     tree.add_child(
         card,
         TextWidget::new(format!(
-            "At least {} characters. No recovery yet \u{2014} don't forget it.",
+            "At least {} characters. You'll get a recovery key next in case you forget it.",
             MIN_PASSWORD_LEN
         ))
         .color(hint_color),
@@ -148,10 +149,15 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
                     return;
                 }
                 match create_vault(&cf_state, confirm_pw) {
-                    Ok(()) => {
+                    Ok(mnemonic) => {
                         cf_stash.borrow_mut().take();
                         let next = Rc::clone(&cf_state);
-                        ctx.replace_screen(move |tree| vault_screen::build(tree, next));
+                        // Show the recovery key once before entering the
+                        // vault. The mnemonic moves into the closure and is
+                        // zeroized when that reveal screen is built/dropped.
+                        ctx.replace_screen(move |tree| {
+                            build_recovery_reveal(tree, next, mnemonic)
+                        });
                     }
                     Err(e) => {
                         set_error(&cf_state, e);
@@ -194,27 +200,56 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     );
 }
 
-/// Generate a salt, derive the key, and create an empty SQLCipher vault,
-/// transitioning `state` into `Unlocked`. Returns a human-readable error
-/// string on any failure (config dir, salt write, DB create) so the
-/// confirm handler can surface it on the status line.
-fn create_vault(state: &Rc<RefCell<AppState>>, password: &SecureString) -> Result<(), String> {
+/// Build a fresh envelope-encrypted vault and transition `state` into
+/// `Unlocked`. On success returns the freshly-generated BIP39 recovery
+/// mnemonic (held zeroizing) so the caller can show it once. Returns a
+/// human-readable error string on any failure (config dir, file write, DB
+/// create) so the confirm handler can surface it on the status line.
+///
+/// Envelope scheme: a random DEK keys the DB and notes; it is wrapped
+/// under both the password-derived KEK (`dek.enc`) and the recovery KEK
+/// (`recovery.enc`). The order — write the wrappings *before* opening the
+/// DB and completing setup — means a crash mid-setup leaves no half-vault
+/// the next launch would mistake for complete (`vault_exists` requires the
+/// DB too, which is created last).
+fn create_vault(
+    state: &Rc<RefCell<AppState>>,
+    password: &SecureString,
+) -> Result<Zeroizing<String>, String> {
     let Some(paths) = VaultPaths::default_for_app() else {
         return Err("config directory unavailable".into());
     };
 
     let salt = random_salt();
+    let dek = generate_dek();
+
+    // Wrap the DEK under the password KEK.
+    let pw_kek = password.expose(|p| derive_key(p.as_bytes(), &salt));
+    let pw_wrapped = wrap_dek(&pw_kek, &dek);
+
+    // Wrap the same DEK under a fresh recovery KEK.
+    let mnemonic = recovery::generate_mnemonic();
+    let rec_kek = recovery::key_to_kek(&mnemonic)
+        .ok_or_else(|| "failed to derive recovery key".to_string())?;
+    let rec_wrapped = wrap_dek(&rec_kek, &dek);
+
     paths
         .write_salt(&salt)
         .map_err(|e| format!("failed to write salt: {}", e))?;
+    paths
+        .write_wrapped_dek(&pw_wrapped)
+        .map_err(|e| format!("failed to write key file: {}", e))?;
+    paths
+        .write_wrapped_recovery(&rec_wrapped)
+        .map_err(|e| format!("failed to write recovery file: {}", e))?;
 
-    let key = password.expose(|p| derive_key(p.as_bytes(), &salt));
-
-    let storage = VaultStorage::open(&paths.db, &key)
+    // Open (create) the DB keyed with the DEK — done last so it's the
+    // final file to appear; see the order rationale above.
+    let storage = VaultStorage::open(&paths.db, &dek)
         .map_err(|e| format!("failed to create vault: {}", e))?;
 
     let mut s = state.borrow_mut();
-    s.complete_setup(salt, key, Vec::new(), storage);
+    s.complete_setup(salt, dek, Vec::new(), storage);
     // Materialize the (empty) vault now so a crash before the first
     // auto-save tick still leaves a valid keyed DB — the next launch
     // then sees an existing vault and goes to the lock screen instead of
@@ -222,9 +257,98 @@ fn create_vault(state: &Rc<RefCell<AppState>>, password: &SecureString) -> Resul
     s.rewrite_vault_to_storage()
         .map_err(|e| format!("failed to initialize vault: {}", e))?;
 
-    Ok(())
+    Ok(mnemonic)
 }
 
 fn set_error(state: &Rc<RefCell<AppState>>, msg: String) {
     state.borrow_mut().phase = Phase::Setup { error: Some(msg) };
+}
+
+/// One-time recovery-key reveal, shown immediately after the vault is
+/// created (state is already `Unlocked` here). Displays the 12 words for
+/// the user to write down, then a Continue button drops into the vault.
+/// The `mnemonic` is consumed: its words are copied into the displayed
+/// text widgets and the `Zeroizing<String>` is wiped when this function
+/// returns. Screen capture is already blocked app-wide
+/// (`capture_prevention(true)` in `main`), so the plaintext words on
+/// screen aren't exposed to screenshots/recording.
+fn build_recovery_reveal(
+    tree: &mut WidgetTree,
+    state: Rc<RefCell<AppState>>,
+    mnemonic: Zeroizing<String>,
+) {
+    let words: Vec<&str> = mnemonic.split_whitespace().collect();
+
+    let root = tree.set_root(
+        Container::column()
+            .width_full()
+            .height_full()
+            .padding(24.0)
+            .justify_center(),
+    );
+
+    let card = tree.add_child(
+        root,
+        Container::column()
+            .width(520.0)
+            .margin_x_auto()
+            .padding(32.0)
+            .gap(16.0)
+            .background(Color::rgb(0.12, 0.12, 0.18))
+            .radius(16.0),
+    );
+
+    tree.add_child(card, TextWidget::new("Your recovery key").font_size(28.0));
+    tree.add_child(
+        card,
+        TextWidget::new(
+            "If you forget your password, these 12 words are the only way back into \
+             your vault. Write them down and store them somewhere safe \u{2014} they're \
+             shown only once.",
+        )
+        .color(Color::rgb(0.7, 0.7, 0.75)),
+    );
+
+    // 12 words in a 3-row x 4-column grid of fixed-width cells so the
+    // columns line up. Fixed widths avoid the wrapped-text overlap that
+    // percent-width columns can hit (see the margin_x_auto fix memo).
+    let grid = tree.add_child(
+        card,
+        Container::column()
+            .gap(8.0)
+            .padding(16.0)
+            .background(Color::rgb(0.08, 0.08, 0.12))
+            .radius(8.0),
+    );
+    let num_color = Color::rgb(0.5, 0.5, 0.6);
+    let word_color = Color::rgb(0.9, 0.9, 0.95);
+    for (row_idx, row_words) in words.chunks(4).enumerate() {
+        let row = tree.add_child(grid, Container::row().gap(12.0));
+        for (col, word) in row_words.iter().enumerate() {
+            let n = row_idx * 4 + col + 1;
+            let cell = tree.add_child(row, Container::row().width(108.0).gap(6.0));
+            tree.add_child(cell, TextWidget::new(format!("{}.", n)).color(num_color));
+            tree.add_child(cell, TextWidget::new((*word).to_string()).color(word_color));
+        }
+    }
+
+    tree.add_child(
+        card,
+        TextWidget::new(
+            "Anyone who has these words can open your vault. Never share them or store \
+             them with your password.",
+        )
+        .color(Color::rgb(0.95, 0.82, 0.45)),
+    );
+
+    let next = Rc::clone(&state);
+    tree.add_child(
+        card,
+        Button::new("I've saved it \u{2014} open my vault")
+            .radius(8.0)
+            .on_click(move |ctx| {
+                let next = Rc::clone(&next);
+                ctx.replace_screen(move |tree| vault_screen::build(tree, next));
+            }),
+    );
 }

@@ -18,6 +18,7 @@
 mod crypto;
 mod editor;
 mod lock_screen;
+mod recovery_screen;
 mod setup_screen;
 mod sidebar;
 mod state;
@@ -61,17 +62,21 @@ fn main() {
 
 /// Build the screen that matches the initial phase. `init_state` only
 /// ever produces `Setup` (first launch) or `Locked` (existing vault);
-/// the `Unlocked` arm is here for exhaustiveness and would only fire if
-/// a future init path handed us an already-decrypted vault.
+/// the `Recovery` / `Unlocked` arms are here for exhaustiveness — recovery
+/// is only ever reached mid-session via `replace_screen` from the lock
+/// screen, and `Unlocked` would only fire if a future init path handed us
+/// an already-decrypted vault.
 fn build_initial_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let phase_kind = match &state.borrow().phase {
         Phase::Setup { .. } => Screen::Setup,
         Phase::Locked { .. } => Screen::Lock,
+        Phase::Recovery { .. } => Screen::Recovery,
         Phase::Unlocked { .. } => Screen::Vault,
     };
     match phase_kind {
         Screen::Setup => setup_screen::build(tree, state),
         Screen::Lock => lock_screen::build(tree, state),
+        Screen::Recovery => recovery_screen::build(tree, state),
         Screen::Vault => vault_screen::build(tree, state),
     }
 }
@@ -79,6 +84,7 @@ fn build_initial_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
 enum Screen {
     Setup,
     Lock,
+    Recovery,
     Vault,
 }
 

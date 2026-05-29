@@ -10,6 +10,12 @@ shroud = { path = "../../crates/shroud" }
 argon2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
 zeroize = { workspace = true }
+# Recovery key: BIP39 12-word mnemonic -> HKDF-SHA256 -> recovery KEK that
+# wraps the DEK. Same primitives/parameters as Knot v0.7.0's crypto/recovery.rs
+# so a vault stays conceptually compatible with the upstream design.
+bip39 = "2.0"
+hkdf = "0.12"
+sha2 = "0.10"
 # SQLCipher 4.x via rusqlite. `bundled-sqlcipher-vendored-openssl` keeps
 # the toolchain fully reproducible — everything (SQLite, the SQLCipher
 # patch set, and OpenSSL) builds from source so we don't depend on a
