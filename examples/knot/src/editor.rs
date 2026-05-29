@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use shroud::core::Color;
-use shroud::reactive::Signal;
+use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, Input, TextWidget};
 
@@ -82,10 +82,31 @@ pub fn build(
         }),
     );
 
+    // Editor area: title + body inputs. Hidden via `display: none` when no
+    // note is selected, so the header's "No note selected" prompt stands
+    // alone instead of showing inputs that look editable but silently drop
+    // typing (`write_selected` no-ops without a selection).
+    let area_state = Rc::clone(&state);
+    let editor_area = tree.add_child(
+        pane,
+        Container::column()
+            .width_full()
+            .grow(1.0)
+            .gap(12.0)
+            .visible(Reactive::derive(move || {
+                matches!(
+                    &area_state.borrow().phase,
+                    Phase::Unlocked {
+                        selected: Some(_), ..
+                    }
+                )
+            })),
+    );
+
     // Title input (single-line, full width).
     let title_state = Rc::clone(&state);
     tree.add_child(
-        pane,
+        editor_area,
         Input::new()
             .placeholder("Title")
             .value(title_sig)
@@ -102,7 +123,7 @@ pub fn build(
     // Pass `grow(1.0)` via a wrapper container — Input itself doesn't take
     // flex-grow on its own style, so wrap it.
     let body_wrap = tree.add_child(
-        pane,
+        editor_area,
         Container::column().width_full().grow(1.0).padding(0.0),
     );
 
