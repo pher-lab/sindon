@@ -57,6 +57,25 @@ fn row_layout() {
 }
 
 #[test]
+fn margin_x_auto_centers_fixed_width_child() {
+    let mut engine = LayoutEngine::new();
+
+    // A 100-wide child with auto left/right margins inside a 300-wide column
+    // should sit centered: (300 - 100) / 2 = 100 from the left.
+    let child = engine.add_leaf(FlexStyle::new().width(100.0).height(40.0).margin_x_auto());
+    let root = engine.add_container(
+        FlexStyle::new().column().width(300.0).height(200.0),
+        &[child],
+    );
+
+    engine.compute(root, 800.0, 600.0);
+
+    let r = engine.layout(child);
+    assert_eq!(r.size.width, 100.0, "auto margins keep the explicit width");
+    assert_eq!(r.origin.x, 100.0, "auto margins center the child");
+}
+
+#[test]
 fn padding_layout() {
     let mut engine = LayoutEngine::new();
 

@@ -63,15 +63,14 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .width_full()
             .height_full()
             .padding(24.0)
-            .justify_center()
-            .align_center(),
+            .justify_center(),
     );
 
     let card = tree.add_child(
         root,
         Container::column()
-            .width_full()
-            .max_width(448.0)
+            .width(448.0)
+            .margin_x_auto()
             .padding(32.0)
             .gap(16.0)
             .background(Color::rgb(0.12, 0.12, 0.18))
@@ -84,18 +83,14 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         TextWidget::new("Create a master password for your vault."),
     );
 
-    // Two short lines instead of one long sentence: a single wide
-    // TextWidget wraps at the card width and the wrapped line overlaps
-    // the field below it, so keep each hint line under the wrap point.
     let hint_color = Color::rgb(0.7, 0.7, 0.75);
-    let hint = tree.add_child(card, Container::column().gap(4.0));
     tree.add_child(
-        hint,
-        TextWidget::new(format!("At least {} characters.", MIN_PASSWORD_LEN)).color(hint_color),
-    );
-    tree.add_child(
-        hint,
-        TextWidget::new("No recovery yet \u{2014} don't forget it.").color(hint_color),
+        card,
+        TextWidget::new(format!(
+            "At least {} characters. No recovery yet \u{2014} don't forget it.",
+            MIN_PASSWORD_LEN
+        ))
+        .color(hint_color),
     );
 
     // Password field — Enter validates length, stashes a copy, advances.

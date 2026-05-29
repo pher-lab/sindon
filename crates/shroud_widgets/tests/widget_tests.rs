@@ -198,6 +198,92 @@ fn blockquote_body_flex_basis_zero_grow_one_wraps_long_text() {
     );
 }
 
+// Regression guard for the M3 setup-card wrap-overlap bug + the
+// `margin_x_auto` centering primitive that fixes it.
+//
+// Original bug: a centered card built as `width_full().max_width(448)` under
+// an `align_center()` parent resolves its width as a *percentage* of the
+// parent, so Taffy measures the card's text content at the un-clamped width
+// (one line), locks the card height to that, then clamps the width to 448 —
+// the text now wraps to two lines at paint time but the box only allocated
+// one, and the wrapped tail overlaps the next field. The supported idiom is
+// a definite width + `margin_x_auto()`, which avoids the percentage so the
+// height is measured at the real (clamped) width.
+const HINT: &str = "At least 8 characters. No recovery yet \u{2014} don't forget it, seriously.";
+
+#[test]
+fn margin_x_auto_card_allocates_wrapped_text_height_and_centers() {
+    use shroud_text::TextEngine;
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::column()
+            .width_full()
+            .height_full()
+            .padding(24.0)
+            .justify_center(),
+    );
+    let card = tree.add_child(
+        root,
+        Container::column()
+            .width(448.0)
+            .margin_x_auto()
+            .padding(32.0)
+            .gap(16.0),
+    );
+    // Card content width = 448 - 2*32 = 384. HINT shapes wider than 384 at
+    // the default body font, so it must wrap to two lines.
+    let text = tree.add_child(card, TextWidget::new(HINT));
+    // Sibling below — stands in for the SecureInput the wrapped tail
+    // overlapped on real hardware.
+    let sibling = tree.add_child(card, Container::column().height(40.0));
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(1080.0, 720.0, &mut engine, &theme);
+
+    let card_rect = tree.layout_rect(card);
+    let text_rect = tree.layout_rect(text);
+    let sibling_rect = tree.layout_rect(sibling);
+
+    // What paint will actually do: shape at the laid-out width. The layout
+    // must allocate at least that much height.
+    let painted = engine.shape_text_attrs(
+        HINT,
+        theme.typography.body.font_size,
+        theme.typography.body.line_height,
+        Some(text_rect.size.width),
+        &Default::default(),
+    );
+    assert!(
+        painted.height > theme.typography.body.line_height,
+        "test precondition: HINT must wrap to >1 line at width {}",
+        text_rect.size.width,
+    );
+    assert!(
+        text_rect.size.height >= painted.height,
+        "layout under-allocated: text box h={} but wrapped paint needs h={}",
+        text_rect.size.height,
+        painted.height,
+    );
+    assert!(
+        sibling_rect.origin.y >= text_rect.origin.y + text_rect.size.height,
+        "sibling (y={}) overlaps the text box (bottom={})",
+        sibling_rect.origin.y,
+        text_rect.origin.y + text_rect.size.height,
+    );
+
+    // margin_x_auto centers the card: left gap ≈ right gap within the
+    // 1080-wide viewport (24px root padding on each side).
+    let left = card_rect.origin.x;
+    let right = 1080.0 - (card_rect.origin.x + card_rect.size.width);
+    assert!(
+        (left - right).abs() < 1.0,
+        "card not centered: left={} right={}",
+        left,
+        right,
+    );
+}
+
 // ── Events ────────────────────────────────────────────────────────
 
 #[test]

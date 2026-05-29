@@ -36,15 +36,14 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .width_full()
             .height_full()
             .padding(24.0)
-            .justify_center()
-            .align_center(),
+            .justify_center(),
     );
 
     let card = tree.add_child(
         root,
         Container::column()
-            .width_full()
-            .max_width(448.0)
+            .width(448.0)
+            .margin_x_auto()
             .padding(32.0)
             .gap(16.0)
             .background(Color::rgb(0.12, 0.12, 0.18))

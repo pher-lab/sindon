@@ -96,9 +96,14 @@ impl FlexStyle {
 
     /// Maximum width in pixels. Acts as a clamp: the node grows up to this
     /// width and no further, even when its parent offers more space. Useful
-    /// for typography (`max_width(640.0)` for readable line length) and for
-    /// constraining a centered card on a wide window (Tailwind `max-w-md` ≈
-    /// 448 px).
+    /// for typography (`max_width(640.0)` for readable line length).
+    ///
+    /// For a centered card, prefer a definite [`Self::width`] plus
+    /// [`Self::margin_x_auto`] over `width_full().max_width(...)`: the latter
+    /// resolves to a *percentage* width, and Taffy then measures wrappable
+    /// content (text) at the un-clamped percentage width — so a long line
+    /// reports a one-line height, the box under-allocates, and the wrapped
+    /// tail overflows onto the next widget.
     pub fn max_width(mut self, px: f32) -> Self {
         self.style.max_size.width = length(px);
         self
@@ -145,6 +150,14 @@ impl FlexStyle {
         self
     }
 
+    /// Auto left/right margins — the flexbox idiom for horizontally centering
+    /// a block with a definite or capped width (CSS `margin-inline: auto`).
+    pub fn margin_x_auto(mut self) -> Self {
+        self.style.margin.left = auto();
+        self.style.margin.right = auto();
+        self
+    }
+
     /// Gap between children (both row and column gap).
     pub fn gap(mut self, px: f32) -> Self {
         self.style.gap = Size {
@@ -183,8 +196,9 @@ impl FlexStyle {
     /// Center items on both axes. Note that `align_items: Center` shrinks
     /// each child to its min-content size on the cross axis — for a column
     /// container, this collapses child width and can cause text to wrap
-    /// per-glyph. Use [`Self::justify_center`] (with explicit child sizing or
-    /// [`Self::max_width`]) when you only want main-axis centering.
+    /// per-glyph. To horizontally center a fixed- or capped-width child, set
+    /// the child's own [`Self::margin_x_auto`] instead of centering via the
+    /// parent.
     pub fn center(self) -> Self {
         self.align_items(AlignItems::Center)
             .justify_content(JustifyContent::Center)

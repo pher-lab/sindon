@@ -97,7 +97,8 @@ pub fn build(
                 matches!(
                     &area_state.borrow().phase,
                     Phase::Unlocked {
-                        selected: Some(_), ..
+                        selected: Some(_),
+                        ..
                     }
                 )
             })),

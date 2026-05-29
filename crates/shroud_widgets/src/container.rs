@@ -189,16 +189,21 @@ impl Container {
 
     /// Center children on the cross axis only. In a column container this
     /// gives horizontal centering. Note the same caveat as [`Container::center`]:
-    /// children without explicit cross-axis sizing collapse to min-content,
-    /// so combine with [`Container::max_width`] (which acts as a size hint
-    /// when set together with `width_full`) or an explicit child width.
+    /// children without explicit cross-axis sizing collapse to min-content.
+    /// To center a fixed- or capped-width card, give the *card* a definite
+    /// [`Container::width`] plus [`Container::margin_x_auto`] rather than
+    /// centering it through this parent setting.
     pub fn align_center(mut self) -> Self {
         self.style = self.style.align_center();
         self
     }
 
-    /// Clamp the container's width. Combined with `width_full()` this yields
-    /// the common "fluid up to N px" pattern (Tailwind `max-w-md` etc.).
+    /// Clamp the container's width — the node grows up to `px` and no further.
+    ///
+    /// For a centered card, prefer a definite [`Container::width`] plus
+    /// [`Container::margin_x_auto`]. Avoid `width_full().max_width(...)`: it
+    /// resolves to a percentage width that mis-measures wrapped text height
+    /// (see [`FlexStyle::max_width`]).
     pub fn max_width(mut self, px: f32) -> Self {
         self.style = self.style.max_width(px);
         self
@@ -207,6 +212,17 @@ impl Container {
     /// Clamp the container's height.
     pub fn max_height(mut self, px: f32) -> Self {
         self.style = self.style.max_height(px);
+        self
+    }
+
+    /// Horizontally center this container in its parent via auto left/right
+    /// margins (CSS `margin-inline: auto`). Pair with [`Self::max_width`] for
+    /// a centered, responsive card: the parent stretches it up to `max_width`
+    /// and the auto margins absorb the leftover on each side. Preferred over
+    /// `width_full() + align_center` parent, which forces a percentage width
+    /// that mis-measures wrapped text height. See [`FlexStyle::margin_x_auto`].
+    pub fn margin_x_auto(mut self) -> Self {
+        self.style = self.style.margin_x_auto();
         self
     }
 

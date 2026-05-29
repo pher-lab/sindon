@@ -187,17 +187,16 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     }
 
     // Centered card layout. Outer container vertically centers via
-    // `justify_center` (main axis only — leaves cross axis at Stretch so
-    // children are not collapsed to min-content). The inner card declares
-    // `width_full().max_width(448)` so it stays readable on wide windows
-    // and fluid on narrow ones, mirroring Tailwind's `w-full max-w-md`.
+    // `justify_center` (main axis only). The inner card uses a definite
+    // `width(448).margin_x_auto()` to center horizontally — a percentage
+    // `width_full().max_width(448)` would make Taffy measure wrapped text at
+    // the un-clamped width and under-allocate its height.
     let root = tree.set_root(
         Container::column()
             .width_full()
             .height_full()
             .padding(24.0)
-            .justify_center()
-            .align_center(),
+            .justify_center(),
     );
 
     // Card-tint picker (Phase 22 dogfood): the dropdown writes to this
@@ -219,8 +218,8 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let card = tree.add_child(
         root,
         Container::column()
-            .width_full()
-            .max_width(448.0)
+            .width(448.0)
+            .margin_x_auto()
             .padding(32.0)
             .gap(16.0)
             .background(card_bg)
