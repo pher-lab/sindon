@@ -34,6 +34,11 @@ pub struct Note {
 }
 
 pub enum Phase {
+    /// First launch — no vault on disk yet. The setup screen collects a
+    /// master password (and a confirmation) before any salt or DB
+    /// exists. `error` carries the most recent setup-attempt failure
+    /// (too short, mismatch, write error) for the status line to echo.
+    Setup { error: Option<String> },
     /// No vault loaded. `error` carries the most recent unlock-attempt
     /// failure so the lock screen can echo it back as red status text.
     Locked { error: Option<String> },
@@ -72,6 +77,18 @@ impl AppState {
         }
     }
 
+    /// Construct a first-launch Setup state. The salt is a placeholder —
+    /// it's generated for real when the user picks a password and
+    /// [`complete_setup`](Self::complete_setup) overwrites it. `next_id`
+    /// starts at 1 since the vault is empty until the user adds a note.
+    pub fn new_setup() -> Self {
+        Self {
+            salt: [0u8; SALT_SIZE],
+            next_id: 1,
+            phase: Phase::Setup { error: None },
+        }
+    }
+
     /// Transition into `Unlocked` with the given decrypted state.
     /// Called by both the lock screen (after a successful password
     /// attempt) and the first-launch seed path in `main.rs`.
@@ -88,6 +105,22 @@ impl AppState {
             storage,
             dirty: HashSet::new(),
         };
+    }
+
+    /// Finish first-launch setup: record the freshly-generated salt and
+    /// transition straight into `Unlocked` with the (initially empty)
+    /// note set. Distinct from [`become_unlocked`](Self::become_unlocked)
+    /// only in that it also installs the real salt, which the placeholder
+    /// from [`new_setup`](Self::new_setup) was standing in for.
+    pub fn complete_setup(
+        &mut self,
+        salt: [u8; SALT_SIZE],
+        key: MasterKey,
+        notes: Vec<Note>,
+        storage: VaultStorage,
+    ) {
+        self.salt = salt;
+        self.become_unlocked(key, notes, storage);
     }
 
     /// Mark a note as needing to be written back on the next auto-save
@@ -299,3 +332,54 @@ fn split_payload(bytes: &[u8]) -> Option<(String, String)> {
 }
 
 const _ASSERT_KEY_SIZE: usize = KEY_SIZE;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::{derive_key, random_salt};
+    use crate::storage::VaultStorage;
+    use std::path::PathBuf;
+
+    fn tmp_db_path() -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "knot-state-test-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        p
+    }
+
+    #[test]
+    fn new_setup_starts_in_setup_phase() {
+        let s = AppState::new_setup();
+        assert!(matches!(s.phase, Phase::Setup { error: None }));
+        assert_eq!(s.next_id, 1);
+        // Salt is a placeholder until complete_setup overwrites it.
+        assert_eq!(s.salt, [0u8; SALT_SIZE]);
+    }
+
+    #[test]
+    fn complete_setup_installs_salt_and_unlocks() {
+        let path = tmp_db_path();
+        let salt = random_salt();
+        let key = derive_key(b"setup-test-pw", &salt);
+        let storage = VaultStorage::open(&path, &key).expect("open fresh vault");
+
+        let mut state = AppState::new_setup();
+        state.complete_setup(salt, key, Vec::new(), storage);
+
+        assert_eq!(state.salt, salt, "the generated salt must be installed");
+        assert!(
+            matches!(state.phase, Phase::Unlocked { .. }),
+            "setup completion must land in Unlocked"
+        );
+        // Empty vault → first note id allocation starts at 1.
+        assert_eq!(state.next_id, 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+}

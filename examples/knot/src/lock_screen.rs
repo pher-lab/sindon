@@ -18,7 +18,7 @@ use shroud::widgets::{Container, SecureInput, TextWidget};
 use crate::crypto::derive_key;
 use crate::state::{AppState, Phase, decrypt_all};
 use crate::storage::{StorageError, VaultPaths, VaultStorage};
-use crate::{DEMO_PASSWORD, vault_screen};
+use crate::vault_screen;
 
 pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     // Reset transient phase: keep the previous error message if there was one
@@ -54,10 +54,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     tree.add_child(card, TextWidget::new("Knot").font_size(40.0));
     tree.add_child(card, TextWidget::new("A knot only you can untie."));
 
-    tree.add_child(
-        card,
-        TextWidget::new(format!("Master password (hint: {}):", DEMO_PASSWORD)),
-    );
+    tree.add_child(card, TextWidget::new("Master password:"));
 
     let unlock_state = Rc::clone(&state);
     let input_idx = tree.add_child(
@@ -79,10 +76,10 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         TextWidget::reactive(move || match &status_state.borrow().phase {
             Phase::Locked { error: None } => "Locked.".to_string(),
             Phase::Locked { error: Some(e) } => format!("Locked \u{2014} {}", e),
-            // Unlocked is unreachable here — on success the handler queues a
-            // replace_screen, so by the next paint we're already off this
-            // screen. Render an empty string defensively.
-            Phase::Unlocked { .. } => String::new(),
+            // Setup / Unlocked are unreachable here — on success the
+            // handler queues a replace_screen, so by the next paint we're
+            // already off this screen. Render an empty string defensively.
+            Phase::Setup { .. } | Phase::Unlocked { .. } => String::new(),
         })
         .color(Reactive::Static(Color::rgb(0.7, 0.7, 0.75))),
     );
