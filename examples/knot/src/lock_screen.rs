@@ -13,14 +13,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use shroud::core::Color;
-use shroud::reactive::Reactive;
 use shroud::security::SecureString;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, SecureInput, TextWidget};
 
 use crate::crypto::{derive_key, unwrap_dek};
 use crate::recovery_screen;
+use crate::settings;
 use crate::state::{AppState, Phase, decrypt_all};
 use crate::storage::{StorageError, VaultPaths, VaultStorage};
 use crate::vault_screen;
@@ -51,7 +50,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .margin_x_auto()
             .padding(32.0)
             .gap(16.0)
-            .background(Color::rgb(0.12, 0.12, 0.18))
+            .background(settings::surface())
             .radius(16.0),
     );
 
@@ -85,7 +84,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             // we're already off this screen. Render empty defensively.
             Phase::Setup { .. } | Phase::Recovery { .. } | Phase::Unlocked { .. } => String::new(),
         })
-        .color(Reactive::Static(Color::rgb(0.7, 0.7, 0.75))),
+        .color(settings::on_surface_variant()),
     );
 
     // Offer recovery only when a recovery wrapping was created at setup.

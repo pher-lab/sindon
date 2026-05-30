@@ -9,12 +9,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use shroud::core::Color;
 use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, Input, TextWidget};
 
 use crate::lock_screen;
+use crate::settings;
 use crate::state::{AppState, Phase};
 
 pub fn build(
@@ -31,7 +31,7 @@ pub fn build(
             .height_full()
             .padding(24.0)
             .gap(12.0)
-            .background(Color::rgb(0.06, 0.06, 0.09)),
+            .background(settings::background()),
     );
 
     // Header: status text on the left, Lock button on the right. Status
@@ -63,7 +63,7 @@ pub fn build(
             }
             _ => String::new(),
         })
-        .color(Color::rgb(0.6, 0.6, 0.7)),
+        .color(settings::on_surface_variant()),
     );
 
     // Spacer pushes the Lock button to the far right.

@@ -20,7 +20,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use shroud::core::Color;
 use shroud::reactive::{Reactive, Signal};
 use shroud::security::SecureString;
 use shroud::widgets::tree::WidgetTree;
@@ -28,6 +27,7 @@ use shroud::widgets::{Button, ClearTrigger, Container, Input, SecureInput, TextW
 
 use crate::crypto::{derive_key, random_salt, recovery, unwrap_dek, wrap_dek};
 use crate::lock_screen;
+use crate::settings;
 use crate::state::{AppState, Phase, decrypt_all};
 use crate::storage::{VaultPaths, VaultStorage};
 use crate::vault_screen;
@@ -68,7 +68,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .margin_x_auto()
             .padding(32.0)
             .gap(16.0)
-            .background(Color::rgb(0.12, 0.12, 0.18))
+            .background(settings::surface())
             .radius(16.0),
     );
 
@@ -76,7 +76,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     tree.add_child(
         card,
         TextWidget::new("Enter your 12-word recovery key and choose a new password.")
-            .color(Color::rgb(0.7, 0.7, 0.75)),
+            .color(settings::on_surface_variant()),
     );
 
     // Recovery-key field (visible, multiline).
@@ -171,9 +171,10 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             _ => String::new(),
         })
         .color(Reactive::derive(move || {
+            let theme = settings::current_theme();
             match &color_state.borrow().phase {
-                Phase::Recovery { error: Some(_) } => Color::rgb(0.9, 0.4, 0.4),
-                _ => Color::rgb(0.7, 0.7, 0.75),
+                Phase::Recovery { error: Some(_) } => theme.colors.error,
+                _ => theme.colors.on_surface_variant,
             }
         })),
     );

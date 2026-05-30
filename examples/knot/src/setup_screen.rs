@@ -20,7 +20,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use shroud::core::Color;
 use shroud::reactive::Reactive;
 use shroud::security::SecureString;
 use shroud::widgets::tree::WidgetTree;
@@ -28,6 +27,7 @@ use shroud::widgets::{Button, ClearTrigger, Container, SecureInput, TextWidget};
 use zeroize::Zeroizing;
 
 use crate::crypto::{derive_key, generate_dek, random_salt, recovery, wrap_dek};
+use crate::settings;
 use crate::state::{AppState, Phase};
 use crate::storage::{VaultPaths, VaultStorage};
 use crate::vault_screen;
@@ -74,7 +74,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .margin_x_auto()
             .padding(32.0)
             .gap(16.0)
-            .background(Color::rgb(0.12, 0.12, 0.18))
+            .background(settings::surface())
             .radius(16.0),
     );
 
@@ -84,14 +84,13 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         TextWidget::new("Create a master password for your vault."),
     );
 
-    let hint_color = Color::rgb(0.7, 0.7, 0.75);
     tree.add_child(
         card,
         TextWidget::new(format!(
             "At least {} characters. You'll get a recovery key next in case you forget it.",
             MIN_PASSWORD_LEN
         ))
-        .color(hint_color),
+        .color(settings::on_surface_variant()),
     );
 
     // Password field — Enter validates length, stashes a copy, advances.
@@ -192,9 +191,10 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             _ => String::new(),
         })
         .color(Reactive::derive(move || {
+            let theme = settings::current_theme();
             match &color_state.borrow().phase {
-                Phase::Setup { error: Some(_) } => Color::rgb(0.9, 0.4, 0.4),
-                _ => Color::rgb(0.7, 0.7, 0.75),
+                Phase::Setup { error: Some(_) } => theme.colors.error,
+                _ => theme.colors.on_surface_variant,
             }
         })),
     );
@@ -294,7 +294,7 @@ fn build_recovery_reveal(
             .margin_x_auto()
             .padding(32.0)
             .gap(16.0)
-            .background(Color::rgb(0.12, 0.12, 0.18))
+            .background(settings::surface())
             .radius(16.0),
     );
 
@@ -306,7 +306,7 @@ fn build_recovery_reveal(
              your vault. Write them down and store them somewhere safe \u{2014} they're \
              shown only once.",
         )
-        .color(Color::rgb(0.7, 0.7, 0.75)),
+        .color(settings::on_surface_variant()),
     );
 
     // 12 words in a 3-row x 4-column grid of fixed-width cells so the
@@ -317,18 +317,22 @@ fn build_recovery_reveal(
         Container::column()
             .gap(8.0)
             .padding(16.0)
-            .background(Color::rgb(0.08, 0.08, 0.12))
+            .background(settings::background())
             .radius(8.0),
     );
-    let num_color = Color::rgb(0.5, 0.5, 0.6);
-    let word_color = Color::rgb(0.9, 0.9, 0.95);
     for (row_idx, row_words) in words.chunks(4).enumerate() {
         let row = tree.add_child(grid, Container::row().gap(12.0));
         for (col, word) in row_words.iter().enumerate() {
             let n = row_idx * 4 + col + 1;
             let cell = tree.add_child(row, Container::row().width(108.0).gap(6.0));
-            tree.add_child(cell, TextWidget::new(format!("{}.", n)).color(num_color));
-            tree.add_child(cell, TextWidget::new((*word).to_string()).color(word_color));
+            tree.add_child(
+                cell,
+                TextWidget::new(format!("{}.", n)).color(settings::on_surface_variant()),
+            );
+            tree.add_child(
+                cell,
+                TextWidget::new((*word).to_string()).color(settings::on_surface()),
+            );
         }
     }
 
@@ -338,7 +342,7 @@ fn build_recovery_reveal(
             "Anyone who has these words can open your vault. Never share them or store \
              them with your password.",
         )
-        .color(Color::rgb(0.95, 0.82, 0.45)),
+        .color(settings::warning()),
     );
 
     let next = Rc::clone(&state);

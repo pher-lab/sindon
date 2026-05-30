@@ -16,9 +16,11 @@ use std::rc::Rc;
 
 use shroud::core::Color;
 use shroud::reactive::{Reactive, Signal};
+use shroud::widgets::layer::LayerOptions;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, ScrollView, TextWidget};
 
+use crate::settings;
 use crate::state::{AppState, Note, NoteId, Phase};
 
 const SIDEBAR_WIDTH: f32 = 260.0;
@@ -42,7 +44,7 @@ pub fn build(
             .height_full()
             .padding(16.0)
             .gap(12.0)
-            .background(Color::rgb(0.08, 0.08, 0.12)),
+            .background(settings::surface()),
     );
 
     let header = tree.add_child(pane, Container::row().gap(8.0).align_center());
@@ -79,6 +81,27 @@ pub fn build(
         Rc::clone(&list_cell),
     );
 
+    // Pinned to the bottom of the pane (the scroll above takes grow:1).
+    // Opens the settings modal — theme + font size, applied live and
+    // persisted on every change.
+    tree.add_child(
+        pane,
+        Button::new("\u{2699} Settings")
+            .radius(6.0)
+            .on_click(|ctx| {
+                ctx.push_layer(
+                    LayerOptions::modal(),
+                    Container::column()
+                        .width(360.0)
+                        .padding(24.0)
+                        .gap(16.0)
+                        .background(settings::surface())
+                        .radius(12.0),
+                    settings::populate_settings_modal,
+                );
+            }),
+    );
+
     list_cell
 }
 
@@ -100,7 +123,7 @@ fn rebuild_list_into(
     if ids.is_empty() {
         tree.add_child(
             parent,
-            TextWidget::new("No notes yet. Click + New.").color(Color::rgb(0.5, 0.5, 0.55)),
+            TextWidget::new("No notes yet. Click + New.").color(settings::on_surface_variant()),
         );
         return;
     }
@@ -137,10 +160,11 @@ fn add_row(
             Phase::Unlocked { selected, .. } => *selected,
             _ => None,
         };
+        let theme = settings::current_theme();
         if selected == Some(note_id) {
-            Color::rgb(0.20, 0.28, 0.50)
+            theme.colors.primary
         } else {
-            Color::rgb(0.13, 0.13, 0.18)
+            theme.colors.surface_variant
         }
     });
 
@@ -176,7 +200,7 @@ fn add_row(
             }
         })
         .background(Color::TRANSPARENT)
-        .hover_background(Color::rgb(0.18, 0.20, 0.30))
+        .hover_background(settings::hover())
         .radius(4.0)
         // Take the entire remaining row width so the click target spans
         // the full row, not just the label glyphs. Without this the user
@@ -193,10 +217,12 @@ fn add_row(
     let del_cell = list_cell;
     tree.add_child(
         row,
+        // Themed red so the destructive action stays legible on both
+        // light and dark surfaces (a neutral fill blended into the row's
+        // own surface_variant background).
         Button::new("✕")
             .radius(4.0)
-            .background(Color::rgb(0.30, 0.15, 0.18))
-            .hover_background(Color::rgb(0.50, 0.20, 0.20))
+            .background(settings::error())
             .on_click(move |ctx| {
                 delete_note(&del_state, note_id, &title_sig, &body_sig);
                 let parent_idx = del_cell.get();
