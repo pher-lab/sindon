@@ -11,9 +11,12 @@
 //!     them into the editor.
 //!   * Subsequent launch: lock screen prompts for the master password,
 //!     opens the SQLCipher DB on success.
-//!   * While unlocked: an auto-save tick (`on_frame`) flushes dirty
-//!     notes every `tick_interval` (default 500 ms). Lock also runs a
-//!     belt-and-suspenders full rewrite before dropping the key.
+//!   * While unlocked: a per-frame tick (`on_frame`) flushes dirty notes
+//!     to SQLCipher every `tick_interval` (default 500 ms) and enforces
+//!     the configured auto-lock — after enough idle time with no input it
+//!     re-locks the vault (drops the key, returns to the lock screen).
+//!     Lock also runs a belt-and-suspenders full rewrite before dropping
+//!     the key.
 
 mod crypto;
 mod editor;
@@ -56,15 +59,34 @@ fn main() {
         .run(|scope| {
             let state = init_state();
 
-            // Auto-save tick — re-runs every `App::tick_interval`
-            // (default 500 ms) for as long as a frame hook is set.
-            // Cheap when nothing's dirty (early-returns inside
-            // flush_dirty), so leaving it always-on costs nothing. It's
-            // a no-op in the Setup / Locked phases.
+            // Per-frame tick — re-runs every `App::tick_interval`
+            // (default 500 ms) for as long as a frame hook is set. Does
+            // two jobs, both no-ops outside `Unlocked`:
+            //
+            //   1. Auto-save: flush dirty notes to SQLCipher. Cheap when
+            //      nothing's dirty (early-returns inside `flush_dirty`),
+            //      so leaving it always-on costs nothing.
+            //   2. Auto-lock: when the configured idle timeout has elapsed
+            //      with no user input, re-encrypt + drop the key and return
+            //      to the lock screen — the same flow as the manual Lock
+            //      button, driven by inactivity instead of a click.
             let state_for_tick = Rc::clone(&state);
-            scope.on_frame(move || {
+            scope.on_frame(move |ctx| {
                 if let Err(e) = state_for_tick.borrow_mut().flush_dirty() {
                     eprintln!("knot: auto-save tick failed: {}", e);
+                }
+
+                let is_unlocked =
+                    matches!(state_for_tick.borrow().phase, Phase::Unlocked { .. });
+                if is_unlocked {
+                    if let Some(timeout) = settings::current_auto_lock().timeout() {
+                        if ctx.idle() >= timeout {
+                            state_for_tick.borrow_mut().lock_and_seal();
+                            let next = Rc::clone(&state_for_tick);
+                            ctx.event_ctx
+                                .replace_screen(move |tree| lock_screen::build(tree, next));
+                        }
+                    }
                 }
             });
 

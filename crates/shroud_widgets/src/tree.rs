@@ -208,6 +208,21 @@ impl WidgetTree {
         self.drain_commands(event_ctx);
     }
 
+    /// Apply commands enqueued on `event_ctx` from outside an event
+    /// dispatch.
+    ///
+    /// Event handlers drain automatically at the end of
+    /// [`Self::dispatch_event`], and initial focus drains inside
+    /// [`Self::flush_pending_focus`]. The per-frame tick hook
+    /// (`AppScope::on_frame`) runs outside both, so the event loop calls
+    /// this right after firing the hook to apply anything it requested —
+    /// most importantly a `replace_screen` for an auto-lock. Loops until
+    /// the queue settles, since applied commands' handlers may enqueue
+    /// more (same drain semantics as dispatch).
+    pub fn apply_pending_commands(&mut self, event_ctx: &mut EventContext) {
+        self.drain_commands(event_ctx);
+    }
+
     /// Add a widget as the root of the tree.
     ///
     /// If a root is already set, it remains as a stranded subtree — use

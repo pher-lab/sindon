@@ -20,8 +20,42 @@ use winit::window::WindowId;
 /// Default cadence for the periodic tick when an `on_frame` hook is set.
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
-type FrameHook = Box<dyn FnMut() + 'static>;
+type FrameHook = Box<dyn FnMut(&mut FrameContext) + 'static>;
 type ShortcutHandler = Box<dyn FnMut(&mut ShortcutContext) + 'static>;
+
+/// Context handed to the per-frame tick hook ([`AppScope::on_frame`]).
+///
+/// Mirrors [`shroud_widgets::shortcut::ShortcutContext`]: the tick reaches
+/// the deferred tree-command queue through the public [`Self::event_ctx`]
+/// field — so it can `replace_screen`, push a layer, etc., exactly like an
+/// event handler — and additionally learns how long the UI has been idle
+/// via [`Self::idle`].
+///
+/// Commands enqueued on `event_ctx` are drained into the tree immediately
+/// after the hook returns (before the redraw the tick schedules), so a
+/// screen swap requested from the tick is laid out and painted on that very
+/// frame.
+pub struct FrameContext<'a> {
+    /// The same deferred command queue event handlers use. Call e.g.
+    /// `ctx.event_ctx.replace_screen(...)` to drive a screen transition
+    /// from the tick.
+    pub event_ctx: &'a mut EventContext,
+    idle: Duration,
+}
+
+impl FrameContext<'_> {
+    /// Time since the last user input event — key press, mouse move,
+    /// click, scroll, or IME activity. Resets to ~zero on any interaction
+    /// and grows monotonically while the user is idle. Use it to drive
+    /// inactivity timers such as an auto-lock.
+    ///
+    /// Note that raw mouse movement counts as activity (matching OS
+    /// screensaver / idle conventions), so simply moving the pointer while
+    /// reading keeps the session active.
+    pub fn idle(&self) -> Duration {
+        self.idle
+    }
+}
 
 thread_local! {
     /// Process-wide OS-theme signal. Lazily created on the first
@@ -140,11 +174,17 @@ impl AppScope {
     /// hook does not fire on input-triggered paints — keep it cheap
     /// and idempotent so the cadence stays predictable.
     ///
+    /// The hook receives a [`FrameContext`], which exposes the deferred
+    /// command queue (`ctx.event_ctx.replace_screen(...)` to swap screens
+    /// from the tick) and [`FrameContext::idle`] (time since the last user
+    /// input, for inactivity timers like an auto-lock). Any commands the
+    /// hook enqueues are applied before the redraw it schedules.
+    ///
     /// Only one hook is supported per app — a second call replaces the
     /// first.
     pub fn on_frame<F>(&mut self, f: F)
     where
-        F: FnMut() + 'static,
+        F: FnMut(&mut FrameContext) + 'static,
     {
         self.frame_hook = Some(Box::new(f));
     }
@@ -459,6 +499,7 @@ impl App {
             cursor_position: Point::new(0.0, 0.0),
             frame_hook,
             next_tick: None,
+            last_input: Instant::now(),
             last_ime_cursor_area: None,
             last_ime_allowed: None,
         };
@@ -471,6 +512,26 @@ impl Default for App {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether a winit window event counts as user activity for the idle
+/// clock behind [`FrameContext::idle`].
+///
+/// Keyboard, pointer (move/click/scroll), and IME events are activity.
+/// OS- or window-manager-driven events (theme change, resize, focus,
+/// redraw, close) are not — counting them would keep an unattended
+/// session alive and defeat an auto-lock. Mouse *movement* is included
+/// deliberately, matching screensaver / OS idle conventions so that
+/// reading a long note (pointer drifting, scrolling) doesn't lock.
+fn is_user_input(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::KeyboardInput { .. }
+            | WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::Ime(_)
+    )
 }
 
 /// Translate a winit named key into the corresponding shroud event.
@@ -588,6 +649,13 @@ struct ShroudEventLoop {
     /// even when unrelated events (mouse moves, focus changes) cause
     /// extra `about_to_wait` calls.
     next_tick: Option<Instant>,
+    /// Timestamp of the most recent user input event (key, mouse
+    /// move/click, scroll, IME). Read by the frame-hook tick to compute
+    /// [`FrameContext::idle`], the basis for inactivity timers like an
+    /// auto-lock. Seeded to construction time so the idle clock starts at
+    /// launch; updated at the top of `window_event` for input-class events
+    /// only (OS-driven events like theme/resize don't count as activity).
+    last_input: Instant,
     /// Most recent IME cursor area pushed to the platform window.
     /// Used to dedupe redundant `set_ime_cursor_area` calls when the
     /// same caret rect gets repainted across many frames (mouse moves,
@@ -649,8 +717,24 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             return;
         }
 
-        if let Some(hook) = self.frame_hook.as_mut() {
-            hook();
+        // Take the hook out so the closure can borrow other `self` fields
+        // (`event_ctx`, `tree`) through the `FrameContext` while it runs,
+        // then put it back. Only one hook exists, so this can't race.
+        if let Some(mut hook) = self.frame_hook.take() {
+            let idle = now.saturating_duration_since(self.last_input);
+            let mut ctx = FrameContext {
+                event_ctx: &mut self.event_ctx,
+                idle,
+            };
+            hook(&mut ctx);
+            self.frame_hook = Some(hook);
+
+            // Apply any deferred commands the tick enqueued (e.g. a
+            // `replace_screen` for an auto-lock) before the redraw below,
+            // mirroring how `dispatch_event` / `flush_pending_focus` drain.
+            if let Some(tree) = self.tree.as_mut() {
+                tree.apply_pending_commands(&mut self.event_ctx);
+            }
         }
         self.next_tick = Some(now + self.config.tick_interval);
         // Nudge a paint so the UI reflects any state the hook touched.
@@ -729,6 +813,14 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Stamp activity for the idle clock before the consuming match.
+        // Only genuine user input counts — OS-driven events (theme change,
+        // resize, redraw) must not keep an otherwise-idle session alive,
+        // or an auto-lock would never fire.
+        if is_user_input(&event) {
+            self.last_input = Instant::now();
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();

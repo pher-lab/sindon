@@ -44,9 +44,9 @@ fn builder_title_accepts_string_and_str() {
 #[allow(dead_code)]
 fn _scope_surface(scope: &mut AppScope) -> WidgetTree {
     let _handle = scope.handle().clone();
-    scope.on_frame(|| {});
+    scope.on_frame(|_ctx| {});
     // Second call must be accepted (replaces the first hook).
-    scope.on_frame(|| {});
+    scope.on_frame(|_ctx| {});
     WidgetTree::new()
 }
 

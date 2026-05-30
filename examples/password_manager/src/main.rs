@@ -487,7 +487,7 @@ fn main() {
             // idle cadence so the countdown refreshes even when the user
             // is idle. Outlives any single screen.
             let tick_state = Rc::clone(&state);
-            scope.on_frame(move || {
+            scope.on_frame(move |_ctx| {
                 tick_state.borrow_mut().clipboard.tick();
             });
 

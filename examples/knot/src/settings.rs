@@ -21,6 +21,7 @@
 
 use std::cell::OnceCell;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +77,46 @@ impl FontSize {
     }
 }
 
+/// Inactivity timeout before the vault auto-locks. `Off` disables the
+/// timer entirely; the others lock the vault (re-encrypt, drop the master
+/// key, return to the lock screen) after the given idle span with no user
+/// input. Discrete so the settings UI is a simple toggle and the on-disk
+/// value stays stable across versions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoLock {
+    Off,
+    #[serde(rename = "1min")]
+    OneMinute,
+    #[default]
+    #[serde(rename = "5min")]
+    FiveMinutes,
+    #[serde(rename = "15min")]
+    FifteenMinutes,
+}
+
+impl AutoLock {
+    /// Idle duration before locking, or `None` when disabled. The
+    /// auto-lock tick compares this against `FrameContext::idle()`.
+    pub fn timeout(self) -> Option<Duration> {
+        match self {
+            AutoLock::Off => None,
+            AutoLock::OneMinute => Some(Duration::from_secs(60)),
+            AutoLock::FiveMinutes => Some(Duration::from_secs(5 * 60)),
+            AutoLock::FifteenMinutes => Some(Duration::from_secs(15 * 60)),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            AutoLock::Off => "Off",
+            AutoLock::OneMinute => "1 min",
+            AutoLock::FiveMinutes => "5 min",
+            AutoLock::FifteenMinutes => "15 min",
+        }
+    }
+}
+
 /// On-disk settings shape. `#[serde(default)]` on each field means a file
 /// written by an older / newer build that's missing a key still loads —
 /// the missing field falls back to its `Default`.
@@ -85,6 +126,8 @@ pub struct Settings {
     pub theme: ThemeChoice,
     #[serde(default)]
     pub font_size: FontSize,
+    #[serde(default)]
+    pub auto_lock: AutoLock,
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -132,6 +175,7 @@ impl Settings {
 pub struct SettingsSignals {
     pub theme: Signal<ThemeChoice>,
     pub font: Signal<FontSize>,
+    pub auto_lock: Signal<AutoLock>,
 }
 
 thread_local! {
@@ -150,6 +194,7 @@ pub fn signals() -> SettingsSignals {
             SettingsSignals {
                 theme: Signal::new(loaded.theme),
                 font: Signal::new(loaded.font_size),
+                auto_lock: Signal::new(loaded.auto_lock),
             }
         })
     })
@@ -174,6 +219,12 @@ pub fn current_theme() -> Theme {
     base.with_font_scale(s.font.get().scale())
 }
 
+/// Current auto-lock preference. Read by the per-frame tick in `main` to
+/// decide whether (and after how long) an idle vault should re-lock.
+pub fn current_auto_lock() -> AutoLock {
+    signals().auto_lock.get()
+}
+
 /// Persist the current signal values. Called after a settings change in
 /// the modal — the signals are the source of truth, so we just snapshot
 /// them and write.
@@ -182,6 +233,7 @@ pub fn persist() {
     Settings {
         theme: s.theme.get(),
         font_size: s.font.get(),
+        auto_lock: s.auto_lock.get(),
     }
     .save();
 }
@@ -318,6 +370,48 @@ pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
         );
     }
 
+    // --- Auto-lock ---
+    tree.add_child(
+        dialog,
+        TextWidget::new("Auto-lock").color(on_surface_variant()),
+    );
+    let lock_row = tree.add_child(dialog, Container::row().gap(8.0));
+    for choice in [
+        AutoLock::Off,
+        AutoLock::OneMinute,
+        AutoLock::FiveMinutes,
+        AutoLock::FifteenMinutes,
+    ] {
+        let sig = s.auto_lock;
+        let bg = Reactive::derive(move || {
+            let t = current_theme();
+            if sig.get() == choice {
+                t.colors.primary
+            } else {
+                t.colors.surface_variant
+            }
+        });
+        let fg = Reactive::derive(move || {
+            let t = current_theme();
+            if sig.get() == choice {
+                t.colors.on_primary
+            } else {
+                t.colors.on_surface
+            }
+        });
+        tree.add_child(
+            lock_row,
+            Button::new(choice.label())
+                .radius(6.0)
+                .background(bg)
+                .text_color(fg)
+                .on_click(move |_ctx| {
+                    sig.set(choice);
+                    persist();
+                }),
+        );
+    }
+
     // --- Done ---
     let done_row = tree.add_child(dialog, Container::row().gap(8.0).justify_center());
     tree.add_child(
@@ -344,6 +438,7 @@ mod tests {
         let original = Settings {
             theme: ThemeChoice::Light,
             font_size: FontSize::Large,
+            auto_lock: AutoLock::FifteenMinutes,
         };
         let json = serde_json::to_string(&original).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
@@ -352,10 +447,12 @@ mod tests {
 
     #[test]
     fn missing_fields_fall_back_to_default() {
-        // A file from a build that only knew about `theme` must still load.
+        // A file from a build that only knew about `theme` must still load —
+        // including the older two-field file that predates `auto_lock`.
         let back: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
         assert_eq!(back.theme, ThemeChoice::Dark);
         assert_eq!(back.font_size, FontSize::Medium);
+        assert_eq!(back.auto_lock, AutoLock::FiveMinutes);
 
         // And an empty object loads to all-defaults.
         let empty: Settings = serde_json::from_str("{}").unwrap();
@@ -366,5 +463,29 @@ mod tests {
     fn font_scale_is_monotonic() {
         assert!(FontSize::Small.scale() < FontSize::Medium.scale());
         assert!(FontSize::Medium.scale() < FontSize::Large.scale());
+    }
+
+    #[test]
+    fn auto_lock_default_is_five_minutes() {
+        assert_eq!(AutoLock::default(), AutoLock::FiveMinutes);
+        assert_eq!(AutoLock::FiveMinutes.timeout(), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn auto_lock_off_has_no_timeout() {
+        assert_eq!(AutoLock::Off.timeout(), None);
+    }
+
+    #[test]
+    fn auto_lock_serializes_with_stable_keys() {
+        // The on-disk keys must stay stable across versions — assert the
+        // exact rename strings so a careless edit can't silently break
+        // existing settings files.
+        assert_eq!(
+            serde_json::to_string(&AutoLock::OneMinute).unwrap(),
+            r#""1min""#
+        );
+        let back: AutoLock = serde_json::from_str(r#""15min""#).unwrap();
+        assert_eq!(back, AutoLock::FifteenMinutes);
     }
 }
