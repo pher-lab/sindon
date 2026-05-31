@@ -284,6 +284,68 @@ fn margin_x_auto_card_allocates_wrapped_text_height_and_centers() {
     );
 }
 
+// A vertically-centered card holding a Button used to render ~one button-
+// height taller than its content, leaving dead space below the button (the
+// knot lock-screen gap). Root cause: the card is a non-root flex item that
+// hugs its content, and `Button` is a measured leaf that *also* carried a
+// `min_height` plus `padding` in its style. That combination makes Taffy
+// over-count the card's content height. The fix folds the button's minimum
+// height into `measure` (no `min_size` in the style), so this card must now
+// track its laid-out children exactly. `SecureInput` — same padding + min
+// height, but no `measure` — never triggered it and is the control here.
+#[test]
+fn centered_card_with_button_hugs_content_height() {
+    use shroud_text::TextEngine;
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::column()
+            .width_full()
+            .height_full()
+            .padding(24.0)
+            .justify_center(),
+    );
+    let card = tree.add_child(
+        root,
+        Container::column()
+            .width(448.0)
+            .margin_x_auto()
+            .padding(32.0)
+            .gap(16.0),
+    );
+    tree.add_child(card, TextWidget::new("Knot").font_size(40.0));
+    tree.add_child(card, TextWidget::new("A knot only you can untie."));
+    tree.add_child(card, SecureInput::new().placeholder("pw"));
+    let button = tree.add_child(
+        card,
+        Button::new("Forgot password? Use your recovery key").radius(8.0),
+    );
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(1082.0, 753.0, &mut engine, &theme);
+
+    let card_rect = tree.layout_rect(card);
+    let button_rect = tree.layout_rect(button);
+
+    // Dead space between the button's bottom and the card's bottom, beyond the
+    // card's own 32px bottom padding. Must be ~0 — the card hugs its content.
+    let slack = (card_rect.origin.y + card_rect.size.height)
+        - (button_rect.origin.y + button_rect.size.height)
+        - 32.0;
+    assert!(
+        slack.abs() < 1.0,
+        "card left {slack}px of dead space below the button (should hug content)",
+    );
+
+    // The button keeps its minimum visual height (font + 2*8 padding), proving
+    // the minimum survived the move from `min_height` into `measure`.
+    assert!(
+        button_rect.size.height >= theme.typography.body.font_size + 16.0,
+        "button shorter than its minimum height: {}",
+        button_rect.size.height,
+    );
+}
+
 // ── Events ────────────────────────────────────────────────────────
 
 #[test]

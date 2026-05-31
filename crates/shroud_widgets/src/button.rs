@@ -186,12 +186,22 @@ impl Widget for Button {
     }
 
     fn style(&self) -> FlexStyle {
-        let font_size = self.font_size.unwrap_or(16.0);
+        // The button's minimum height (font + vertical padding) is enforced in
+        // `measure` via `height.max(font_size)`, *not* with a `min_height` here.
+        // That's deliberate: this widget is a measured leaf, and a leaf that
+        // carries both `padding` and a `min_size` makes Taffy over-count the
+        // content height of an ancestor that hugs its content. A vertically-
+        // centered card (a non-root flex item with no explicit height) then
+        // resolves ~one min-height taller than its laid-out children and leaves
+        // dead space below the button — the knot lock-screen gap. Folding the
+        // minimum into `measure` (which Taffy then pads) keeps the same visual
+        // height without seeding that over-count. `SecureInput`, which has no
+        // measure, is unaffected and keeps its `min_height`.
         let mut style = FlexStyle::new().padding(8.0).center();
         if self.flex_grow > 0.0 {
             style = style.grow(self.flex_grow);
         }
-        style.min_height(font_size + 16.0)
+        style
     }
 
     fn visible(&self) -> bool {

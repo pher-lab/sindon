@@ -586,7 +586,10 @@ fn handler_push_layer_via_event_context() {
                 );
             }),
     );
-    tree.compute_layout(400.0, 300.0);
+    // Measured layout: the button derives its height from `measure` (it no
+    // longer carries a `min_height` in its style), so it must be measured to
+    // be tall enough to receive the click — same as the real event loop.
+    measured_layout(&mut tree, 400.0, 300.0);
 
     assert_eq!(tree.layer_count(), 0);
     dispatch(
