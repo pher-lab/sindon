@@ -186,17 +186,19 @@ impl Widget for Button {
     }
 
     fn style(&self) -> FlexStyle {
-        // The button's minimum height (font + vertical padding) is enforced in
-        // `measure` via `height.max(font_size)`, *not* with a `min_height` here.
-        // That's deliberate: this widget is a measured leaf, and a leaf that
-        // carries both `padding` and a `min_size` makes Taffy over-count the
-        // content height of an ancestor that hugs its content. A vertically-
-        // centered card (a non-root flex item with no explicit height) then
-        // resolves ~one min-height taller than its laid-out children and leaves
-        // dead space below the button — the knot lock-screen gap. Folding the
-        // minimum into `measure` (which Taffy then pads) keeps the same visual
-        // height without seeding that over-count. `SecureInput`, which has no
-        // measure, is unaffected and keeps its `min_height`.
+        // Measured-leaf invariant: a widget that reports its size through
+        // `measure` must NOT also declare a `min_size` here. When a measured
+        // leaf carries a `min_size` and that min diverges from the measured
+        // size, Taffy over-counts the content height of an ancestor that hugs
+        // its content — a vertically-centered card (a non-root flex item with
+        // no explicit height) then resolves taller than its laid-out children
+        // and leaves dead space below the last child (the knot lock-screen
+        // gap). Padding amplifies the over-count but isn't required to trigger
+        // it. So the button's minimum height (font + the 16px Taffy adds for
+        // padding) lives in `measure` via `height.max(font_size)`, giving the
+        // same visual height without a style `min_size`. See `TextWidget::style`
+        // for the same fix; `SecureInput` has no `measure`, so it's immune and
+        // keeps its `min_height`.
         let mut style = FlexStyle::new().padding(8.0).center();
         if self.flex_grow > 0.0 {
             style = style.grow(self.flex_grow);

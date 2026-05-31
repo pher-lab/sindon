@@ -284,66 +284,83 @@ fn margin_x_auto_card_allocates_wrapped_text_height_and_centers() {
     );
 }
 
-// A vertically-centered card holding a Button used to render ~one button-
-// height taller than its content, leaving dead space below the button (the
-// knot lock-screen gap). Root cause: the card is a non-root flex item that
-// hugs its content, and `Button` is a measured leaf that *also* carried a
-// `min_height` plus `padding` in its style. That combination makes Taffy
-// over-count the card's content height. The fix folds the button's minimum
-// height into `measure` (no `min_size` in the style), so this card must now
-// track its laid-out children exactly. `SecureInput` — same padding + min
-// height, but no `measure` — never triggered it and is the control here.
+// A vertically-centered card holding text + a Button used to render taller
+// than its content, leaving dead space below the last child (the knot lock-
+// screen gap). Root cause: the card is a non-root flex item that hugs its
+// content, and `Button`/`TextWidget` are measured leaves that *also* carried a
+// style `min_size`. When that min diverges from the measured size, Taffy over-
+// counts the card's content height. The fix drops `min_size` from both leaves
+// (their minimum lives in `measure`), so this card must track its laid-out
+// children exactly. `SecureInput` — same padding + min height, but no
+// `measure` — never triggered it and is the control here.
+//
+// Critically this is checked across font scales: at scale 1.0 the text widgets
+// happened to measure exactly their old hardcoded `min_height(22)`, hiding the
+// bug; at "Large" (1.15) the measured line height diverged and each text added
+// ~one line of phantom slack (the user's vault was set to Large).
 #[test]
 fn centered_card_with_button_hugs_content_height() {
     use shroud_text::TextEngine;
-    let mut tree = WidgetTree::new();
-    let root = tree.set_root(
-        Container::column()
-            .width_full()
-            .height_full()
-            .padding(24.0)
-            .justify_center(),
-    );
-    let card = tree.add_child(
-        root,
-        Container::column()
-            .width(448.0)
-            .margin_x_auto()
-            .padding(32.0)
-            .gap(16.0),
-    );
-    tree.add_child(card, TextWidget::new("Knot").font_size(40.0));
-    tree.add_child(card, TextWidget::new("A knot only you can untie."));
-    tree.add_child(card, SecureInput::new().placeholder("pw"));
-    let button = tree.add_child(
-        card,
-        Button::new("Forgot password? Use your recovery key").radius(8.0),
-    );
 
-    let mut engine = TextEngine::new();
-    let theme = Theme::default();
-    tree.compute_layout_with_measure(1082.0, 753.0, &mut engine, &theme);
+    fn card_and_button_at(scale: f32) -> (shroud_core::Rect, shroud_core::Rect, f32) {
+        let mut tree = WidgetTree::new();
+        let root = tree.set_root(
+            Container::column()
+                .width_full()
+                .height_full()
+                .padding(24.0)
+                .justify_center(),
+        );
+        let card = tree.add_child(
+            root,
+            Container::column()
+                .width(448.0)
+                .margin_x_auto()
+                .padding(32.0)
+                .gap(16.0),
+        );
+        tree.add_child(card, TextWidget::new("Knot").font_size(40.0));
+        tree.add_child(card, TextWidget::new("A knot only you can untie."));
+        tree.add_child(card, TextWidget::new("Master password:"));
+        tree.add_child(card, SecureInput::new().placeholder("pw"));
+        tree.add_child(card, TextWidget::new("Locked."));
+        let button = tree.add_child(
+            card,
+            Button::new("Forgot password? Use your recovery key").radius(8.0),
+        );
 
-    let card_rect = tree.layout_rect(card);
-    let button_rect = tree.layout_rect(button);
+        let mut engine = TextEngine::new();
+        let theme = Theme::default().with_font_scale(scale);
+        tree.compute_layout_with_measure(1082.0, 753.0, &mut engine, &theme);
+        (
+            tree.layout_rect(card),
+            tree.layout_rect(button),
+            theme.typography.body.font_size,
+        )
+    }
 
-    // Dead space between the button's bottom and the card's bottom, beyond the
-    // card's own 32px bottom padding. Must be ~0 — the card hugs its content.
-    let slack = (card_rect.origin.y + card_rect.size.height)
-        - (button_rect.origin.y + button_rect.size.height)
-        - 32.0;
-    assert!(
-        slack.abs() < 1.0,
-        "card left {slack}px of dead space below the button (should hug content)",
-    );
+    // Small / Medium / Large font scales (knot's settings map to these).
+    for scale in [0.875_f32, 1.0, 1.15] {
+        let (card_rect, button_rect, body_font) = card_and_button_at(scale);
 
-    // The button keeps its minimum visual height (font + 2*8 padding), proving
-    // the minimum survived the move from `min_height` into `measure`.
-    assert!(
-        button_rect.size.height >= theme.typography.body.font_size + 16.0,
-        "button shorter than its minimum height: {}",
-        button_rect.size.height,
-    );
+        // Dead space between the button's bottom and the card's bottom, beyond
+        // the card's 32px bottom padding. Must be ~0 — the card hugs content.
+        let slack = (card_rect.origin.y + card_rect.size.height)
+            - (button_rect.origin.y + button_rect.size.height)
+            - 32.0;
+        assert!(
+            slack.abs() < 1.0,
+            "scale {scale}: card left {slack}px of dead space below the button",
+        );
+
+        // The button keeps its minimum visual height (font + 2*8 padding),
+        // proving the minimum survived the move from `min_height` to `measure`.
+        assert!(
+            button_rect.size.height >= body_font + 16.0,
+            "scale {scale}: button shorter than its minimum: {}",
+            button_rect.size.height,
+        );
+    }
 }
 
 // ── Events ────────────────────────────────────────────────────────

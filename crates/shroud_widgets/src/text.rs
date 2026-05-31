@@ -190,8 +190,16 @@ impl TextWidget {
 
 impl Widget for TextWidget {
     fn style(&self) -> FlexStyle {
-        let line_height = self.line_height.unwrap_or(22.0);
-        FlexStyle::new().min_height(line_height)
+        // No `min_height` here: this is a measured leaf, and its height comes
+        // from `measure` (the shaped line height). Declaring a style `min_size`
+        // *and* a measure makes Taffy over-count the content height of a
+        // content-hugging flex ancestor whenever the two diverge — which they
+        // do as soon as the font scale isn't 1.0, because a style `min_height`
+        // can't see the theme's scaled line height (style() has no theme) and
+        // would be a stale constant. The symptom was a centered card growing
+        // ~one line per text taller than its content at "Large" font size. See
+        // `Button::style` for the same invariant.
+        FlexStyle::new()
     }
 
     fn measure(&self, available_width: Option<f32>, ctx: &mut MeasureContext) -> Option<Size> {
