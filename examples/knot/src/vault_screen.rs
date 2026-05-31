@@ -35,10 +35,23 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
 
     let title_sig = Signal::new(initial_title);
     let body_sig = Signal::new(initial_body);
+    // Edit ⇄ preview toggle for the editor pane. Lives here (alongside the
+    // title/body signals) because the sidebar resets it to edit mode whenever
+    // the active note changes — selecting/creating/deleting a note drops you
+    // back into the editor rather than leaving a stale preview of the old
+    // body on screen.
+    let preview_sig = Signal::new(false);
 
     let root = tree.set_root(Container::row().width_full().height_full());
 
-    sidebar::build(tree, root, Rc::clone(&state), title_sig, body_sig);
+    sidebar::build(
+        tree,
+        root,
+        Rc::clone(&state),
+        title_sig,
+        body_sig,
+        preview_sig,
+    );
 
-    editor::build(tree, root, state, title_sig, body_sig);
+    editor::build(tree, root, state, title_sig, body_sig, preview_sig);
 }

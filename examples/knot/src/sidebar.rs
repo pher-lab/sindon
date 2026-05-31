@@ -36,6 +36,7 @@ pub fn build(
     state: Rc<RefCell<AppState>>,
     title_sig: Signal<String>,
     body_sig: Signal<String>,
+    preview_sig: Signal<bool>,
 ) -> Rc<Cell<usize>> {
     let pane = tree.add_child(
         parent,
@@ -57,12 +58,12 @@ pub fn build(
     tree.add_child(
         header,
         Button::new("+ New").radius(6.0).on_click(move |ctx| {
-            if create_note(&new_state, &title_sig, &body_sig).is_some() {
+            if create_note(&new_state, &title_sig, &body_sig, preview_sig).is_some() {
                 let parent_idx = new_cell.get();
                 let s = Rc::clone(&new_state);
                 let c = Rc::clone(&new_cell);
                 ctx.rebuild_children(parent_idx, move |tree, parent| {
-                    rebuild_list_into(tree, parent, s, title_sig, body_sig, c);
+                    rebuild_list_into(tree, parent, s, title_sig, body_sig, preview_sig, c);
                 });
             }
         }),
@@ -78,6 +79,7 @@ pub fn build(
         Rc::clone(&state),
         title_sig,
         body_sig,
+        preview_sig,
         Rc::clone(&list_cell),
     );
 
@@ -113,6 +115,7 @@ fn rebuild_list_into(
     state: Rc<RefCell<AppState>>,
     title_sig: Signal<String>,
     body_sig: Signal<String>,
+    preview_sig: Signal<bool>,
     list_cell: Rc<Cell<usize>>,
 ) {
     let ids: Vec<NoteId> = match &state.borrow().phase {
@@ -136,11 +139,17 @@ fn rebuild_list_into(
             Rc::clone(&state),
             title_sig,
             body_sig,
+            preview_sig,
             Rc::clone(&list_cell),
         );
     }
 }
 
+// Tree-builder for one note row. The argument list is wide because it threads
+// the editor's shared note signals (title / body / preview) plus the rebuild
+// target alongside the usual tree/parent/state — bundling them into a struct
+// would be churn for no real readability win at a single private call site.
+#[allow(clippy::too_many_arguments)]
 fn add_row(
     tree: &mut WidgetTree,
     parent: usize,
@@ -148,6 +157,7 @@ fn add_row(
     state: Rc<RefCell<AppState>>,
     title_sig: Signal<String>,
     body_sig: Signal<String>,
+    preview_sig: Signal<bool>,
     list_cell: Rc<Cell<usize>>,
 ) {
     // Row container — holds the click-target button and a "✕" delete button
@@ -209,7 +219,7 @@ fn add_row(
         // suggests the whole row is the affordance.
         .grow(1.0)
         .on_click(move |_ctx| {
-            select_note(&click_state, note_id, &title_sig, &body_sig);
+            select_note(&click_state, note_id, &title_sig, &body_sig, preview_sig);
         }),
     );
 
@@ -224,12 +234,12 @@ fn add_row(
             .radius(4.0)
             .background(settings::error())
             .on_click(move |ctx| {
-                delete_note(&del_state, note_id, &title_sig, &body_sig);
+                delete_note(&del_state, note_id, &title_sig, &body_sig, preview_sig);
                 let parent_idx = del_cell.get();
                 let s = Rc::clone(&del_state);
                 let c = Rc::clone(&del_cell);
                 ctx.rebuild_children(parent_idx, move |tree, parent| {
-                    rebuild_list_into(tree, parent, s, title_sig, body_sig, c);
+                    rebuild_list_into(tree, parent, s, title_sig, body_sig, preview_sig, c);
                 });
             }),
     );
@@ -240,6 +250,7 @@ fn select_note(
     note_id: NoteId,
     title_sig: &Signal<String>,
     body_sig: &Signal<String>,
+    preview_sig: Signal<bool>,
 ) {
     let snapshot = {
         let s = state.borrow();
@@ -263,12 +274,18 @@ fn select_note(
     }
     title_sig.set(new_title);
     body_sig.set(new_body);
+    // Land on the editor for the newly-selected note rather than carrying the
+    // previous note's rendered preview over (the preview subtree is only
+    // rebuilt on an explicit edit→preview toggle, so without this it would
+    // show stale content).
+    preview_sig.set(false);
 }
 
 fn create_note(
     state: &Rc<RefCell<AppState>>,
     title_sig: &Signal<String>,
     body_sig: &Signal<String>,
+    preview_sig: Signal<bool>,
 ) -> Option<NoteId> {
     let new_id = {
         let mut s = state.borrow_mut();
@@ -290,6 +307,8 @@ fn create_note(
     };
     title_sig.set(String::new());
     body_sig.set(String::new());
+    // A fresh note opens in the editor, not in a preview of an empty body.
+    preview_sig.set(false);
     // Mark the new (empty) note dirty so the next auto-save tick writes
     // its row to SQLCipher — without this, a brand-new note that the
     // user never edits would silently disappear at lock time (no row
@@ -306,6 +325,7 @@ fn delete_note(
     note_id: NoteId,
     title_sig: &Signal<String>,
     body_sig: &Signal<String>,
+    preview_sig: Signal<bool>,
 ) {
     // `delete_note_persisted` updates the in-memory vec, drops the
     // row from SQLCipher, and re-selects a sibling if the deleted
@@ -337,5 +357,9 @@ fn delete_note(
             title_sig.set(t);
             body_sig.set(b);
         }
+        // The active note changed (deleted note was selected → a sibling, or
+        // none, is now current): drop back to the editor so we don't show a
+        // stale preview of the note that's gone.
+        preview_sig.set(false);
     }
 }

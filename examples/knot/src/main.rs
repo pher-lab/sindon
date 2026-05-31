@@ -21,6 +21,7 @@
 mod crypto;
 mod editor;
 mod lock_screen;
+mod preview;
 mod recovery_screen;
 mod settings;
 mod setup_screen;

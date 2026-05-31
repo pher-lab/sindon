@@ -6,16 +6,31 @@
 //! to rebuild the subtree. `on_change` writes back to the selected note
 //! in `AppState`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, Input, TextWidget};
+use shroud::widgets::{Button, Container, Input, ScrollView, TextWidget};
 
 use crate::lock_screen;
+use crate::preview;
 use crate::settings;
 use crate::state::{AppState, Phase};
+
+/// True when the app is unlocked *and* a note is selected — the condition for
+/// showing any editing surface at all (inputs or preview). Shared by the
+/// edit/preview area visibilities and the Preview toggle button so they flip
+/// together.
+fn note_selected(state: &Rc<RefCell<AppState>>) -> bool {
+    matches!(
+        &state.borrow().phase,
+        Phase::Unlocked {
+            selected: Some(_),
+            ..
+        }
+    )
+}
 
 pub fn build(
     tree: &mut WidgetTree,
@@ -23,6 +38,7 @@ pub fn build(
     state: Rc<RefCell<AppState>>,
     title_sig: Signal<String>,
     body_sig: Signal<String>,
+    preview_sig: Signal<bool>,
 ) {
     let pane = tree.add_child(
         parent,
@@ -34,9 +50,10 @@ pub fn build(
             .background(settings::background()),
     );
 
-    // Header: status text on the left, Lock button on the right. Status
-    // reads selection from state so it nudges the user when nothing is
-    // selected ("No note selected — click + New").
+    // Header: status text on the left, then a spacer, then the Preview/Edit
+    // toggle and the Lock button on the right. Status reads selection from
+    // state so it nudges the user when nothing is selected ("No note selected
+    // — click + New").
     let header = tree.add_child(pane, Container::row().gap(12.0).align_center());
 
     let status_state = Rc::clone(&state);
@@ -66,8 +83,48 @@ pub fn build(
         .color(settings::on_surface_variant()),
     );
 
-    // Spacer pushes the Lock button to the far right.
+    // Spacer pushes the trailing buttons to the far right.
     tree.add_child(header, Container::row().grow(1.0));
+
+    // Preview / Edit toggle. The content column it rebuilds is created below
+    // (inside `preview_area`); its index is stashed in this cell because this
+    // closure captures the cell at build time and only learns the real index
+    // once that column is inserted. Hidden when no note is selected so the
+    // header's "No note selected" prompt stands alone.
+    let preview_content_cell: Rc<Cell<usize>> = Rc::new(Cell::new(0));
+    let toggle_cell = Rc::clone(&preview_content_cell);
+    let toggle_visible_state = Rc::clone(&state);
+    tree.add_child(
+        header,
+        Button::reactive_label(move || {
+            if preview_sig.get() {
+                "Edit".to_string()
+            } else {
+                "Preview".to_string()
+            }
+        })
+        .radius(8.0)
+        .visible(Reactive::derive(move || {
+            note_selected(&toggle_visible_state)
+        }))
+        .on_click(move |ctx| {
+            if preview_sig.get() {
+                // Preview → edit: just flip back; the inputs hold the live body.
+                preview_sig.set(false);
+            } else {
+                // Edit → preview: re-render the current body into the preview
+                // column, *then* show it. Rebuilding on every entry keeps the
+                // preview in sync with edits made since it was last shown
+                // (there is no reactive markdown widget — see `preview.rs`).
+                let body = body_sig.get_clone();
+                let parent_idx = toggle_cell.get();
+                ctx.rebuild_children(parent_idx, move |tree, parent| {
+                    preview::render(tree, parent, &body);
+                });
+                preview_sig.set(true);
+            }
+        }),
+    );
 
     let lock_state = Rc::clone(&state);
     tree.add_child(
@@ -83,9 +140,10 @@ pub fn build(
     );
 
     // Editor area: title + body inputs. Hidden via `display: none` when no
-    // note is selected, so the header's "No note selected" prompt stands
-    // alone instead of showing inputs that look editable but silently drop
-    // typing (`write_selected` no-ops without a selection).
+    // note is selected (so the header's "No note selected" prompt stands alone
+    // instead of showing inputs that look editable but silently drop typing —
+    // `write_selected` no-ops without a selection) *and* while previewing, so
+    // the rendered preview replaces the raw-markdown inputs in place.
     let area_state = Rc::clone(&state);
     let editor_area = tree.add_child(
         pane,
@@ -94,13 +152,7 @@ pub fn build(
             .grow(1.0)
             .gap(12.0)
             .visible(Reactive::derive(move || {
-                matches!(
-                    &area_state.borrow().phase,
-                    Phase::Unlocked {
-                        selected: Some(_),
-                        ..
-                    }
-                )
+                note_selected(&area_state) && !preview_sig.get()
             })),
     );
 
@@ -142,6 +194,24 @@ pub fn build(
                 });
             }),
     );
+
+    // Preview area: a scrollable rendered-markdown view, shown in place of the
+    // inputs while previewing. Mirrors `editor_area`'s visibility, inverted on
+    // the preview flag. Its content column starts empty and is (re)populated by
+    // the header toggle's `rebuild_children` each time we enter preview.
+    let preview_state = Rc::clone(&state);
+    let preview_area = tree.add_child(
+        pane,
+        Container::column()
+            .width_full()
+            .grow(1.0)
+            .visible(Reactive::derive(move || {
+                note_selected(&preview_state) && preview_sig.get()
+            })),
+    );
+    let preview_scroll = tree.add_child(preview_area, ScrollView::new().width_full().grow(1.0));
+    let preview_content = tree.add_child(preview_scroll, Container::column().width_full().gap(12.0));
+    preview_content_cell.set(preview_content);
 }
 
 /// Apply `f` to the currently selected note's mutable state and mark
