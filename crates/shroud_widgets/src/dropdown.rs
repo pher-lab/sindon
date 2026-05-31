@@ -210,10 +210,14 @@ impl Widget for Dropdown {
     }
 
     fn style(&self) -> FlexStyle {
-        let font_size = self.font_size.unwrap_or(16.0);
-        FlexStyle::new()
-            .padding_trbl(8.0, 12.0, 8.0, 12.0)
-            .min_height(font_size + 16.0)
+        // Measured-leaf invariant (see `Button::style`): a widget that reports
+        // its size through `measure` must NOT also declare a `min_size` here.
+        // When the two diverge, Taffy over-counts the content height of a
+        // content-hugging ancestor (a vertically-centered card resolves taller
+        // than its laid-out children and leaves dead space below the last one).
+        // The trigger's minimum height lives in `measure` instead — see the
+        // height floor there.
+        FlexStyle::new().padding_trbl(8.0, 12.0, 8.0, 12.0)
     }
 
     fn measure(&self, available_width: Option<f32>, ctx: &mut MeasureContext) -> Option<Size> {
@@ -241,7 +245,17 @@ impl Widget for Dropdown {
             Some(aw) if needed_width > aw => aw,
             _ => needed_width,
         };
-        let height = (font_size + 16.0).ceil();
+        // Trigger height. This used to be enforced by `style().min_height`, but
+        // a measured leaf must not carry a style `min_size` (Taffy then
+        // over-counts a content-hugging ancestor — the centered-card dead-space
+        // bug; see `Dropdown::style`). The old `min_height(font_size + 16)` was
+        // a border-box floor, and Taffy adds the 16px vertical padding on top of
+        // whatever `measure` returns, so this `font_size + 16` content height
+        // reproduces the same `font_size + 32` border box. It already exceeds the
+        // old border-box minimum's content equivalent (`font_size`), so the
+        // single-line minimum is preserved without an extra `.max`.
+        let min_content_height = font_size; // = old min_height (font+16) − 16 padding
+        let height = (font_size + 16.0).max(min_content_height).ceil();
         Some(Size::new(width.ceil(), height))
     }
 

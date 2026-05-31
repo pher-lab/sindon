@@ -363,6 +363,104 @@ fn centered_card_with_button_hugs_content_height() {
     }
 }
 
+// Same dead-space invariant as `centered_card_with_button_hugs_content_height`,
+// for the other two measured leaves that used to carry a style `min_size`:
+// `Dropdown`'s trigger and `MenuItem`. Both moved their minimum height out of
+// `style().min_size` and into `measure`, so a vertically-centered card must
+// now hug each one's laid-out height exactly (no phantom slack below it) while
+// the minimum visual height still survives. Checked across font scales because
+// the over-count only diverges visibly once the measured height and the old
+// `min_height` disagree (the lesson from the button bug).
+#[test]
+fn centered_card_with_dropdown_and_menu_item_hug_content_height() {
+    use shroud_text::TextEngine;
+
+    // Build a centered, content-hugging card whose last child is supplied by
+    // `add_last`. Returns (card rect, last-child rect, scaled body font size).
+    fn card_and_last_child<F>(
+        scale: f32,
+        add_last: F,
+    ) -> (shroud_core::Rect, shroud_core::Rect, f32)
+    where
+        F: FnOnce(&mut WidgetTree, usize) -> usize,
+    {
+        let mut tree = WidgetTree::new();
+        let root = tree.set_root(
+            Container::column()
+                .width_full()
+                .height_full()
+                .padding(24.0)
+                .justify_center(),
+        );
+        let card = tree.add_child(
+            root,
+            Container::column()
+                .width(448.0)
+                .margin_x_auto()
+                .padding(32.0)
+                .gap(16.0),
+        );
+        tree.add_child(card, TextWidget::new("Settings"));
+        tree.add_child(card, TextWidget::new("Pick a value:"));
+        let last = add_last(&mut tree, card);
+
+        let mut engine = TextEngine::new();
+        let theme = Theme::default().with_font_scale(scale);
+        tree.compute_layout_with_measure(1082.0, 753.0, &mut engine, &theme);
+        (
+            tree.layout_rect(card),
+            tree.layout_rect(last),
+            theme.typography.body.font_size,
+        )
+    }
+
+    for scale in [0.875_f32, 1.0, 1.15] {
+        // ── Dropdown trigger ──
+        let (card_rect, dd_rect, body_font) = card_and_last_child(scale, |tree, card| {
+            let selected = Signal::new(0_usize);
+            tree.add_child(
+                card,
+                Dropdown::new(
+                    vec!["Light".into(), "Dark".into(), "System".into()],
+                    selected,
+                ),
+            )
+        });
+        let slack = (card_rect.origin.y + card_rect.size.height)
+            - (dd_rect.origin.y + dd_rect.size.height)
+            - 32.0;
+        assert!(
+            slack.abs() < 1.0,
+            "scale {scale}: dropdown card left {slack}px of dead space below the trigger",
+        );
+        // Trigger keeps at least its old border-box minimum (`font + 16` from
+        // the measure floor plus the 16px vertical padding Taffy adds).
+        assert!(
+            dd_rect.size.height >= body_font + 16.0,
+            "scale {scale}: dropdown shorter than its minimum: {}",
+            dd_rect.size.height,
+        );
+
+        // ── MenuItem row ──
+        let (card_rect, mi_rect, _body) = card_and_last_child(scale, |tree, card| {
+            tree.add_child(card, MenuItem::new("Delete", |_ctx| {}))
+        });
+        let slack = (card_rect.origin.y + card_rect.size.height)
+            - (mi_rect.origin.y + mi_rect.size.height)
+            - 32.0;
+        assert!(
+            slack.abs() < 1.0,
+            "scale {scale}: menu-item card left {slack}px of dead space below the row",
+        );
+        // Row keeps at least its old `min_height(28)` border box.
+        assert!(
+            mi_rect.size.height >= 28.0,
+            "scale {scale}: menu item shorter than its 28px minimum: {}",
+            mi_rect.size.height,
+        );
+    }
+}
+
 // ── Events ────────────────────────────────────────────────────────
 
 #[test]

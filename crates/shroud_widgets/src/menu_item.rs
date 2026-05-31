@@ -65,9 +65,12 @@ impl MenuItem {
 
 impl Widget for MenuItem {
     fn style(&self) -> FlexStyle {
-        FlexStyle::new()
-            .padding_trbl(6.0, 12.0, 6.0, 12.0)
-            .min_height(28.0)
+        // Measured-leaf invariant (see `Button::style`): no style `min_size` on
+        // a widget that also reports its size via `measure`, or Taffy
+        // over-counts the content height of a content-hugging ancestor (the
+        // centered-card dead-space bug). The 28px minimum row height lives in
+        // `measure` instead — see the height floor there.
+        FlexStyle::new().padding_trbl(6.0, 12.0, 6.0, 12.0)
     }
 
     fn measure(&self, available_width: Option<f32>, ctx: &mut MeasureContext) -> Option<Size> {
@@ -86,9 +89,16 @@ impl Widget for MenuItem {
             }
             _ => natural,
         };
+        // Floor the content height to the old `min_height(28)` border box. That
+        // minimum used to live in `style().min_size`, but a measured leaf must
+        // not carry one (see `MenuItem::style`). Taffy adds the 12px vertical
+        // padding on top of this content height, so the content floor is
+        // `28 − 12 = 16`; without it, short rows at small font scales would dip
+        // below their historical 28px once the style `min_size` is gone.
+        let min_content_height = 28.0 - 12.0; // old min_height − vertical padding
         Some(Size::new(
             shaped.width.ceil(),
-            shaped.height.max(font_size).ceil(),
+            shaped.height.max(font_size).max(min_content_height).ceil(),
         ))
     }
 
