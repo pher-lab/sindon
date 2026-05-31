@@ -292,7 +292,9 @@ pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
 
     tree.add_child(
         dialog,
-        TextWidget::new("Settings").font_size(22.0).color(on_surface()),
+        TextWidget::new("Settings")
+            .font_size(22.0)
+            .color(on_surface()),
     );
 
     // --- Theme ---
@@ -468,7 +470,10 @@ mod tests {
     #[test]
     fn auto_lock_default_is_five_minutes() {
         assert_eq!(AutoLock::default(), AutoLock::FiveMinutes);
-        assert_eq!(AutoLock::FiveMinutes.timeout(), Some(Duration::from_secs(300)));
+        assert_eq!(
+            AutoLock::FiveMinutes.timeout(),
+            Some(Duration::from_secs(300))
+        );
     }
 
     #[test]

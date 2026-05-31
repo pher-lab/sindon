@@ -141,7 +141,10 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
     let storage = match VaultStorage::open(&paths.db, &dek) {
         Ok(s) => s,
         Err(StorageError::BadKey) => {
-            set_error(state, "vault key mismatch (corrupted or partial restore)".into());
+            set_error(
+                state,
+                "vault key mismatch (corrupted or partial restore)".into(),
+            );
             return false;
         }
         Err(e) => {

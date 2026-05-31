@@ -154,9 +154,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
                         // Show the recovery key once before entering the
                         // vault. The mnemonic moves into the closure and is
                         // zeroized when that reveal screen is built/dropped.
-                        ctx.replace_screen(move |tree| {
-                            build_recovery_reveal(tree, next, mnemonic)
-                        });
+                        ctx.replace_screen(move |tree| build_recovery_reveal(tree, next, mnemonic));
                     }
                     Err(e) => {
                         set_error(&cf_state, e);

@@ -210,7 +210,8 @@ pub fn build(
             })),
     );
     let preview_scroll = tree.add_child(preview_area, ScrollView::new().width_full().grow(1.0));
-    let preview_content = tree.add_child(preview_scroll, Container::column().width_full().gap(12.0));
+    let preview_content =
+        tree.add_child(preview_scroll, Container::column().width_full().gap(12.0));
     preview_content_cell.set(preview_content);
 }
 

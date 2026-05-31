@@ -183,10 +183,12 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let back_state = Rc::clone(&state);
     tree.add_child(
         card,
-        Button::new("Back to unlock").radius(8.0).on_click(move |ctx| {
-            let next = Rc::clone(&back_state);
-            ctx.replace_screen(move |tree| lock_screen::build(tree, next));
-        }),
+        Button::new("Back to unlock")
+            .radius(8.0)
+            .on_click(move |ctx| {
+                let next = Rc::clone(&back_state);
+                ctx.replace_screen(move |tree| lock_screen::build(tree, next));
+            }),
     );
 
     tree.focus_initially(pw_idx);

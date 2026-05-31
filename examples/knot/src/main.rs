@@ -77,8 +77,7 @@ fn main() {
                     eprintln!("knot: auto-save tick failed: {}", e);
                 }
 
-                let is_unlocked =
-                    matches!(state_for_tick.borrow().phase, Phase::Unlocked { .. });
+                let is_unlocked = matches!(state_for_tick.borrow().phase, Phase::Unlocked { .. });
                 if is_unlocked {
                     if let Some(timeout) = settings::current_auto_lock().timeout() {
                         if ctx.idle() >= timeout {

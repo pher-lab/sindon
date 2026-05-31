@@ -444,7 +444,10 @@ fn main() {}
             text: "hello".into(),
             style: InlineStyle::Plain,
         }];
-        assert!(is_fast_path(&plain_only), "all-plain stays on the fast path");
+        assert!(
+            is_fast_path(&plain_only),
+            "all-plain stays on the fast path"
+        );
         assert!(is_fast_path(&[]), "empty stays on the fast path");
 
         let mixed = vec![
@@ -478,7 +481,10 @@ fn main() {}
         // fixed-size stub — a three-paragraph note must out-measure a one-liner.
         let short = rendered_height("Just one line.");
         let long = rendered_height("Para one.\n\nPara two.\n\nPara three.\n\nPara four.");
-        assert!(long > short, "more paragraphs must be taller: {long} vs {short}");
+        assert!(
+            long > short,
+            "more paragraphs must be taller: {long} vs {short}"
+        );
     }
 
     // Tiny readability shim so the empty-source asserts read intention-first.
