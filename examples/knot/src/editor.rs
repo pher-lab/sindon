@@ -43,6 +43,14 @@ pub fn build(
     let pane = tree.add_child(
         parent,
         Container::column()
+            // `flex: 1 1 0`, not just `grow`: without a zero basis the pane's
+            // flex-basis is `auto` = its max-content width, which for a large
+            // preview heading (especially space-less CJK) is the whole
+            // unwrapped line. That overflows the root row and shrinks the
+            // fixed-width sidebar instead of letting the heading wrap. A zero
+            // basis pins the pane to the row's leftover width so the content
+            // wraps within it and the sidebar keeps its width.
+            .flex_basis(0.0)
             .grow(1.0)
             .height_full()
             .padding(24.0)
