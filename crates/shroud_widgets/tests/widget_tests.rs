@@ -863,6 +863,76 @@ fn input_accepts_char_input() {
 }
 
 #[test]
+fn multiline_input_keeps_pasted_newlines() {
+    // Paste arrives as a burst of CharInput events (event_loop dispatch_paste),
+    // including the `\n` between lines. A textarea must keep those newlines or a
+    // multi-line paste collapses onto one line.
+    let last_value = Rc::new(std::cell::RefCell::new(String::new()));
+    let last_value2 = last_value.clone();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(200.0));
+    let input_idx = tree.add_child(
+        root,
+        Input::new().multiline().on_change(move |text, _ctx| {
+            *last_value2.borrow_mut() = text.to_string();
+        }),
+    );
+    tree.compute_layout(400.0, 200.0);
+
+    let rect = tree.layout_rect(input_idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    for ch in ['a', '\n', 'b'] {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut event_ctx);
+    }
+
+    assert_eq!(*last_value.borrow(), "a\nb");
+}
+
+#[test]
+fn single_line_input_drops_pasted_newlines() {
+    // The complement of the multiline case: a single-line field flattens a
+    // multi-line paste, dropping `\n` so a pasted title can't smuggle in a
+    // newline.
+    let last_value = Rc::new(std::cell::RefCell::new(String::new()));
+    let last_value2 = last_value.clone();
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let input_idx = tree.add_child(
+        root,
+        Input::new().on_change(move |text, _ctx| {
+            *last_value2.borrow_mut() = text.to_string();
+        }),
+    );
+    tree.compute_layout(400.0, 100.0);
+
+    let rect = tree.layout_rect(input_idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    for ch in ['a', '\n', 'b'] {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut event_ctx);
+    }
+
+    assert_eq!(*last_value.borrow(), "ab");
+}
+
+#[test]
 fn input_on_change_fires() {
     let changed = Rc::new(Cell::new(false));
     let changed2 = changed.clone();

@@ -690,7 +690,21 @@ impl Widget for Input {
             }
 
             WidgetEvent::CharInput { ch } if self.focused => {
-                if !ch.is_control() && (!self.numeric || ch.is_ascii_digit()) {
+                // Drop control characters, with one exception: a newline in a
+                // multi-line field. Pasted text arrives as a burst of CharInput
+                // events (see `dispatch_paste` in the event loop), so a textarea
+                // must accept `\n` here or a multi-line paste collapses onto a
+                // single line. Typed Enter takes the KeyDown path below; this
+                // branch only matters for paste. Single-line and numeric fields
+                // still drop newlines, flattening a multi-line paste as before.
+                let accept = if self.numeric {
+                    ch.is_ascii_digit()
+                } else if self.multiline && *ch == '\n' {
+                    true
+                } else {
+                    !ch.is_control()
+                };
+                if accept {
                     let ch_len = ch.len_utf8();
                     let cursor = self.cursor.get();
                     self.value.borrow_mut().insert(cursor, *ch);
