@@ -20,10 +20,15 @@
 //!     (i.e. on the next edit⇄preview toggle), which is acceptable: a theme
 //!     swap mid-preview leaves just the inline-code / link tint a beat stale.
 //!
-//! Out of scope (same as the spike): GFM tables, task lists, strikethrough,
-//! syntax highlighting, images, wikilinks, link-click handling.
+//! GFM tables and task lists are rendered (see [`options`]). Still out of
+//! scope: strikethrough, syntax highlighting, images, wikilinks, and
+//! link-click handling. Strikethrough and clickable links each need framework
+//! support that doesn't exist yet — a text-decoration attribute on glyphs, and
+//! per-span click targets respectively (`TextWidget::rich` shapes a whole line
+//! as one widget, so there's nowhere to hang a per-link handler) — so they're
+//! deferred rather than rendered half-right.
 
-use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use shroud::core::Color;
 use shroud::reactive::Reactive;
 use shroud::text::TextSpan;
@@ -47,6 +52,11 @@ fn accent_color() -> Reactive<Color> {
 }
 fn code_bg_color() -> Reactive<Color> {
     Reactive::derive(|| settings::current_theme().colors.surface_variant)
+}
+/// Subtle line color for table dividers — the same token inputs use for their
+/// resting border, so dividers read as structure rather than text.
+fn border_color() -> Reactive<Color> {
+    Reactive::derive(|| settings::current_theme().colors.input_border)
 }
 
 /// Static accent used for inline `code` and link spans. Resolved once per
@@ -89,6 +99,13 @@ fn is_fast_path(runs: &[InlineRun]) -> bool {
     runs.is_empty() || runs.iter().all(|r| r.style == InlineStyle::Plain)
 }
 
+/// GFM extensions the preview parser understands. Tables and task lists are
+/// rendered; strikethrough is deliberately left off so `~~text~~` stays
+/// literal rather than collapsing to plain text we can't visually strike.
+fn options() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS
+}
+
 /// Render `source` as markdown into `parent`. `parent` must be a column-flex
 /// container; one block is appended per top-level markdown block. An empty /
 /// whitespace-only source renders a single muted placeholder so the preview
@@ -102,7 +119,7 @@ pub fn render(tree: &mut WidgetTree, parent: usize, source: &str) {
         return;
     }
 
-    let parser = Parser::new(source);
+    let parser = Parser::new_ext(source, options());
     let events: Vec<Event> = parser.collect();
     let mut i = 0;
     while i < events.len() {
@@ -121,12 +138,12 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
                 HeadingLevel::H3 => 22.0,
                 _ => 18.0,
             };
-            emit_inline_block(tree, parent, runs, Some(size));
+            emit_inline_block(tree, parent, runs, Some(size), false);
             end + 1
         }
         Event::Start(Tag::Paragraph) => {
             let (runs, end) = collect_inline(events, start + 1, |t| matches!(t, TagEnd::Paragraph));
-            emit_inline_block(tree, parent, runs, None);
+            emit_inline_block(tree, parent, runs, None, false);
             end + 1
         }
         Event::Start(Tag::BlockQuote) => {
@@ -210,21 +227,36 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
             while i < events.len() {
                 match &events[i] {
                     Event::Start(Tag::Item) => {
-                        let row = tree.add_child(list, Container::row().gap(8.0));
-                        let marker = if ordered_start.is_some() {
-                            let m = format!("{}.", counter);
-                            counter += 1;
-                            m
-                        } else {
-                            "\u{2022}".into()
+                        // A task list emits a `TaskListMarker(checked)` as the
+                        // first event inside the item; when present, swap the
+                        // bullet/number for an ASCII checkbox and start the body
+                        // after the marker so it isn't rendered as text.
+                        //
+                        // ASCII `[x]`/`[ ]` rather than the ballot-box glyphs
+                        // (☑ U+2611 / ☐ U+2610): U+2611 isn't in the primary
+                        // font here and falls back to an oversized ■, so the two
+                        // states render at mismatched sizes. ASCII stays one
+                        // font, one size, everywhere.
+                        let (marker, body_start) = match events.get(i + 1) {
+                            Some(Event::TaskListMarker(checked)) => {
+                                let glyph = if *checked { "[x]" } else { "[ ]" };
+                                (glyph.to_string(), i + 2)
+                            }
+                            _ if ordered_start.is_some() => {
+                                let m = format!("{}.", counter);
+                                counter += 1;
+                                (m, i + 1)
+                            }
+                            _ => ("\u{2022}".to_string(), i + 1),
                         };
+                        let row = tree.add_child(list, Container::row().gap(8.0));
                         tree.add_child(row, TextWidget::new(marker).color(muted_color()));
                         // Same `flex: 1 1 0` shape as the blockquote body —
                         // long list items should wrap to the row's leftover
                         // width, not push the marker / overflow horizontally.
                         let item_body = tree
                             .add_child(row, Container::column().gap(4.0).flex_basis(0.0).grow(1.0));
-                        i = render_list_item(tree, item_body, events, i + 1);
+                        i = render_list_item(tree, item_body, events, body_start);
                     }
                     Event::End(TagEnd::List(_)) => break,
                     _ => i += 1,
@@ -232,6 +264,7 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
             }
             i + 1
         }
+        Event::Start(Tag::Table(aligns)) => render_table(tree, parent, events, start, aligns),
         // Stray text outside a block (rare; defensive).
         Event::Text(t) => {
             tree.add_child(parent, TextWidget::new(t.to_string()).color(body_color()));
@@ -252,25 +285,112 @@ fn render_list_item(tree: &mut WidgetTree, parent: usize, events: &[Event], star
             // emit raw inline events directly inside Item.
             Event::Start(Tag::Paragraph) => {
                 let (runs, end) = collect_inline(events, i + 1, |t| matches!(t, TagEnd::Paragraph));
-                emit_inline_block(tree, parent, runs, None);
+                emit_inline_block(tree, parent, runs, None, false);
                 i = end + 1;
             }
             Event::Text(_)
             | Event::Code(_)
             | Event::Start(Tag::Emphasis | Tag::Strong | Tag::Link { .. }) => {
                 let (runs, end) = collect_inline(events, i, |t| matches!(t, TagEnd::Item));
-                emit_inline_block(tree, parent, runs, None);
+                emit_inline_block(tree, parent, runs, None, false);
                 i = end;
             }
             Event::Start(Tag::List(_))
             | Event::Start(Tag::CodeBlock(_))
-            | Event::Start(Tag::BlockQuote) => {
+            | Event::Start(Tag::BlockQuote)
+            | Event::Start(Tag::Table(_)) => {
                 i = render_block(tree, parent, events, i);
             }
             _ => i += 1,
         }
     }
     i
+}
+
+/// Render a GFM table into `parent`. Returns the index after `TagEnd::Table`.
+///
+/// Layout is a column of rows; each row is a flex row whose cells share the
+/// available width equally (`flex: 1 1 0`) and wrap their text — there is no
+/// horizontal scroll (ScrollView is vertical-only), so a wide table reflows
+/// rather than overflowing. A thin divider separates the header from the body
+/// and each body row from the next.
+fn render_table(
+    tree: &mut WidgetTree,
+    parent: usize,
+    events: &[Event],
+    start: usize,
+    aligns: &[Alignment],
+) -> usize {
+    let table = tree.add_child(parent, Container::column());
+    let mut i = start + 1;
+    let mut first_body_row = true;
+    while i < events.len() {
+        match &events[i] {
+            Event::Start(Tag::TableHead) => {
+                i = render_table_row(tree, table, events, i + 1, aligns, true);
+                add_divider(tree, table);
+            }
+            Event::Start(Tag::TableRow) => {
+                // Divider goes *between* body rows; the header already laid one
+                // down, so the first body row skips its leading divider.
+                if !first_body_row {
+                    add_divider(tree, table);
+                }
+                first_body_row = false;
+                i = render_table_row(tree, table, events, i + 1, aligns, false);
+            }
+            Event::End(TagEnd::Table) => return i + 1,
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+/// Render one table row (header or body) into `table`. `start` is the index of
+/// the first event after the `TableHead`/`TableRow` start tag; returns the
+/// index after the row's closing tag. Header cells render bold.
+fn render_table_row(
+    tree: &mut WidgetTree,
+    table: usize,
+    events: &[Event],
+    start: usize,
+    aligns: &[Alignment],
+    header: bool,
+) -> usize {
+    let row = tree.add_child(table, Container::row());
+    let mut col = 0usize;
+    let mut i = start;
+    while i < events.len() {
+        match &events[i] {
+            Event::Start(Tag::TableCell) => {
+                let mut cell = Container::column().flex_basis(0.0).grow(1.0).padding(8.0);
+                // Only center is expressible (Container has no align-end), so
+                // left and right both fall back to the leading edge.
+                if matches!(aligns.get(col), Some(Alignment::Center)) {
+                    cell = cell.align_center();
+                }
+                let cell_idx = tree.add_child(row, cell);
+                let (runs, end) = collect_inline(events, i + 1, |t| matches!(t, TagEnd::TableCell));
+                emit_inline_block(tree, cell_idx, runs, None, header);
+                i = end + 1;
+                col += 1;
+            }
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) => return i + 1,
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+/// A 1px full-width line separating table rows.
+fn add_divider(tree: &mut WidgetTree, parent: usize) {
+    tree.add_child(
+        parent,
+        Container::row()
+            .height(1.0)
+            .width_full()
+            .background(border_color()),
+    );
 }
 
 /// Walk inline events, splitting them into typed runs. Stops *at* the index of
@@ -327,15 +447,21 @@ fn emit_inline_block(
     parent: usize,
     runs: Vec<InlineRun>,
     font_size: Option<f32>,
+    bold: bool,
 ) {
+    // Headings imply bold via `font_size`; `bold` forces it for non-heading
+    // blocks that still want weight (table header cells).
+    let want_bold = bold || font_size.is_some();
     if is_fast_path(&runs) {
         let text: String = runs.into_iter().map(|r| r.text).collect();
         let mut w = TextWidget::new(text).color(body_color());
         if let Some(s) = font_size {
-            // Headings: bigger + bold, with a line box tall enough for the
-            // larger glyph (see `heading_line_height`). Body paragraphs keep
-            // the default weight and line height.
-            w = w.font_size(s).line_height(heading_line_height(s)).bold();
+            // Headings: bigger glyph with a line box tall enough for it (see
+            // `heading_line_height`). Body paragraphs keep the default size.
+            w = w.font_size(s).line_height(heading_line_height(s));
+        }
+        if want_bold {
+            w = w.bold();
         }
         tree.add_child(parent, w);
         return;
@@ -357,8 +483,8 @@ fn emit_inline_block(
                 InlineStyle::Code => span = span.monospace().color(accent),
                 InlineStyle::Link => span = span.color(accent),
             }
-            if font_size.is_some() {
-                // Headings with mixed runs (rare): spans don't inherit the
+            if want_bold {
+                // Mixed-run headings / table headers: spans don't inherit the
                 // wrapping widget's `.bold()`, so set weight per span too.
                 span = span.bold();
             }
@@ -380,9 +506,11 @@ mod tests {
     use shroud::text::TextEngine;
     use shroud::widgets::Container;
 
-    /// Build `source` into a content column and return its laid-out height.
-    /// Exercises the full parse → widget → measure path the live preview runs.
-    fn rendered_height(source: &str) -> f32 {
+    /// Build `source` into a content column and lay it out, returning the tree
+    /// plus the content-column index. Exercises the full parse → widget →
+    /// measure path the live preview runs, so callers can assert on either the
+    /// laid-out geometry or the widget structure.
+    fn build(source: &str) -> (WidgetTree, usize) {
         let mut tree = WidgetTree::new();
         let root = tree.set_root(Container::column().width(600.0).height(800.0).padding(16.0));
         let col = tree.add_child(root, Container::column().width_full().gap(12.0));
@@ -391,6 +519,12 @@ mod tests {
         let mut engine = TextEngine::new();
         let theme = Theme::dark();
         tree.compute_layout_with_measure(600.0, 800.0, &mut engine, &theme);
+        (tree, col)
+    }
+
+    /// The laid-out height of `source`'s content column.
+    fn rendered_height(source: &str) -> f32 {
+        let (tree, col) = build(source);
         tree.layout_rect(col).size.height
     }
 
@@ -416,6 +550,13 @@ A paragraph with **bold**, *italic*, `code`, and a [link](knot://x).
 - one
 - two
 
+- [ ] todo
+- [x] done
+
+| col a | col b |
+|-------|-------|
+| 1     | 2     |
+
 > quoted line
 
 ```
@@ -424,6 +565,37 @@ fn main() {}
 ";
         let h = rendered_height(sample);
         assert!(h > 100.0, "multi-block sample should be tall, got {h}");
+    }
+
+    #[test]
+    fn task_list_items_render_one_row_each() {
+        // Each item (checked, unchecked, or a plain bullet mixed in) is its own
+        // marker+body row — the task markers don't leak into the body text or
+        // collapse two items into one.
+        let (tree, col) = build("- [ ] todo\n- [x] done\n- plain bullet");
+        let blocks = tree.children(col);
+        assert_eq!(blocks.len(), 1, "a single list is one top-level block");
+        let items = tree.children(blocks[0]);
+        assert_eq!(items.len(), 3, "three list items render three rows");
+        for row in items {
+            assert_eq!(tree.children(row).len(), 2, "each row is marker + body");
+        }
+    }
+
+    #[test]
+    fn table_renders_header_dividers_and_body_rows() {
+        // header + divider + body row + divider + body row = five children, and
+        // each rendered row carries one cell per column.
+        let (tree, col) = build("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |");
+        let blocks = tree.children(col);
+        assert_eq!(blocks.len(), 1, "a table is one top-level block");
+        let rows = tree.children(blocks[0]);
+        assert_eq!(rows.len(), 5, "header, divider, row, divider, row");
+        assert_eq!(tree.children(rows[0]).len(), 2, "header has two cells");
+        assert_eq!(tree.children(rows[1]).len(), 0, "divider has no cells");
+        assert_eq!(tree.children(rows[2]).len(), 2, "body row has two cells");
+        assert_eq!(tree.children(rows[3]).len(), 0, "divider has no cells");
+        assert_eq!(tree.children(rows[4]).len(), 2, "body row has two cells");
     }
 
     #[test]
