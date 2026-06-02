@@ -20,13 +20,18 @@
 //!     (i.e. on the next edit⇄preview toggle), which is acceptable: a theme
 //!     swap mid-preview leaves just the inline-code / link tint a beat stale.
 //!
-//! GFM tables and task lists are rendered (see [`options`]). Still out of
-//! scope: strikethrough, syntax highlighting, images, wikilinks, and
-//! link-click handling. Strikethrough and clickable links each need framework
-//! support that doesn't exist yet — a text-decoration attribute on glyphs, and
-//! per-span click targets respectively (`TextWidget::rich` shapes a whole line
-//! as one widget, so there's nowhere to hang a per-link handler) — so they're
-//! deferred rather than rendered half-right.
+//! GFM tables and task lists are rendered (see [`options`]). Standard
+//! `[text](url)` links are clickable: an external web/mail target opens in the
+//! OS default handler (via the `opener` crate), gated by a scheme allowlist so
+//! a note body can't launch `file://` or some arbitrary-scheme handler. Other
+//! targets (relative paths, unknown schemes) are parsed and styled but inert —
+//! note-to-note navigation needs `[[Title]]` wikilink parsing + title routing
+//! that this preview doesn't do yet.
+//!
+//! Still out of scope: strikethrough, syntax highlighting, images, and
+//! wikilinks. Strikethrough needs a framework text-decoration attribute on
+//! glyphs that doesn't exist yet, so `~~text~~` stays literal rather than
+//! rendered half-right.
 
 use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use shroud::core::Color;
@@ -65,7 +70,7 @@ fn inline_accent() -> Color {
     settings::current_theme().colors.primary
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum InlineStyle {
     Plain,
     Bold,
@@ -77,6 +82,10 @@ enum InlineStyle {
 struct InlineRun {
     text: String,
     style: InlineStyle,
+    /// Click target when this run sits inside a markdown link, else `None`.
+    /// Carried separately from `style` so styled text inside a link (e.g.
+    /// `[**bold**](url)`) stays clickable while keeping its own weight.
+    link: Option<String>,
 }
 
 /// Line box for a heading at `size` px. Headings bump `font_size` without a
@@ -403,6 +412,10 @@ fn collect_inline(
 ) -> (Vec<InlineRun>, usize) {
     let mut runs: Vec<InlineRun> = Vec::new();
     let mut style_stack: Vec<InlineStyle> = vec![InlineStyle::Plain];
+    // Active link destinations, innermost last. Non-empty while inside one or
+    // more `[..](dest)` spans; every text/code run emitted then carries the
+    // current dest so it becomes a clickable region.
+    let mut link_stack: Vec<String> = Vec::new();
     let mut i = start;
     while i < events.len() {
         match &events[i] {
@@ -412,20 +425,30 @@ fn collect_inline(
                 runs.push(InlineRun {
                     text: s.to_string(),
                     style,
+                    link: link_stack.last().cloned(),
                 });
             }
             Event::Code(s) => runs.push(InlineRun {
                 text: s.to_string(),
                 style: InlineStyle::Code,
+                link: link_stack.last().cloned(),
             }),
             Event::SoftBreak | Event::HardBreak => runs.push(InlineRun {
                 text: " ".into(),
                 style: InlineStyle::Plain,
+                link: None,
             }),
             Event::Start(Tag::Strong) => style_stack.push(InlineStyle::Bold),
             Event::Start(Tag::Emphasis) => style_stack.push(InlineStyle::Italic),
-            Event::Start(Tag::Link { .. }) => style_stack.push(InlineStyle::Link),
-            Event::End(TagEnd::Strong | TagEnd::Emphasis | TagEnd::Link) => {
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                style_stack.push(InlineStyle::Link);
+                link_stack.push(dest_url.to_string());
+            }
+            Event::End(TagEnd::Link) => {
+                style_stack.pop();
+                link_stack.pop();
+            }
+            Event::End(TagEnd::Strong | TagEnd::Emphasis) => {
                 style_stack.pop();
             }
             _ => {}
@@ -472,6 +495,7 @@ fn emit_inline_block(
     // override color (Plain/Bold/Italic); Code/Link set their own static
     // per-span color, which wins for those glyphs only.
     let accent = inline_accent();
+    let has_link = runs.iter().any(|r| r.link.is_some());
     let spans: Vec<TextSpan> = runs
         .into_iter()
         .map(|run| {
@@ -488,6 +512,12 @@ fn emit_inline_block(
                 // wrapping widget's `.bold()`, so set weight per span too.
                 span = span.bold();
             }
+            if let Some(dest) = run.link {
+                // Make this span clickable; `handle_link_click` decides what
+                // (if anything) the target does when the framework reports the
+                // click back to us.
+                span = span.link(dest);
+            }
             span
         })
         .collect();
@@ -496,7 +526,35 @@ fn emit_inline_block(
     if let Some(s) = font_size {
         w = w.font_size(s).line_height(heading_line_height(s));
     }
+    if has_link {
+        w = w.on_link_click(|target, _ctx| handle_link_click(target));
+    }
     tree.add_child(parent, w);
+}
+
+/// Act on a click of a preview link.
+///
+/// External web/mail targets open in the OS default handler. Everything else
+/// is ignored: relative paths, fragment links, and unknown schemes have no
+/// meaning without note-to-note routing (a follow-up), and refusing them keeps
+/// a note body from launching `file://` or some arbitrary-scheme handler.
+fn handle_link_click(target: &str) {
+    if !is_external_web_link(target) {
+        return;
+    }
+    // Best-effort: a failed launch (no handler / sandbox) is swallowed — there
+    // is no UI surface to report it and a dead link must never panic the
+    // editor.
+    let _ = opener::open(target);
+}
+
+/// Whether `target` is a web/mail URL we're willing to hand to the OS opener.
+/// Deliberately a small allowlist (http/https/mailto) rather than "anything
+/// with a scheme" — a privacy-first notes app should not let body text trigger
+/// arbitrary protocol handlers.
+fn is_external_web_link(target: &str) -> bool {
+    let t = target.trim().to_ascii_lowercase();
+    t.starts_with("http://") || t.starts_with("https://") || t.starts_with("mailto:")
 }
 
 #[cfg(test)]
@@ -526,6 +584,50 @@ mod tests {
     fn rendered_height(source: &str) -> f32 {
         let (tree, col) = build(source);
         tree.layout_rect(col).size.height
+    }
+
+    #[test]
+    fn link_run_captures_its_destination() {
+        // A `[text](url)` link must surface as a Link-styled run carrying its
+        // destination, so the emitted span becomes clickable.
+        let evs: Vec<Event> =
+            Parser::new_ext("[click me](https://example.com)", options()).collect();
+        let (runs, _end) = collect_inline(&evs, 1, |t| matches!(t, TagEnd::Paragraph));
+        assert!(
+            runs.iter().any(|r| r.style == InlineStyle::Link
+                && r.link.as_deref() == Some("https://example.com")),
+            "link text run should carry its dest_url, got {:?}",
+            runs.iter()
+                .map(|r| (&r.text, r.style, &r.link))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn non_link_text_has_no_destination() {
+        // Plain text outside any link must not pick up a stray dest.
+        let evs: Vec<Event> = Parser::new_ext("just plain words", options()).collect();
+        let (runs, _end) = collect_inline(&evs, 1, |t| matches!(t, TagEnd::Paragraph));
+        assert!(runs.iter().all(|r| r.link.is_none()));
+    }
+
+    #[test]
+    fn only_web_and_mail_schemes_are_openable() {
+        // Security gate: a note body must only be able to launch http/https/
+        // mailto, never file://, javascript:, custom schemes, or relatives.
+        assert!(is_external_web_link("https://example.com"));
+        assert!(is_external_web_link("http://example.com/path?q=1"));
+        assert!(is_external_web_link("HTTPS://EXAMPLE.COM")); // case-insensitive
+        assert!(is_external_web_link("mailto:a@b.com"));
+        assert!(is_external_web_link("  https://leading-space.example  "));
+
+        assert!(!is_external_web_link("file:///etc/passwd"));
+        assert!(!is_external_web_link("javascript:alert(1)"));
+        assert!(!is_external_web_link("ftp://example.com"));
+        assert!(!is_external_web_link("knot://note/123"));
+        assert!(!is_external_web_link("../relative/path"));
+        assert!(!is_external_web_link("#fragment"));
+        assert!(!is_external_web_link(""));
     }
 
     #[test]
@@ -606,6 +708,7 @@ fn main() {}
         let bold_only = vec![InlineRun {
             text: "bold".into(),
             style: InlineStyle::Bold,
+            link: None,
         }];
         assert!(
             !is_fast_path(&bold_only),
@@ -615,6 +718,7 @@ fn main() {}
         let plain_only = vec![InlineRun {
             text: "hello".into(),
             style: InlineStyle::Plain,
+            link: None,
         }];
         assert!(
             is_fast_path(&plain_only),
@@ -626,10 +730,12 @@ fn main() {}
             InlineRun {
                 text: "a ".into(),
                 style: InlineStyle::Plain,
+                link: None,
             },
             InlineRun {
                 text: "b".into(),
                 style: InlineStyle::Code,
+                link: None,
             },
         ];
         assert!(!is_fast_path(&mixed), "a styled run anywhere forces rich");

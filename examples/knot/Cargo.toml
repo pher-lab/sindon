@@ -24,6 +24,10 @@ serde = { workspace = true }
 # piece). Same parser + version as the `markdown_demo` spike this is lifted
 # from; `default-features = false` drops the unused HTML/CLI bits.
 pulldown-cmark = { version = "0.10", default-features = false }
+# Open external `[text](url)` links from the markdown preview in the OS
+# default handler (gap C-2). Tiny shell-out wrapper; the preview gates which
+# schemes reach it (http/https/mailto only).
+opener = "0.7"
 # SQLCipher 4.x via rusqlite. `bundled-sqlcipher-vendored-openssl` keeps
 # the toolchain fully reproducible — everything (SQLite, the SQLCipher
 # patch set, and OpenSSL) builds from source so we don't depend on a
