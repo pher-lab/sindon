@@ -20,25 +20,29 @@
 //!     (i.e. on the next edit⇄preview toggle), which is acceptable: a theme
 //!     swap mid-preview leaves just the inline-code / link tint a beat stale.
 //!
-//! GFM tables and task lists are rendered (see [`options`]). Standard
-//! `[text](url)` links are clickable: an external web/mail target opens in the
-//! OS default handler (via the `opener` crate), gated by a scheme allowlist so
-//! a note body can't launch `file://` or some arbitrary-scheme handler. Other
-//! external targets (relative paths, unknown schemes) are parsed and styled but
-//! inert.
+//! GFM tables, task lists, and strikethrough (`~~text~~`) are rendered (see
+//! [`options`]); strikethrough rides the framework's `TextSpan` decoration.
+//! Standard `[text](url)` links are clickable and drawn underlined so they read
+//! as links: an external web/mail target opens in the OS default handler (via
+//! the `opener` crate), gated by a scheme allowlist so a note body can't launch
+//! `file://` or some arbitrary-scheme handler. Other external targets (relative
+//! paths, unknown schemes) are parsed and styled but inert.
 //!
 //! `[[Title]]` wikilinks navigate between notes. pulldown-cmark doesn't know
 //! the syntax, so they're split out of plain text after parsing, rendered as
-//! accent links, and — when a [`WikiNav`] is supplied — clicking one selects
-//! the note whose title matches and drops back into the editor, mirroring a
-//! sidebar click. `[[Target|Alias]]` shows the alias while linking the target.
-//! A wikilink to a title that doesn't exist renders normally but is inert on
-//! click.
+//! underlined accent links, and — when a [`WikiNav`] is supplied — clicking one
+//! selects the note whose title matches and drops back into the editor,
+//! mirroring a sidebar click. `[[Target|Alias]]` shows the alias while linking
+//! the target. A wikilink to a title that doesn't exist renders normally but is
+//! inert on click.
 //!
-//! Still out of scope: strikethrough, syntax highlighting, and images.
-//! Strikethrough needs a framework text-decoration attribute on glyphs that
-//! doesn't exist yet, so `~~text~~` stays literal rather than rendered
-//! half-right.
+//! Line breaks use "breaks" mode: a single newline renders as an actual line
+//! break (not CommonMark's soft-break-as-space), since note writers expect
+//! Enter to start a new line. A blank line is still a paragraph gap.
+//!
+//! Still out of scope: syntax highlighting and images. Strikethrough inside a
+//! `~~...~~` span suppresses wikilink expansion (deleted text shouldn't sprout
+//! a live link), so `~~[[x]]~~` stays literal.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -236,7 +240,13 @@ fn push_text(pieces: &mut Vec<WikiPiece>, s: &str) {
 fn expand_wikilinks(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out = Vec::with_capacity(runs.len());
     for run in runs {
-        if run.style != InlineStyle::Plain || run.link.is_some() || !run.text.contains("[[") {
+        // Strikethrough runs are also spared: a wikilink inside `~~...~~` is
+        // deleted text and shouldn't become a live navigation target.
+        if run.style != InlineStyle::Plain
+            || run.strikethrough
+            || run.link.is_some()
+            || !run.text.contains("[[")
+        {
             out.push(run);
             continue;
         }
@@ -245,11 +255,13 @@ fn expand_wikilinks(runs: Vec<InlineRun>) -> Vec<InlineRun> {
                 WikiPiece::Text(text) => out.push(InlineRun {
                     text,
                     style: InlineStyle::Plain,
+                    strikethrough: false,
                     link: None,
                 }),
                 WikiPiece::Link { display, target } => out.push(InlineRun {
                     text: display,
                     style: InlineStyle::Link,
+                    strikethrough: false,
                     link: Some(format!("{WIKI_SCHEME}{target}")),
                 }),
             }
@@ -270,6 +282,10 @@ enum InlineStyle {
 struct InlineRun {
     text: String,
     style: InlineStyle,
+    /// Whether this run sits inside a `~~strikethrough~~` span. Orthogonal to
+    /// `style` (which holds one of bold/italic/code/link) since strikethrough
+    /// composes with any of them — `~~**bold**~~` is bold *and* struck.
+    strikethrough: bool,
     /// Click target when this run sits inside a markdown link, else `None`.
     /// Carried separately from `style` so styled text inside a link (e.g.
     /// `[**bold**](url)`) stays clickable while keeping its own weight.
@@ -290,17 +306,20 @@ fn heading_line_height(size: f32) -> f32 {
 ///
 /// A single non-plain run (e.g. a paragraph that is just `**bold**`) must NOT
 /// take this path — the fast path emits a plain `TextWidget` and drops the
-/// run's style, so a lone bold/italic/code run would render unstyled. Those
-/// go the rich path so the attribute survives.
+/// run's style and decoration, so a lone bold/italic/code/struck run would
+/// render unstyled. Those go the rich path so the attribute survives.
 fn is_fast_path(runs: &[InlineRun]) -> bool {
-    runs.is_empty() || runs.iter().all(|r| r.style == InlineStyle::Plain)
+    runs.is_empty()
+        || runs
+            .iter()
+            .all(|r| r.style == InlineStyle::Plain && !r.strikethrough)
 }
 
-/// GFM extensions the preview parser understands. Tables and task lists are
-/// rendered; strikethrough is deliberately left off so `~~text~~` stays
-/// literal rather than collapsing to plain text we can't visually strike.
+/// GFM extensions the preview parser understands: tables, task lists, and
+/// strikethrough (`~~text~~`), the last of which renders via the framework's
+/// `TextSpan` decoration.
 fn options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS
+    Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH
 }
 
 /// Render `source` as markdown into `parent`. `parent` must be a column-flex
@@ -610,9 +629,15 @@ fn add_divider(tree: &mut WidgetTree, parent: usize) {
 /// `[[Home]]` arrives as five events `"[" "[" "Home" "]" "]"`. Without
 /// coalescing, each lands in its own run and `expand_wikilinks` never sees the
 /// `[[…]]` pattern whole, so the wikilink is silently never detected.
-fn push_run(runs: &mut Vec<InlineRun>, text: &str, style: InlineStyle, link: Option<String>) {
+fn push_run(
+    runs: &mut Vec<InlineRun>,
+    text: &str,
+    style: InlineStyle,
+    strikethrough: bool,
+    link: Option<String>,
+) {
     if let Some(last) = runs.last_mut() {
-        if last.style == style && last.link == link {
+        if last.style == style && last.strikethrough == strikethrough && last.link == link {
             last.text.push_str(text);
             return;
         }
@@ -620,6 +645,7 @@ fn push_run(runs: &mut Vec<InlineRun>, text: &str, style: InlineStyle, link: Opt
     runs.push(InlineRun {
         text: text.to_string(),
         style,
+        strikethrough,
         link,
     });
 }
@@ -638,22 +664,40 @@ fn collect_inline(
     // more `[..](dest)` spans; every text/code run emitted then carries the
     // current dest so it becomes a clickable region.
     let mut link_stack: Vec<String> = Vec::new();
+    // Strikethrough nesting depth. Orthogonal to `style_stack` because GFM
+    // strikethrough composes with bold/italic/links rather than replacing them.
+    let mut strike_depth = 0u32;
     let mut i = start;
     while i < events.len() {
+        let strike = strike_depth > 0;
         match &events[i] {
             Event::End(t) if is_end(t) => return (runs, i),
             Event::Text(s) => {
                 let style = *style_stack.last().unwrap();
-                push_run(&mut runs, s, style, link_stack.last().cloned());
+                push_run(&mut runs, s, style, strike, link_stack.last().cloned());
             }
             Event::Code(s) => {
-                push_run(&mut runs, s, InlineStyle::Code, link_stack.last().cloned());
+                push_run(
+                    &mut runs,
+                    s,
+                    InlineStyle::Code,
+                    strike,
+                    link_stack.last().cloned(),
+                );
             }
+            // Render every line break as an actual line break ("breaks" mode),
+            // not CommonMark's soft-break-as-space. A note app's users expect
+            // Enter to start a new line, so `文字\n文字` should break rather than
+            // join with a space; a blank line is still a paragraph gap. The
+            // emitted "\n" is honored by cosmic-text in both the plain and rich
+            // shaping paths. (A HardBreak — `  \n` / `\` — must break too, so
+            // both arms map the same way.)
             Event::SoftBreak | Event::HardBreak => {
-                push_run(&mut runs, " ", InlineStyle::Plain, None);
+                push_run(&mut runs, "\n", InlineStyle::Plain, strike, None);
             }
             Event::Start(Tag::Strong) => style_stack.push(InlineStyle::Bold),
             Event::Start(Tag::Emphasis) => style_stack.push(InlineStyle::Italic),
+            Event::Start(Tag::Strikethrough) => strike_depth += 1,
             Event::Start(Tag::Link { dest_url, .. }) => {
                 style_stack.push(InlineStyle::Link);
                 link_stack.push(dest_url.to_string());
@@ -665,6 +709,7 @@ fn collect_inline(
             Event::End(TagEnd::Strong | TagEnd::Emphasis) => {
                 style_stack.pop();
             }
+            Event::End(TagEnd::Strikethrough) => strike_depth = strike_depth.saturating_sub(1),
             _ => {}
         }
         i += 1;
@@ -731,11 +776,14 @@ fn emit_inline_block(
                 // wrapping widget's `.bold()`, so set weight per span too.
                 span = span.bold();
             }
+            if run.strikethrough {
+                span = span.strikethrough();
+            }
             if let Some(dest) = run.link {
-                // Make this span clickable; `handle_link_click` decides what
-                // (if anything) the target does when the framework reports the
-                // click back to us.
-                span = span.link(dest);
+                // Make this span clickable and underline it so it reads as a
+                // link; `handle_link_click` decides what (if anything) the
+                // target does when the framework reports the click back to us.
+                span = span.link(dest).underline();
             }
             span
         })
@@ -937,6 +985,7 @@ fn main() {}
         let bold_only = vec![InlineRun {
             text: "bold".into(),
             style: InlineStyle::Bold,
+            strikethrough: false,
             link: None,
         }];
         assert!(
@@ -947,6 +996,7 @@ fn main() {}
         let plain_only = vec![InlineRun {
             text: "hello".into(),
             style: InlineStyle::Plain,
+            strikethrough: false,
             link: None,
         }];
         assert!(
@@ -959,15 +1009,30 @@ fn main() {}
             InlineRun {
                 text: "a ".into(),
                 style: InlineStyle::Plain,
+                strikethrough: false,
                 link: None,
             },
             InlineRun {
                 text: "b".into(),
                 style: InlineStyle::Code,
+                strikethrough: false,
                 link: None,
             },
         ];
         assert!(!is_fast_path(&mixed), "a styled run anywhere forces rich");
+
+        // A plain run that's struck through must also leave the fast path, or
+        // the strike-through (a rich-only decoration) is silently dropped.
+        let struck = vec![InlineRun {
+            text: "gone".into(),
+            style: InlineStyle::Plain,
+            strikethrough: true,
+            link: None,
+        }];
+        assert!(
+            !is_fast_path(&struck),
+            "a struck plain run must render rich so the decoration survives"
+        );
     }
 
     #[test]
@@ -1067,12 +1132,14 @@ fn main() {}
             InlineRun {
                 text: "go to [[Home]]".into(),
                 style: InlineStyle::Plain,
+                strikethrough: false,
                 link: None,
             },
             // Inline code carrying `[[x]]` must stay literal, not linkify.
             InlineRun {
                 text: "[[notalink]]".into(),
                 style: InlineStyle::Code,
+                strikethrough: false,
                 link: None,
             },
         ];
@@ -1126,6 +1193,103 @@ fn main() {}
             out.iter()
                 .map(|r| (&r.text, r.style, &r.link))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // ── Strikethrough ───────────────────────────────────────────────────────
+
+    #[test]
+    fn strikethrough_text_is_detected_through_the_real_parser() {
+        // `~~gone~~` must surface as a single struck run carrying the inner
+        // text — exercised through the actual parser, since strikethrough only
+        // emits its events when ENABLE_STRIKETHROUGH is on in `options()`.
+        let evs: Vec<Event> = Parser::new_ext("~~gone~~", options()).collect();
+        let (runs, _end) = collect_inline(&evs, 1, |t| matches!(t, TagEnd::Paragraph));
+        assert_eq!(runs.len(), 1, "one struck run, got {:?}", runs_dump(&runs));
+        assert!(runs[0].strikethrough, "the run must be marked struck");
+        assert_eq!(runs[0].text, "gone");
+    }
+
+    #[test]
+    fn strikethrough_composes_with_bold() {
+        // `~~**b**~~` is both struck *and* bold — strikethrough is orthogonal
+        // to the run's style, not a replacement for it.
+        let evs: Vec<Event> = Parser::new_ext("~~**b**~~", options()).collect();
+        let (runs, _end) = collect_inline(&evs, 1, |t| matches!(t, TagEnd::Paragraph));
+        assert!(
+            runs.iter()
+                .any(|r| r.strikethrough && r.style == InlineStyle::Bold),
+            "expected a struck bold run, got {:?}",
+            runs_dump(&runs)
+        );
+    }
+
+    #[test]
+    fn strikethrough_forces_the_rich_path() {
+        // A lone struck run can't take the plain fast path, or the decoration
+        // is dropped (paralleling the lone-bold-run case).
+        let evs: Vec<Event> = Parser::new_ext("~~deleted~~", options()).collect();
+        let (runs, _end) = collect_inline(&evs, 1, |t| matches!(t, TagEnd::Paragraph));
+        assert!(
+            !is_fast_path(&runs),
+            "a struck run must route through the rich path, got {:?}",
+            runs_dump(&runs)
+        );
+    }
+
+    #[test]
+    fn strikethrough_suppresses_wikilink_expansion() {
+        // `~~[[Home]]~~` is deleted text: the wikilink inside must stay literal
+        // rather than expand into a live navigation target.
+        let evs: Vec<Event> = Parser::new_ext("~~[[Home]]~~", options()).collect();
+        let (runs, _end) = collect_inline(&evs, 1, |t| matches!(t, TagEnd::Paragraph));
+        let out = expand_wikilinks(runs);
+        assert!(
+            out.iter().all(|r| r.style != InlineStyle::Link),
+            "a wikilink inside strikethrough must not become a link, got {:?}",
+            runs_dump(&out)
+        );
+    }
+
+    #[test]
+    fn strikethrough_block_renders_without_panicking() {
+        // End-to-end through the renderer: a struck paragraph still produces a
+        // real, positive-height block.
+        assert!(rendered_height("This is ~~deleted~~ text.").size_is_positive());
+    }
+
+    /// Compact `(text, style, struck, link)` dump for assertion messages.
+    fn runs_dump(runs: &[InlineRun]) -> Vec<(&str, InlineStyle, bool, Option<&str>)> {
+        runs.iter()
+            .map(|r| (r.text.as_str(), r.style, r.strikethrough, r.link.as_deref()))
+            .collect()
+    }
+
+    // ── Line breaks ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn single_newline_renders_as_a_line_break_not_a_space() {
+        // "breaks" mode: a lone `\n` inside a paragraph must survive as a real
+        // newline in the shaped run, not collapse to a space (the CommonMark
+        // default that surprised note writers).
+        let evs: Vec<Event> = Parser::new_ext("line one\nline two", options()).collect();
+        let (runs, _end) = collect_inline(&evs, 1, |t| matches!(t, TagEnd::Paragraph));
+        assert_eq!(runs.len(), 1, "got {:?}", runs_dump(&runs));
+        assert_eq!(
+            runs[0].text, "line one\nline two",
+            "the soft break must stay a newline, not become a space"
+        );
+    }
+
+    #[test]
+    fn single_newline_paragraph_is_taller_than_one_line() {
+        // End-to-end proof the break actually wraps to a second visual line:
+        // `a\nb` must out-measure `a b`, which fits on one line.
+        let two_lines = rendered_height("a\nb");
+        let one_line = rendered_height("a b");
+        assert!(
+            two_lines > one_line,
+            "a single-newline paragraph should be taller ({two_lines}) than a one-liner ({one_line})"
         );
     }
 
