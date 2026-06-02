@@ -423,6 +423,117 @@ fn shape_rich_monospace_span_glyph_widths_differ_from_default() {
 }
 
 #[test]
+fn shape_text_has_no_span_boxes() {
+    // Only the rich path has span structure; the single-attrs path must leave
+    // span_boxes empty so a caller can use "non-empty" as "this came from
+    // shape_rich".
+    let mut engine = TextEngine::new();
+    let shaped = engine.shape_text("Hello", 16.0, 20.0, None);
+    assert!(shaped.span_boxes.is_empty());
+}
+
+#[test]
+fn shape_rich_emits_one_box_per_span_left_to_right() {
+    // Three spans on one line → three boxes, tagged with their span index and
+    // ordered left-to-right without overlap. This is the geometry the widget
+    // hit-tests a click against.
+    let mut engine = TextEngine::new();
+    let shaped = engine.shape_rich(
+        &[
+            TextSpan::new("Hello "),
+            TextSpan::new("world"),
+            TextSpan::new("!"),
+        ],
+        16.0,
+        20.0,
+        None,
+    );
+
+    assert_eq!(
+        shaped.span_boxes.len(),
+        3,
+        "one box per span on a single line"
+    );
+    // Boxes report their owning span index in order.
+    assert_eq!(shaped.span_boxes[0].span, 0);
+    assert_eq!(shaped.span_boxes[1].span, 1);
+    assert_eq!(shaped.span_boxes[2].span, 2);
+    // Left-to-right, each box starting at/after the previous box's right edge.
+    for w in shaped.span_boxes.windows(2) {
+        assert!(
+            w[1].rect.origin.x >= w[0].rect.right() - 0.5,
+            "span boxes should not overlap horizontally: {:?} then {:?}",
+            w[0].rect,
+            w[1].rect
+        );
+    }
+    // Every box has positive area and sits at the top line (line_top ≈ 0).
+    for b in &shaped.span_boxes {
+        assert!(b.rect.size.width > 0.0, "box {:?} has zero width", b);
+        assert!(b.rect.size.height > 0.0, "box {:?} has zero height", b);
+        assert!(
+            b.rect.origin.y.abs() < 0.5,
+            "single-line box should sit at top"
+        );
+    }
+}
+
+#[test]
+fn shape_rich_box_x_covers_the_clicked_span() {
+    // The middle span's box must horizontally bracket where its glyphs are
+    // painted — i.e. a click in the box maps back to span 1, not its
+    // neighbours. We assert span 1's box starts past span 0 and ends before
+    // span 2 begins.
+    let mut engine = TextEngine::new();
+    let shaped = engine.shape_rich(
+        &[
+            TextSpan::new("aaaa "),
+            TextSpan::new("LINK"),
+            TextSpan::new(" zzzz"),
+        ],
+        16.0,
+        20.0,
+        None,
+    );
+    assert_eq!(shaped.span_boxes.len(), 3);
+    let link = shaped.span_boxes[1].rect;
+    assert!(
+        link.origin.x >= shaped.span_boxes[0].rect.right() - 0.5,
+        "link box should start at/after the preceding span"
+    );
+    assert!(
+        link.right() <= shaped.span_boxes[2].rect.origin.x + 0.5,
+        "link box should end at/before the following span"
+    );
+}
+
+#[test]
+fn shape_rich_wrapping_span_gets_one_box_per_line() {
+    // A single span long enough to wrap across two visual lines produces two
+    // boxes for that span index, on different line_top rows — so a multi-line
+    // link's whole footprint stays clickable.
+    let mut engine = TextEngine::new();
+    let spans = [TextSpan::new("one two three four five six seven eight")];
+    let shaped = engine.shape_rich(&spans, 16.0, 20.0, Some(80.0));
+
+    let span0: Vec<_> = shaped.span_boxes.iter().filter(|b| b.span == 0).collect();
+    assert!(
+        span0.len() >= 2,
+        "a wrapped span should produce >=2 boxes, got {}",
+        span0.len()
+    );
+    let rows: std::collections::BTreeSet<i32> = span0
+        .iter()
+        .map(|b| b.rect.origin.y.round() as i32)
+        .collect();
+    assert!(
+        rows.len() >= 2,
+        "wrapped span boxes should land on >=2 distinct lines, got rows {:?}",
+        rows
+    );
+}
+
+#[test]
 fn shape_rich_wrap_breaks_inside_long_attributed_span() {
     // Gap #3's raison d'être: a row-of-widgets layout could only break
     // between runs, so "really_long_bold_token" inside one bold widget

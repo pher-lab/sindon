@@ -3,7 +3,7 @@
 use crate::attrs::TextAttrs;
 use crate::span::{TextSpan, cosmic_to_shroud, shroud_to_cosmic};
 use cosmic_text::{Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
-use shroud_core::Color;
+use shroud_core::{Color, Rect};
 
 /// A positioned glyph ready for rasterization.
 #[derive(Debug, Clone)]
@@ -21,6 +21,23 @@ pub struct ShapedGlyph {
     pub color: Option<Color>,
 }
 
+/// Block-relative bounding box of all glyphs on one visual line that share a
+/// single source span (the span's index in the slice passed to
+/// [`TextEngine::shape_rich`]).
+///
+/// A span that wraps across N visual lines produces N `SpanBox`es — one per
+/// line — so a multi-line link's hit region tracks each line's run. The
+/// `rect` is in the same block-relative coordinate space the widget paints
+/// glyphs into (origin at the shaped block's top-left), so a caller adds the
+/// widget's layout origin to translate into screen space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpanBox {
+    /// Index of the source span in the `shape_rich` input slice.
+    pub span: usize,
+    /// Bounding rectangle of this span's glyphs on one line.
+    pub rect: Rect,
+}
+
 /// Result of shaping a text string.
 #[derive(Debug)]
 pub struct ShapedText {
@@ -30,6 +47,12 @@ pub struct ShapedText {
     pub width: f32,
     /// Total height in pixels (from layout).
     pub height: f32,
+    /// Per-span, per-line bounding boxes. Only populated by
+    /// [`shape_rich`](TextEngine::shape_rich) — the single-attrs
+    /// `shape_text` / `shape_text_attrs` paths leave this empty since they
+    /// have no span structure. Used by `TextWidget` to map a click position
+    /// back to the span that owns it (and thus its link target).
+    pub span_boxes: Vec<SpanBox>,
 }
 
 /// A rasterized glyph image (alpha mask).
@@ -164,6 +187,7 @@ impl TextEngine {
             glyphs,
             width: total_width,
             height: total_height,
+            span_boxes: Vec::new(),
         }
     }
 
@@ -193,8 +217,12 @@ impl TextEngine {
         // call — `set_rich_text` consumes the iterator immediately.
         let default_attrs = TextAttrs::default();
         let default_cosmic = default_attrs.as_cosmic();
-        let cosmic_spans = spans.iter().map(|s| {
-            let mut a = s.attrs.as_cosmic();
+        // Tag each span's glyphs with its index via cosmic-text's per-glyph
+        // `metadata`. After shaping we read it back off each `LayoutGlyph` to
+        // group glyphs into per-span, per-line bounding boxes (`span_boxes`),
+        // which is how the widget maps a click back to the span it landed on.
+        let cosmic_spans = spans.iter().enumerate().map(|(i, s)| {
+            let mut a = s.attrs.as_cosmic().metadata(i);
             if let Some(c) = s.color {
                 a = a.color(shroud_to_cosmic(c));
             }
@@ -210,12 +238,18 @@ impl TextEngine {
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         let mut glyphs = Vec::new();
+        let mut span_boxes: Vec<SpanBox> = Vec::new();
         let mut total_width: f32 = 0.0;
         let mut total_height: f32 = 0.0;
 
         for run in buffer.layout_runs() {
             total_width = total_width.max(run.line_w);
             total_height = run.line_top + run.line_height;
+            // Accumulate the horizontal extent of consecutive glyphs sharing a
+            // metadata (= span index) on this line. A box is flushed whenever
+            // the span changes and at end-of-line, so each span gets one box
+            // per visual line it occupies.
+            let mut group: Option<(usize, f32, f32)> = None; // (span, min_x, max_x)
             for glyph in run.glyphs.iter() {
                 let color = glyph.color_opt.map(cosmic_to_shroud);
                 let physical = glyph.physical((0.0, run.line_y), 1.0);
@@ -225,6 +259,29 @@ impl TextEngine {
                     y: physical.y,
                     color,
                 });
+
+                let x0 = glyph.x;
+                let x1 = glyph.x + glyph.w;
+                match group {
+                    Some((m, min, max)) if m == glyph.metadata => {
+                        group = Some((m, min.min(x0), max.max(x1)));
+                    }
+                    _ => {
+                        if let Some((m, min, max)) = group.take() {
+                            span_boxes.push(SpanBox {
+                                span: m,
+                                rect: Rect::new(min, run.line_top, max - min, run.line_height),
+                            });
+                        }
+                        group = Some((glyph.metadata, x0, x1));
+                    }
+                }
+            }
+            if let Some((m, min, max)) = group.take() {
+                span_boxes.push(SpanBox {
+                    span: m,
+                    rect: Rect::new(min, run.line_top, max - min, run.line_height),
+                });
             }
         }
 
@@ -232,6 +289,7 @@ impl TextEngine {
             glyphs,
             width: total_width,
             height: total_height,
+            span_boxes,
         }
     }
 

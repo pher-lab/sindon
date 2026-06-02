@@ -19,7 +19,8 @@ use shroud_core::Color;
 ///
 /// Build with `TextSpan::new("text")` and chain the same shortcut builders
 /// available on [`TextAttrs`] (`bold`, `italic`, `monospace`, etc.) plus a
-/// per-span [`color`](Self::color) override.
+/// per-span [`color`](Self::color) override and an optional clickable
+/// [`link`](Self::link) target.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextSpan {
     pub text: String,
@@ -28,15 +29,23 @@ pub struct TextSpan {
     /// via `TextWidget::color`). When `Some`, this color wins for every glyph
     /// shaped from this span.
     pub color: Option<Color>,
+    /// Optional opaque click target. When `Some`, the glyphs shaped from this
+    /// span become a clickable region: a `TextWidget::rich` carrying an
+    /// `on_link_click` handler invokes it with this string when the region is
+    /// clicked. The string is application-defined (a URL, a note title, a
+    /// `scheme:payload`, …) — the framework never interprets it. `None` (the
+    /// default) leaves the span non-interactive.
+    pub link: Option<String>,
 }
 
 impl TextSpan {
-    /// New span with default attrs and no color override.
+    /// New span with default attrs, no color override, and no link.
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             attrs: TextAttrs::default(),
             color: None,
+            link: None,
         }
     }
 
@@ -67,6 +76,14 @@ impl TextSpan {
     /// Override the color for this span's glyphs.
     pub fn color(mut self, color: Color) -> Self {
         self.color = Some(color);
+        self
+    }
+
+    /// Mark this span as a clickable link with an opaque, application-defined
+    /// target string. See [`link`](Self::link). Pair with
+    /// `TextWidget::on_link_click` on the rich widget to act on the click.
+    pub fn link(mut self, target: impl Into<String>) -> Self {
+        self.link = Some(target.into());
         self
     }
 

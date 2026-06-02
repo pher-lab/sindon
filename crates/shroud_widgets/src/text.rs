@@ -1,13 +1,30 @@
 //! Text widget — renders a text string.
 
+use std::cell::RefCell;
+
+use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Color, Rect, Size};
+use shroud_core::{Color, Point, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::Reactive;
 use shroud_text::{FontStyle, FontWeight, TextAttrs, TextEngine, TextFamily, TextSpan};
 
 const ELLIPSIS: &str = "\u{2026}";
+
+/// Handler invoked when a clickable inline link (a [`TextSpan`] with a
+/// [`link`](TextSpan::link) target) is clicked. Receives the span's opaque
+/// target string and the dispatch context (so the handler can queue tree
+/// mutations — e.g. navigating to another note).
+type LinkClickHandler = Box<dyn FnMut(&str, &mut EventContext)>;
+
+/// A cached clickable region, recomputed each paint from the shaped span
+/// boxes. `rect` is block-relative (origin at the widget's layout origin),
+/// matching the space a click is translated into during event dispatch.
+struct LinkHit {
+    rect: Rect,
+    link: String,
+}
 
 /// Internal text content variant. Either plain reactive text (the original
 /// path, by far the more common case) or an inline rich-text span list.
@@ -50,6 +67,19 @@ pub struct TextWidget {
     color: Option<Reactive<Color>>,
     truncate: bool,
     attrs: TextAttrs,
+    /// Click handler for inline links. `None` (the default) makes the widget
+    /// inert to clicks — `event` returns `Ignored` immediately. Only the
+    /// rich path produces clickable links (a plain `TextWidget` has no spans).
+    on_link_click: Option<LinkClickHandler>,
+    /// Clickable regions cached during `paint` (which has the `TextEngine`)
+    /// for `event` (which does not) to hit-test against. Recomputed every
+    /// paint, so it tracks the current layout/wrap. `RefCell` because `paint`
+    /// takes `&self`.
+    link_hits: RefCell<Vec<LinkHit>>,
+    /// Link target that received the most recent `MouseDown`, so a `MouseUp`
+    /// only fires the handler when press and release land on the same link
+    /// (mirrors `Button`'s pressed-state click semantics).
+    pressed_link: Option<String>,
 }
 
 impl TextWidget {
@@ -66,6 +96,9 @@ impl TextWidget {
             color: None,
             truncate: false,
             attrs: TextAttrs::default(),
+            on_link_click: None,
+            link_hits: RefCell::new(Vec::new()),
+            pressed_link: None,
         }
     }
 
@@ -82,6 +115,9 @@ impl TextWidget {
             color: None,
             truncate: false,
             attrs: TextAttrs::default(),
+            on_link_click: None,
+            link_hits: RefCell::new(Vec::new()),
+            pressed_link: None,
         }
     }
 
@@ -107,6 +143,9 @@ impl TextWidget {
             color: None,
             truncate: false,
             attrs: TextAttrs::default(),
+            on_link_click: None,
+            link_hits: RefCell::new(Vec::new()),
+            pressed_link: None,
         }
     }
 
@@ -172,6 +211,36 @@ impl TextWidget {
     /// Shorthand for `.family(TextFamily::Monospace)`.
     pub fn monospace(self) -> Self {
         self.family(TextFamily::Monospace)
+    }
+
+    /// Make inline links clickable: the handler fires when a [`TextSpan`] that
+    /// carries a [`link`](TextSpan::link) target is clicked, receiving that
+    /// opaque target string plus the dispatch [`EventContext`].
+    ///
+    /// Only meaningful on the [`rich`](Self::rich) path — a plain or reactive
+    /// `TextWidget` has no spans and so no links. A click that misses every
+    /// link region is left unhandled (returns `Ignored`), so it doesn't
+    /// swallow scrolls or selection on the surrounding text.
+    ///
+    /// The clickable geometry is captured during `paint`, so a link only
+    /// becomes hittable after the widget's first paint — which always happens
+    /// before any click in the normal event/redraw cycle. Hit-testing is by
+    /// mouse position only; there is no keyboard activation for inline links
+    /// yet (the widget is not focusable).
+    pub fn on_link_click(mut self, f: impl FnMut(&str, &mut EventContext) + 'static) -> Self {
+        self.on_link_click = Some(Box::new(f));
+        self
+    }
+
+    /// The link target at block-relative point `rel`, if any region contains
+    /// it. Used by `event` to map a click to its span's link.
+    fn link_at(&self, pos: Point, layout: Rect) -> Option<String> {
+        let rel = Point::new(pos.x - layout.origin.x, pos.y - layout.origin.y);
+        self.link_hits
+            .borrow()
+            .iter()
+            .find(|h| h.rect.contains(rel))
+            .map(|h| h.link.clone())
     }
 
     /// Get the current text content.
@@ -342,6 +411,71 @@ impl Widget for TextWidget {
                     glyph.cache_key,
                 );
             }
+        }
+
+        // Refresh the clickable hit regions from this paint's shaped geometry
+        // (block-relative; `event` adds the layout origin back). Only worth
+        // doing when a handler is installed and at least one span is a link.
+        if self.on_link_click.is_some() {
+            let mut hits = self.link_hits.borrow_mut();
+            hits.clear();
+            for b in &shaped.span_boxes {
+                if let Some(link) = spans.get(b.span).and_then(|s| s.link.as_ref()) {
+                    hits.push(LinkHit {
+                        rect: b.rect,
+                        link: link.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn event(&mut self, event: &WidgetEvent, layout: Rect, ctx: &mut EventContext) -> EventResult {
+        // Fast out for the overwhelmingly common case: no link handler means
+        // the widget is inert to pointer input (it stays non-focusable too).
+        if self.on_link_click.is_none() {
+            return EventResult::Ignored;
+        }
+        match event {
+            WidgetEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+            } => match self.link_at(*position, layout) {
+                Some(link) => {
+                    self.pressed_link = Some(link);
+                    EventResult::Consumed
+                }
+                None => {
+                    self.pressed_link = None;
+                    EventResult::Ignored
+                }
+            },
+            WidgetEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+            } => {
+                // Fire only when press and release landed on the same link,
+                // so a press-then-drag-away doesn't trigger navigation.
+                let released_on = self.link_at(*position, layout);
+                let fire = match (self.pressed_link.take(), released_on) {
+                    (Some(p), Some(r)) if p == r => Some(r),
+                    _ => None,
+                };
+                if let Some(link) = fire {
+                    if let Some(handler) = &mut self.on_link_click {
+                        handler(&link, ctx);
+                    }
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            // Pointer left the widget mid-press: cancel the pending click.
+            WidgetEvent::MouseLeave => {
+                self.pressed_link = None;
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
         }
     }
 }
