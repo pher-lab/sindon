@@ -423,6 +423,152 @@ fn shape_rich_monospace_span_glyph_widths_differ_from_default() {
 }
 
 #[test]
+fn shape_text_has_no_decoration_lines() {
+    // The single-attrs path has no span structure and so no decorations; a
+    // caller can rely on "empty" meaning "this didn't come from shape_rich".
+    let mut engine = TextEngine::new();
+    let shaped = engine.shape_text("Hello", 16.0, 20.0, None);
+    assert!(shaped.decoration_lines.is_empty());
+}
+
+#[test]
+fn shape_rich_without_decoration_emits_no_lines() {
+    // Spans that opt out of decoration must not draw stray underlines.
+    let mut engine = TextEngine::new();
+    let shaped = engine.shape_rich(
+        &[TextSpan::new("plain"), TextSpan::new(" text").bold()],
+        16.0,
+        20.0,
+        None,
+    );
+    assert!(shaped.decoration_lines.is_empty());
+}
+
+#[test]
+fn shape_rich_underline_sits_below_the_baseline() {
+    // An underlined span emits exactly one thin line on its single visual line,
+    // positioned below the glyph baseline (larger Y, since Y grows downward).
+    let mut engine = TextEngine::new();
+    let shaped = engine.shape_rich(&[TextSpan::new("Hello").underline()], 32.0, 40.0, None);
+    assert_eq!(
+        shaped.decoration_lines.len(),
+        1,
+        "one underline on one line, got {:?}",
+        shaped.decoration_lines
+    );
+    let baseline = shaped.glyphs[0].y as f32;
+    let line = shaped.decoration_lines[0];
+    assert!(
+        line.rect.origin.y > baseline,
+        "underline y {} should sit below baseline {}",
+        line.rect.origin.y,
+        baseline
+    );
+    assert!(
+        line.rect.size.height >= 1.0,
+        "underline must be >=1px thick"
+    );
+    assert!(line.rect.size.width > 0.0, "underline must span the text");
+    assert!(
+        line.color.is_none(),
+        "uncolored span → fall back to widget color"
+    );
+}
+
+#[test]
+fn shape_rich_strikethrough_crosses_above_the_baseline() {
+    // A strike-through is centered through the text, i.e. above the baseline
+    // (smaller Y than the baseline).
+    let mut engine = TextEngine::new();
+    let shaped = engine.shape_rich(&[TextSpan::new("Hello").strikethrough()], 32.0, 40.0, None);
+    assert_eq!(shaped.decoration_lines.len(), 1);
+    let baseline = shaped.glyphs[0].y as f32;
+    let line = shaped.decoration_lines[0];
+    assert!(
+        line.rect.origin.y < baseline,
+        "strike-through y {} should sit above baseline {}",
+        line.rect.origin.y,
+        baseline
+    );
+}
+
+#[test]
+fn shape_rich_decoration_carries_the_span_color() {
+    // The decoration must take the span's explicit color so it matches the
+    // glyphs it decorates; an uncolored span reports None to fall back to the
+    // widget color.
+    let mut engine = TextEngine::new();
+    let red = Color::rgb(1.0, 0.0, 0.0);
+    let shaped = engine.shape_rich(
+        &[
+            TextSpan::new("warn").strikethrough().color(red),
+            TextSpan::new(" ok").underline(),
+        ],
+        16.0,
+        20.0,
+        None,
+    );
+    assert_eq!(shaped.decoration_lines.len(), 2);
+    let colored = shaped
+        .decoration_lines
+        .iter()
+        .find(|l| l.color.is_some())
+        .expect("the colored span's decoration should carry Some(color)");
+    let c = colored.color.unwrap();
+    assert!((c.r - 1.0).abs() < 0.01 && c.g < 0.01 && c.b < 0.01);
+    assert!(
+        shaped.decoration_lines.iter().any(|l| l.color.is_none()),
+        "the uncolored underlined span should report None"
+    );
+}
+
+#[test]
+fn shape_rich_underline_and_strikethrough_emit_two_lines() {
+    // Both flags on one span produce two distinct decoration lines.
+    let mut engine = TextEngine::new();
+    let shaped = engine.shape_rich(
+        &[TextSpan::new("both").underline().strikethrough()],
+        32.0,
+        40.0,
+        None,
+    );
+    assert_eq!(shaped.decoration_lines.len(), 2);
+    let ys: Vec<i32> = shaped
+        .decoration_lines
+        .iter()
+        .map(|l| l.rect.origin.y.round() as i32)
+        .collect();
+    assert_ne!(
+        ys[0], ys[1],
+        "underline and strike-through must not coincide"
+    );
+}
+
+#[test]
+fn shape_rich_wrapping_decorated_span_gets_one_line_per_visual_line() {
+    // A decorated span long enough to wrap gets a decoration line per visual
+    // line (so the whole wrapped run is decorated), on distinct rows.
+    let mut engine = TextEngine::new();
+    let spans = [TextSpan::new("one two three four five six seven eight").underline()];
+    let shaped = engine.shape_rich(&spans, 16.0, 20.0, Some(80.0));
+    assert!(
+        shaped.decoration_lines.len() >= 2,
+        "a wrapped underlined span should produce >=2 lines, got {}",
+        shaped.decoration_lines.len()
+    );
+    let rows: std::collections::BTreeSet<i32> = shaped
+        .decoration_lines
+        .iter()
+        .map(|l| l.rect.origin.y.round() as i32)
+        .collect();
+    assert!(
+        rows.len() >= 2,
+        "decoration lines should land on >=2 distinct rows, got {:?}",
+        rows
+    );
+}
+
+#[test]
 fn shape_text_has_no_span_boxes() {
     // Only the rich path has span structure; the single-attrs path must leave
     // span_boxes empty so a caller can use "non-empty" as "this came from

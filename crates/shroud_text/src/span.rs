@@ -15,12 +15,29 @@
 use crate::attrs::TextAttrs;
 use shroud_core::Color;
 
+/// Line decorations drawn over a span's glyphs.
+///
+/// cosmic-text shapes glyphs but does not draw underlines or strike-throughs,
+/// so these are rendered separately as thin filled rectangles positioned from
+/// the line's baseline (see [`TextEngine::shape_rich`](crate::TextEngine::shape_rich),
+/// which emits the geometry as `DecorationLine`s). Both flags can be set at
+/// once — e.g. a struck-through link — though markdown rarely combines them.
+/// The decoration takes the span's resolved text color.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextDecoration {
+    /// Draw a line just below the baseline (for links and `<u>`-style text).
+    pub underline: bool,
+    /// Draw a line through the middle of the text (GFM `~~strikethrough~~`).
+    pub strikethrough: bool,
+}
+
 /// One styled chunk of inline rich text.
 ///
 /// Build with `TextSpan::new("text")` and chain the same shortcut builders
 /// available on [`TextAttrs`] (`bold`, `italic`, `monospace`, etc.) plus a
-/// per-span [`color`](Self::color) override and an optional clickable
-/// [`link`](Self::link) target.
+/// per-span [`color`](Self::color) override, optional line
+/// [`decoration`](Self::decoration) (underline / strikethrough), and an
+/// optional clickable [`link`](Self::link) target.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextSpan {
     pub text: String,
@@ -29,6 +46,9 @@ pub struct TextSpan {
     /// via `TextWidget::color`). When `Some`, this color wins for every glyph
     /// shaped from this span.
     pub color: Option<Color>,
+    /// Underline / strikethrough drawn over this span's glyphs. Default
+    /// (`underline: false, strikethrough: false`) draws nothing.
+    pub decoration: TextDecoration,
     /// Optional opaque click target. When `Some`, the glyphs shaped from this
     /// span become a clickable region: a `TextWidget::rich` carrying an
     /// `on_link_click` handler invokes it with this string when the region is
@@ -39,12 +59,14 @@ pub struct TextSpan {
 }
 
 impl TextSpan {
-    /// New span with default attrs, no color override, and no link.
+    /// New span with default attrs, no color override, no decoration, and no
+    /// link.
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             attrs: TextAttrs::default(),
             color: None,
+            decoration: TextDecoration::default(),
             link: None,
         }
     }
@@ -76,6 +98,24 @@ impl TextSpan {
     /// Override the color for this span's glyphs.
     pub fn color(mut self, color: Color) -> Self {
         self.color = Some(color);
+        self
+    }
+
+    /// Replace the span's decoration wholesale.
+    pub fn decoration(mut self, decoration: TextDecoration) -> Self {
+        self.decoration = decoration;
+        self
+    }
+
+    /// Draw an underline below this span. See [`TextDecoration`].
+    pub fn underline(mut self) -> Self {
+        self.decoration.underline = true;
+        self
+    }
+
+    /// Draw a strike-through line over this span (GFM `~~text~~`).
+    pub fn strikethrough(mut self) -> Self {
+        self.decoration.strikethrough = true;
         self
     }
 

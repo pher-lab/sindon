@@ -38,6 +38,25 @@ pub struct SpanBox {
     pub rect: Rect,
 }
 
+/// A line decoration (underline or strike-through) to fill under/over a span's
+/// glyphs. cosmic-text shapes glyphs but does not draw decorations, so
+/// [`shape_rich`](TextEngine::shape_rich) emits these geometrically from the
+/// baseline and the renderer draws them as thin filled rectangles.
+///
+/// `rect` is block-relative (origin at the shaped block's top-left), the same
+/// space as [`SpanBox`] and the painted glyph positions, so a caller adds the
+/// widget's layout origin to translate into screen space. `color` mirrors
+/// [`ShapedGlyph::color`]: `Some` when the source span set an explicit color,
+/// `None` to fall back to the widget-level color (so the decoration always
+/// matches the text it decorates).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecorationLine {
+    /// Filled rectangle for the decoration, block-relative.
+    pub rect: Rect,
+    /// Span color override, or `None` to use the widget-level color.
+    pub color: Option<Color>,
+}
+
 /// Result of shaping a text string.
 #[derive(Debug)]
 pub struct ShapedText {
@@ -53,6 +72,11 @@ pub struct ShapedText {
     /// have no span structure. Used by `TextWidget` to map a click position
     /// back to the span that owns it (and thus its link target).
     pub span_boxes: Vec<SpanBox>,
+    /// Underline / strike-through rectangles, one per decorated span per
+    /// visual line. Only populated by [`shape_rich`](TextEngine::shape_rich)
+    /// (decoration is a `TextSpan` property); the single-attrs paths leave it
+    /// empty. The widget fills each as a rectangle in its text color.
+    pub decoration_lines: Vec<DecorationLine>,
 }
 
 /// A rasterized glyph image (alpha mask).
@@ -188,6 +212,7 @@ impl TextEngine {
             width: total_width,
             height: total_height,
             span_boxes: Vec::new(),
+            decoration_lines: Vec::new(),
         }
     }
 
@@ -239,6 +264,7 @@ impl TextEngine {
 
         let mut glyphs = Vec::new();
         let mut span_boxes: Vec<SpanBox> = Vec::new();
+        let mut decoration_lines: Vec<DecorationLine> = Vec::new();
         let mut total_width: f32 = 0.0;
         let mut total_height: f32 = 0.0;
 
@@ -246,9 +272,9 @@ impl TextEngine {
             total_width = total_width.max(run.line_w);
             total_height = run.line_top + run.line_height;
             // Accumulate the horizontal extent of consecutive glyphs sharing a
-            // metadata (= span index) on this line. A box is flushed whenever
+            // metadata (= span index) on this line. A group is flushed whenever
             // the span changes and at end-of-line, so each span gets one box
-            // per visual line it occupies.
+            // (and any decoration line) per visual line it occupies.
             let mut group: Option<(usize, f32, f32)> = None; // (span, min_x, max_x)
             for glyph in run.glyphs.iter() {
                 let color = glyph.color_opt.map(cosmic_to_shroud);
@@ -268,20 +294,36 @@ impl TextEngine {
                     }
                     _ => {
                         if let Some((m, min, max)) = group.take() {
-                            span_boxes.push(SpanBox {
-                                span: m,
-                                rect: Rect::new(min, run.line_top, max - min, run.line_height),
-                            });
+                            flush_group(
+                                &mut span_boxes,
+                                &mut decoration_lines,
+                                spans,
+                                m,
+                                min,
+                                max,
+                                run.line_top,
+                                run.line_height,
+                                run.line_y,
+                                font_size,
+                            );
                         }
                         group = Some((glyph.metadata, x0, x1));
                     }
                 }
             }
             if let Some((m, min, max)) = group.take() {
-                span_boxes.push(SpanBox {
-                    span: m,
-                    rect: Rect::new(min, run.line_top, max - min, run.line_height),
-                });
+                flush_group(
+                    &mut span_boxes,
+                    &mut decoration_lines,
+                    spans,
+                    m,
+                    min,
+                    max,
+                    run.line_top,
+                    run.line_height,
+                    run.line_y,
+                    font_size,
+                );
             }
         }
 
@@ -290,6 +332,7 @@ impl TextEngine {
             width: total_width,
             height: total_height,
             span_boxes,
+            decoration_lines,
         }
     }
 
@@ -408,6 +451,61 @@ impl TextEngine {
             left: placement.left,
             top: placement.top,
         })
+    }
+}
+
+/// Emit the span box for a finished glyph group, plus any decoration lines the
+/// group's span asks for.
+///
+/// A "group" is a maximal run of same-span glyphs on one visual line;
+/// `min_x`/`max_x` bracket its horizontal extent. `line_top`/`line_height`
+/// frame the span box (used for click hit-testing); `baseline` is the line's
+/// baseline Y, from which decoration lines are placed geometrically (cosmic-text
+/// doesn't shape decorations). Offsets are fractions of `font_size` so they
+/// scale with the text:
+/// - underline sits ~0.12·size below the baseline,
+/// - strike-through is centered ~0.26·size above the baseline (near the middle
+///   of the x-height),
+/// - thickness is ~0.07·size, at least 1px so it never rounds away.
+#[allow(clippy::too_many_arguments)]
+fn flush_group(
+    span_boxes: &mut Vec<SpanBox>,
+    decoration_lines: &mut Vec<DecorationLine>,
+    spans: &[TextSpan],
+    span: usize,
+    min_x: f32,
+    max_x: f32,
+    line_top: f32,
+    line_height: f32,
+    baseline: f32,
+    font_size: f32,
+) {
+    let width = max_x - min_x;
+    span_boxes.push(SpanBox {
+        span,
+        rect: Rect::new(min_x, line_top, width, line_height),
+    });
+
+    let Some(s) = spans.get(span) else { return };
+    let deco = s.decoration;
+    if width <= 0.0 || !(deco.underline || deco.strikethrough) {
+        return;
+    }
+    let thickness = (font_size * 0.07).round().max(1.0);
+    let color = s.color;
+    if deco.underline {
+        let y = (baseline + font_size * 0.12).round();
+        decoration_lines.push(DecorationLine {
+            rect: Rect::new(min_x, y, width, thickness),
+            color,
+        });
+    }
+    if deco.strikethrough {
+        let y = (baseline - font_size * 0.26 - thickness / 2.0).round();
+        decoration_lines.push(DecorationLine {
+            rect: Rect::new(min_x, y, width, thickness),
+            color,
+        });
     }
 }
 

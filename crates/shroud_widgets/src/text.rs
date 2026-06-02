@@ -401,6 +401,24 @@ impl Widget for TextWidget {
         let shaped =
             ctx.text_engine
                 .shape_rich(spans, font_size, line_height, Some(layout.size.width));
+
+        // Underlines / strike-throughs first: they go to the rect batch, which
+        // the renderer draws beneath the glyph batch. Since each line takes its
+        // span's color (the same color its glyphs use), over/under ordering is
+        // visually identical — drawing as rects just reuses the existing fill
+        // pipeline instead of needing decoration support in the glyph shader.
+        for line in &shaped.decoration_lines {
+            ctx.fill_rect(
+                Rect::new(
+                    layout.origin.x + line.rect.origin.x,
+                    layout.origin.y + line.rect.origin.y,
+                    line.rect.size.width,
+                    line.rect.size.height,
+                ),
+                line.color.unwrap_or(color),
+            );
+        }
+
         for glyph in &shaped.glyphs {
             if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                 ctx.draw_glyph(
