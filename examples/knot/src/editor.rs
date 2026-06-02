@@ -102,6 +102,11 @@ pub fn build(
     let preview_content_cell: Rc<Cell<usize>> = Rc::new(Cell::new(0));
     let toggle_cell = Rc::clone(&preview_content_cell);
     let toggle_visible_state = Rc::clone(&state);
+    // Navigation handle for `[[wikilink]]` clicks inside the preview: clicking
+    // one selects the matching note and drops back to the editor (see
+    // `preview::WikiNav`). Cloned per render so each rebuilt preview subtree
+    // carries its own.
+    let nav = preview::WikiNav::new(Rc::clone(&state), title_sig, body_sig, preview_sig);
     tree.add_child(
         header,
         Button::reactive_label(move || {
@@ -126,8 +131,9 @@ pub fn build(
                 // (there is no reactive markdown widget — see `preview.rs`).
                 let body = body_sig.get_clone();
                 let parent_idx = toggle_cell.get();
+                let nav = nav.clone();
                 ctx.rebuild_children(parent_idx, move |tree, parent| {
-                    preview::render(tree, parent, &body);
+                    preview::render(tree, parent, &body, Some(&nav));
                 });
                 preview_sig.set(true);
             }

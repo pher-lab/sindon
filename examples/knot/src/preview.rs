@@ -24,23 +24,34 @@
 //! `[text](url)` links are clickable: an external web/mail target opens in the
 //! OS default handler (via the `opener` crate), gated by a scheme allowlist so
 //! a note body can't launch `file://` or some arbitrary-scheme handler. Other
-//! targets (relative paths, unknown schemes) are parsed and styled but inert —
-//! note-to-note navigation needs `[[Title]]` wikilink parsing + title routing
-//! that this preview doesn't do yet.
+//! external targets (relative paths, unknown schemes) are parsed and styled but
+//! inert.
 //!
-//! Still out of scope: strikethrough, syntax highlighting, images, and
-//! wikilinks. Strikethrough needs a framework text-decoration attribute on
-//! glyphs that doesn't exist yet, so `~~text~~` stays literal rather than
-//! rendered half-right.
+//! `[[Title]]` wikilinks navigate between notes. pulldown-cmark doesn't know
+//! the syntax, so they're split out of plain text after parsing, rendered as
+//! accent links, and — when a [`WikiNav`] is supplied — clicking one selects
+//! the note whose title matches and drops back into the editor, mirroring a
+//! sidebar click. `[[Target|Alias]]` shows the alias while linking the target.
+//! A wikilink to a title that doesn't exist renders normally but is inert on
+//! click.
+//!
+//! Still out of scope: strikethrough, syntax highlighting, and images.
+//! Strikethrough needs a framework text-decoration attribute on glyphs that
+//! doesn't exist yet, so `~~text~~` stays literal rather than rendered
+//! half-right.
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use shroud::core::Color;
-use shroud::reactive::Reactive;
+use shroud::reactive::{Reactive, Signal};
 use shroud::text::TextSpan;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Container, TextWidget};
 
 use crate::settings;
+use crate::state::{AppState, Note, NoteId, Phase};
 
 // ── Reactive block-level theme colors ───────────────────────────────────────
 // Each re-reads `current_theme()` on every paint, so block text and panel
@@ -68,6 +79,183 @@ fn border_color() -> Reactive<Color> {
 /// block at build time (see the module note on why spans can't be reactive).
 fn inline_accent() -> Color {
     settings::current_theme().colors.primary
+}
+
+/// Internal target prefix marking a `[[wikilink]]`. The framework treats a
+/// span's link target as an opaque string, so we tag wikilinks with a scheme
+/// that `is_external_web_link` rejects (it can never reach the OS opener) and
+/// strip it back off in `handle_link_click` to recover the note title.
+const WIKI_SCHEME: &str = "knot-wiki:";
+
+/// What a clicked wikilink needs to switch the active note: the shared app
+/// state plus the editor's bound signals. Cheap to clone (an `Rc` and three
+/// `Copy` signal handles), which matters because every link block captures its
+/// own clone into the click closure.
+///
+/// `None` is a valid "no navigation" mode — the preview tests and any caller
+/// that doesn't wire routing render wikilinks as inert accent text.
+#[derive(Clone)]
+pub struct WikiNav {
+    state: Rc<RefCell<AppState>>,
+    title_sig: Signal<String>,
+    body_sig: Signal<String>,
+    preview_sig: Signal<bool>,
+}
+
+impl WikiNav {
+    pub fn new(
+        state: Rc<RefCell<AppState>>,
+        title_sig: Signal<String>,
+        body_sig: Signal<String>,
+        preview_sig: Signal<bool>,
+    ) -> Self {
+        Self {
+            state,
+            title_sig,
+            body_sig,
+            preview_sig,
+        }
+    }
+
+    /// Select the note whose title matches `title` and return to the editor —
+    /// the same end state as clicking that note in the sidebar. A title with
+    /// no match is a no-op, so a dangling `[[wikilink]]` simply does nothing.
+    fn navigate_to(&self, title: &str) {
+        // Snapshot the match under a shared borrow, then re-borrow mutably to
+        // flip the selection (RefCell panics on overlapping borrows).
+        let snapshot = {
+            let s = self.state.borrow();
+            match &s.phase {
+                Phase::Unlocked { notes, .. } => find_note_id_by_title(notes, title)
+                    .and_then(|id| notes.iter().find(|n| n.id == id))
+                    .map(|n| (n.id, n.title.clone(), n.body.clone())),
+                _ => None,
+            }
+        };
+        let Some((id, new_title, new_body)) = snapshot else {
+            return;
+        };
+        {
+            let mut s = self.state.borrow_mut();
+            if let Phase::Unlocked { selected, .. } = &mut s.phase {
+                *selected = Some(id);
+            }
+        }
+        // Rebase the editor inputs and land on the editor (not a stale preview
+        // of the note we just left), exactly as `sidebar::select_note` does.
+        self.title_sig.set(new_title);
+        self.body_sig.set(new_body);
+        self.preview_sig.set(false);
+    }
+}
+
+/// First note whose title equals `target` (both trimmed, ASCII-case-
+/// insensitive). ASCII folding lets English titles match regardless of case
+/// while non-ASCII titles (e.g. Japanese) match exactly — the behavior a CJK
+/// notes app wants, since there is no case to fold there.
+fn find_note_id_by_title(notes: &[Note], target: &str) -> Option<NoteId> {
+    let target = target.trim();
+    notes
+        .iter()
+        .find(|n| n.title.trim().eq_ignore_ascii_case(target))
+        .map(|n| n.id)
+}
+
+/// A run of plain text after `[[wikilink]]` spans have been split out.
+enum WikiPiece {
+    /// Literal text between (or around) wikilinks.
+    Text(String),
+    /// A `[[Target]]` / `[[Target|Display]]` link: `display` is shown, `target`
+    /// is the note title to resolve.
+    Link { display: String, target: String },
+}
+
+/// Split `text` on `[[Target]]` / `[[Target|Display]]` wikilink spans,
+/// returning alternating plain and link pieces. An unterminated `[[`, an empty
+/// target, or a candidate whose inner text contains a bracket or newline is
+/// kept as literal text rather than guessed at.
+fn split_wikilinks(text: &str) -> Vec<WikiPiece> {
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("[[") {
+        let after_open = &rest[open + 2..];
+        let Some(close_rel) = after_open.find("]]") else {
+            break; // no closer — the remainder is all literal text
+        };
+        let inner = &after_open[..close_rel];
+        // A real wikilink can't be empty or carry stray brackets / newlines.
+        if inner.is_empty() || inner.contains(['[', ']', '\n']) {
+            // Keep the leading text and the literal "[[", then resume scanning
+            // after the "[[" so the same opener is never re-tested (no spin).
+            push_text(&mut pieces, &rest[..open + 2]);
+            rest = after_open;
+            continue;
+        }
+        if open > 0 {
+            push_text(&mut pieces, &rest[..open]);
+        }
+        // `[[Target|Display]]` aliases the link text; bare `[[Target]]` shows
+        // the target itself.
+        let (target, display) = match inner.split_once('|') {
+            Some((t, d)) => (t.trim(), d.trim()),
+            None => (inner.trim(), inner.trim()),
+        };
+        if target.is_empty() {
+            // e.g. `[[ |Display]]` — nothing to link to, keep it literal.
+            push_text(&mut pieces, &rest[..open + 2 + close_rel + 2]);
+        } else {
+            let display = if display.is_empty() { target } else { display };
+            pieces.push(WikiPiece::Link {
+                display: display.to_string(),
+                target: target.to_string(),
+            });
+        }
+        rest = &after_open[close_rel + 2..];
+    }
+    push_text(&mut pieces, rest);
+    pieces
+}
+
+/// Append `s` as text, merging into a trailing `Text` piece so consecutive
+/// literal fragments don't fan out into many adjacent runs.
+fn push_text(pieces: &mut Vec<WikiPiece>, s: &str) {
+    if s.is_empty() {
+        return;
+    }
+    if let Some(WikiPiece::Text(last)) = pieces.last_mut() {
+        last.push_str(s);
+    } else {
+        pieces.push(WikiPiece::Text(s.to_string()));
+    }
+}
+
+/// Replace each plain, not-already-linked run containing `[[` with its
+/// wikilink-split pieces. Inline code, bold/italic, and text already inside a
+/// markdown link are left untouched — so `[[x]]` inside `` `code` `` stays
+/// literal and a wikilink can't nest inside another link.
+fn expand_wikilinks(runs: Vec<InlineRun>) -> Vec<InlineRun> {
+    let mut out = Vec::with_capacity(runs.len());
+    for run in runs {
+        if run.style != InlineStyle::Plain || run.link.is_some() || !run.text.contains("[[") {
+            out.push(run);
+            continue;
+        }
+        for piece in split_wikilinks(&run.text) {
+            match piece {
+                WikiPiece::Text(text) => out.push(InlineRun {
+                    text,
+                    style: InlineStyle::Plain,
+                    link: None,
+                }),
+                WikiPiece::Link { display, target } => out.push(InlineRun {
+                    text: display,
+                    style: InlineStyle::Link,
+                    link: Some(format!("{WIKI_SCHEME}{target}")),
+                }),
+            }
+        }
+    }
+    out
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -119,7 +307,7 @@ fn options() -> Options {
 /// container; one block is appended per top-level markdown block. An empty /
 /// whitespace-only source renders a single muted placeholder so the preview
 /// pane never looks broken on a brand-new note.
-pub fn render(tree: &mut WidgetTree, parent: usize, source: &str) {
+pub fn render(tree: &mut WidgetTree, parent: usize, source: &str, nav: Option<&WikiNav>) {
     if source.trim().is_empty() {
         tree.add_child(
             parent,
@@ -132,11 +320,17 @@ pub fn render(tree: &mut WidgetTree, parent: usize, source: &str) {
     let events: Vec<Event> = parser.collect();
     let mut i = 0;
     while i < events.len() {
-        i = render_block(tree, parent, &events, i);
+        i = render_block(tree, parent, &events, i, nav);
     }
 }
 
-fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: usize) -> usize {
+fn render_block(
+    tree: &mut WidgetTree,
+    parent: usize,
+    events: &[Event],
+    start: usize,
+    nav: Option<&WikiNav>,
+) -> usize {
     match &events[start] {
         Event::Start(Tag::Heading { level, .. }) => {
             let (runs, end) =
@@ -147,12 +341,12 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
                 HeadingLevel::H3 => 22.0,
                 _ => 18.0,
             };
-            emit_inline_block(tree, parent, runs, Some(size), false);
+            emit_inline_block(tree, parent, runs, Some(size), false, nav);
             end + 1
         }
         Event::Start(Tag::Paragraph) => {
             let (runs, end) = collect_inline(events, start + 1, |t| matches!(t, TagEnd::Paragraph));
-            emit_inline_block(tree, parent, runs, None, false);
+            emit_inline_block(tree, parent, runs, None, false, nav);
             end + 1
         }
         Event::Start(Tag::BlockQuote) => {
@@ -190,7 +384,7 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
             let inner_end = i;
             let mut j = inner_start;
             while j < inner_end {
-                j = render_block(tree, body, events, j);
+                j = render_block(tree, body, events, j, nav);
             }
             inner_end + 1
         }
@@ -265,7 +459,7 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
                         // width, not push the marker / overflow horizontally.
                         let item_body = tree
                             .add_child(row, Container::column().gap(4.0).flex_basis(0.0).grow(1.0));
-                        i = render_list_item(tree, item_body, events, body_start);
+                        i = render_list_item(tree, item_body, events, body_start, nav);
                     }
                     Event::End(TagEnd::List(_)) => break,
                     _ => i += 1,
@@ -273,7 +467,7 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
             }
             i + 1
         }
-        Event::Start(Tag::Table(aligns)) => render_table(tree, parent, events, start, aligns),
+        Event::Start(Tag::Table(aligns)) => render_table(tree, parent, events, start, aligns, nav),
         // Stray text outside a block (rare; defensive).
         Event::Text(t) => {
             tree.add_child(parent, TextWidget::new(t.to_string()).color(body_color()));
@@ -285,7 +479,13 @@ fn render_block(tree: &mut WidgetTree, parent: usize, events: &[Event], start: u
 
 /// Render the inside of a `<li>` — typically one paragraph, sometimes nested
 /// blocks (sublists). Returns the index *after* the closing `TagEnd::Item`.
-fn render_list_item(tree: &mut WidgetTree, parent: usize, events: &[Event], start: usize) -> usize {
+fn render_list_item(
+    tree: &mut WidgetTree,
+    parent: usize,
+    events: &[Event],
+    start: usize,
+    nav: Option<&WikiNav>,
+) -> usize {
     let mut i = start;
     while i < events.len() {
         match &events[i] {
@@ -294,21 +494,21 @@ fn render_list_item(tree: &mut WidgetTree, parent: usize, events: &[Event], star
             // emit raw inline events directly inside Item.
             Event::Start(Tag::Paragraph) => {
                 let (runs, end) = collect_inline(events, i + 1, |t| matches!(t, TagEnd::Paragraph));
-                emit_inline_block(tree, parent, runs, None, false);
+                emit_inline_block(tree, parent, runs, None, false, nav);
                 i = end + 1;
             }
             Event::Text(_)
             | Event::Code(_)
             | Event::Start(Tag::Emphasis | Tag::Strong | Tag::Link { .. }) => {
                 let (runs, end) = collect_inline(events, i, |t| matches!(t, TagEnd::Item));
-                emit_inline_block(tree, parent, runs, None, false);
+                emit_inline_block(tree, parent, runs, None, false, nav);
                 i = end;
             }
             Event::Start(Tag::List(_))
             | Event::Start(Tag::CodeBlock(_))
             | Event::Start(Tag::BlockQuote)
             | Event::Start(Tag::Table(_)) => {
-                i = render_block(tree, parent, events, i);
+                i = render_block(tree, parent, events, i, nav);
             }
             _ => i += 1,
         }
@@ -329,6 +529,7 @@ fn render_table(
     events: &[Event],
     start: usize,
     aligns: &[Alignment],
+    nav: Option<&WikiNav>,
 ) -> usize {
     let table = tree.add_child(parent, Container::column());
     let mut i = start + 1;
@@ -336,7 +537,7 @@ fn render_table(
     while i < events.len() {
         match &events[i] {
             Event::Start(Tag::TableHead) => {
-                i = render_table_row(tree, table, events, i + 1, aligns, true);
+                i = render_table_row(tree, table, events, i + 1, aligns, true, nav);
                 add_divider(tree, table);
             }
             Event::Start(Tag::TableRow) => {
@@ -346,7 +547,7 @@ fn render_table(
                     add_divider(tree, table);
                 }
                 first_body_row = false;
-                i = render_table_row(tree, table, events, i + 1, aligns, false);
+                i = render_table_row(tree, table, events, i + 1, aligns, false, nav);
             }
             Event::End(TagEnd::Table) => return i + 1,
             _ => i += 1,
@@ -365,6 +566,7 @@ fn render_table_row(
     start: usize,
     aligns: &[Alignment],
     header: bool,
+    nav: Option<&WikiNav>,
 ) -> usize {
     let row = tree.add_child(table, Container::row());
     let mut col = 0usize;
@@ -380,7 +582,7 @@ fn render_table_row(
                 }
                 let cell_idx = tree.add_child(row, cell);
                 let (runs, end) = collect_inline(events, i + 1, |t| matches!(t, TagEnd::TableCell));
-                emit_inline_block(tree, cell_idx, runs, None, header);
+                emit_inline_block(tree, cell_idx, runs, None, header, nav);
                 i = end + 1;
                 col += 1;
             }
@@ -400,6 +602,26 @@ fn add_divider(tree: &mut WidgetTree, parent: usize) {
             .width_full()
             .background(border_color()),
     );
+}
+
+/// Append `text` to `runs`, merging into the trailing run when it shares the
+/// same style *and* link. This matters for more than tidiness: pulldown-cmark
+/// emits bracket-bearing plain text as one `Text` event per delimiter — e.g.
+/// `[[Home]]` arrives as five events `"[" "[" "Home" "]" "]"`. Without
+/// coalescing, each lands in its own run and `expand_wikilinks` never sees the
+/// `[[…]]` pattern whole, so the wikilink is silently never detected.
+fn push_run(runs: &mut Vec<InlineRun>, text: &str, style: InlineStyle, link: Option<String>) {
+    if let Some(last) = runs.last_mut() {
+        if last.style == style && last.link == link {
+            last.text.push_str(text);
+            return;
+        }
+    }
+    runs.push(InlineRun {
+        text: text.to_string(),
+        style,
+        link,
+    });
 }
 
 /// Walk inline events, splitting them into typed runs. Stops *at* the index of
@@ -422,22 +644,14 @@ fn collect_inline(
             Event::End(t) if is_end(t) => return (runs, i),
             Event::Text(s) => {
                 let style = *style_stack.last().unwrap();
-                runs.push(InlineRun {
-                    text: s.to_string(),
-                    style,
-                    link: link_stack.last().cloned(),
-                });
+                push_run(&mut runs, s, style, link_stack.last().cloned());
             }
-            Event::Code(s) => runs.push(InlineRun {
-                text: s.to_string(),
-                style: InlineStyle::Code,
-                link: link_stack.last().cloned(),
-            }),
-            Event::SoftBreak | Event::HardBreak => runs.push(InlineRun {
-                text: " ".into(),
-                style: InlineStyle::Plain,
-                link: None,
-            }),
+            Event::Code(s) => {
+                push_run(&mut runs, s, InlineStyle::Code, link_stack.last().cloned());
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                push_run(&mut runs, " ", InlineStyle::Plain, None);
+            }
             Event::Start(Tag::Strong) => style_stack.push(InlineStyle::Bold),
             Event::Start(Tag::Emphasis) => style_stack.push(InlineStyle::Italic),
             Event::Start(Tag::Link { dest_url, .. }) => {
@@ -471,7 +685,12 @@ fn emit_inline_block(
     runs: Vec<InlineRun>,
     font_size: Option<f32>,
     bold: bool,
+    nav: Option<&WikiNav>,
 ) {
+    // Pull `[[wikilinks]]` out of plain text into their own Link runs before
+    // anything else, so the fast-path check below sees them as styled runs and
+    // routes the block through the rich (clickable) path.
+    let runs = expand_wikilinks(runs);
     // Headings imply bold via `font_size`; `bold` forces it for non-heading
     // blocks that still want weight (table header cells).
     let want_bold = bold || font_size.is_some();
@@ -527,25 +746,35 @@ fn emit_inline_block(
         w = w.font_size(s).line_height(heading_line_height(s));
     }
     if has_link {
-        w = w.on_link_click(|target, _ctx| handle_link_click(target));
+        // Clone the nav (if any) into the click closure: it must be `'static`
+        // since the widget outlives this call, and each link block keeps its
+        // own copy.
+        let nav = nav.cloned();
+        w = w.on_link_click(move |target, _ctx| handle_link_click(target, nav.as_ref()));
     }
     tree.add_child(parent, w);
 }
 
 /// Act on a click of a preview link.
 ///
-/// External web/mail targets open in the OS default handler. Everything else
-/// is ignored: relative paths, fragment links, and unknown schemes have no
-/// meaning without note-to-note routing (a follow-up), and refusing them keeps
-/// a note body from launching `file://` or some arbitrary-scheme handler.
-fn handle_link_click(target: &str) {
-    if !is_external_web_link(target) {
+/// A `[[wikilink]]` (carried as `WIKI_SCHEME` + title) navigates to the
+/// matching note when a [`WikiNav`] is wired. External web/mail targets open in
+/// the OS default handler. Everything else is ignored: relative paths, fragment
+/// links, and unknown schemes have no meaning here, and refusing them keeps a
+/// note body from launching `file://` or some arbitrary-scheme handler.
+fn handle_link_click(target: &str, nav: Option<&WikiNav>) {
+    if let Some(title) = target.strip_prefix(WIKI_SCHEME) {
+        if let Some(nav) = nav {
+            nav.navigate_to(title);
+        }
         return;
     }
-    // Best-effort: a failed launch (no handler / sandbox) is swallowed — there
-    // is no UI surface to report it and a dead link must never panic the
-    // editor.
-    let _ = opener::open(target);
+    if is_external_web_link(target) {
+        // Best-effort: a failed launch (no handler / sandbox) is swallowed —
+        // there is no UI surface to report it and a dead link must never panic
+        // the editor.
+        let _ = opener::open(target);
+    }
 }
 
 /// Whether `target` is a web/mail URL we're willing to hand to the OS opener.
@@ -572,7 +801,7 @@ mod tests {
         let mut tree = WidgetTree::new();
         let root = tree.set_root(Container::column().width(600.0).height(800.0).padding(16.0));
         let col = tree.add_child(root, Container::column().width_full().gap(12.0));
-        render(&mut tree, col, source);
+        render(&mut tree, col, source, None);
 
         let mut engine = TextEngine::new();
         let theme = Theme::dark();
@@ -763,6 +992,175 @@ fn main() {}
             long > short,
             "more paragraphs must be taller: {long} vs {short}"
         );
+    }
+
+    // ── Wikilink parsing ────────────────────────────────────────────────────
+
+    /// Collapse pieces to a debuggable shape: `("text", None)` for literals and
+    /// `("display", Some("target"))` for links.
+    fn pieces(text: &str) -> Vec<(String, Option<String>)> {
+        split_wikilinks(text)
+            .into_iter()
+            .map(|p| match p {
+                WikiPiece::Text(t) => (t, None),
+                WikiPiece::Link { display, target } => (display, Some(target)),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wikilink_bare_target_links_to_itself() {
+        assert_eq!(
+            pieces("[[My Note]]"),
+            vec![("My Note".to_string(), Some("My Note".to_string()))]
+        );
+    }
+
+    #[test]
+    fn wikilink_alias_shows_display_links_target() {
+        // `[[Target|Display]]` renders Display but resolves Target.
+        assert_eq!(
+            pieces("[[real-title|click here]]"),
+            vec![("click here".to_string(), Some("real-title".to_string()))]
+        );
+    }
+
+    #[test]
+    fn wikilink_keeps_surrounding_text_as_literals() {
+        assert_eq!(
+            pieces("see [[A]] and [[B]] done"),
+            vec![
+                ("see ".to_string(), None),
+                ("A".to_string(), Some("A".to_string())),
+                (" and ".to_string(), None),
+                ("B".to_string(), Some("B".to_string())),
+                (" done".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_wikilinks_stay_literal() {
+        // Unterminated, empty, bracket-laden, and target-less candidates are
+        // never guessed at — they round-trip as plain text.
+        for raw in [
+            "a [[b without close",
+            "[[]]",
+            "[[ |only-alias]]",
+            "[[has[bracket]]",
+            "plain text, no links",
+        ] {
+            let collapsed: String = split_wikilinks(raw)
+                .into_iter()
+                .map(|p| match p {
+                    WikiPiece::Text(t) => t,
+                    WikiPiece::Link { .. } => panic!("`{raw}` should not parse as a wikilink"),
+                })
+                .collect();
+            assert_eq!(collapsed, raw, "literal text must round-trip unchanged");
+        }
+    }
+
+    #[test]
+    fn expand_wikilinks_splits_plain_but_spares_code_and_links() {
+        let runs = vec![
+            InlineRun {
+                text: "go to [[Home]]".into(),
+                style: InlineStyle::Plain,
+                link: None,
+            },
+            // Inline code carrying `[[x]]` must stay literal, not linkify.
+            InlineRun {
+                text: "[[notalink]]".into(),
+                style: InlineStyle::Code,
+                link: None,
+            },
+        ];
+        let out = expand_wikilinks(runs);
+        // "go to " (plain) + "Home" (link) + the untouched code run.
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].style, InlineStyle::Plain);
+        assert_eq!(out[0].link, None);
+        assert_eq!(out[1].style, InlineStyle::Link);
+        assert_eq!(
+            out[1].link.as_deref(),
+            Some("knot-wiki:Home"),
+            "a wikilink run carries the internal scheme + bare title"
+        );
+        assert_eq!(out[2].style, InlineStyle::Code);
+        assert_eq!(out[2].text, "[[notalink]]");
+    }
+
+    #[test]
+    fn wikilink_target_is_inert_to_the_external_opener() {
+        // The internal scheme must never satisfy the OS-opener allowlist, so a
+        // note body can't smuggle a launch through a wikilink.
+        assert!(!is_external_web_link(&format!("{WIKI_SCHEME}Home")));
+    }
+
+    #[test]
+    fn fragmented_brackets_coalesce_so_real_wikilinks_are_detected() {
+        // Regression for the live "wikilink doesn't become a link" bug: parsed
+        // through the *real* pulldown-cmark, `[[Home]]` arrives as five separate
+        // Text events ("[", "[", "Home", "]", "]"). collect_inline must coalesce
+        // them into one plain run, or expand_wikilinks can never see the
+        // `[[...]]` pattern whole. (The earlier wikilink tests fed hand-built
+        // strings straight to split_wikilinks and so missed this entirely —
+        // exercise the parser, not just the splitter.)
+        let evs: Vec<Event> = Parser::new_ext("see [[Home]] here", options()).collect();
+        let (runs, _end) = collect_inline(&evs, 1, |t| matches!(t, TagEnd::Paragraph));
+        assert_eq!(
+            runs.len(),
+            1,
+            "the five bracket fragments must merge into one plain run, got {:?}",
+            runs.iter().map(|r| &r.text).collect::<Vec<_>>()
+        );
+        assert_eq!(runs[0].text, "see [[Home]] here");
+
+        let out = expand_wikilinks(runs);
+        assert!(
+            out.iter().any(
+                |r| r.style == InlineStyle::Link && r.link.as_deref() == Some("knot-wiki:Home")
+            ),
+            "the coalesced run must expand into a Home wikilink, got {:?}",
+            out.iter()
+                .map(|r| (&r.text, r.style, &r.link))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── Title lookup ────────────────────────────────────────────────────────
+
+    fn note(id: NoteId, title: &str) -> Note {
+        Note {
+            id,
+            title: title.to_string(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn title_lookup_matches_trimmed_and_ascii_case_insensitive() {
+        let notes = vec![note(1, "Inbox"), note(2, "Project Plan"), note(3, "日記")];
+        assert_eq!(find_note_id_by_title(&notes, "Inbox"), Some(1));
+        assert_eq!(find_note_id_by_title(&notes, "  project plan  "), Some(2));
+        // Non-ASCII (Japanese) matches exactly — there's no case to fold.
+        assert_eq!(find_note_id_by_title(&notes, "日記"), Some(3));
+        assert_eq!(find_note_id_by_title(&notes, "missing"), None);
+    }
+
+    #[test]
+    fn title_lookup_returns_the_first_match_on_duplicates() {
+        // Duplicate titles are legal in Knot; a wikilink resolves to the first.
+        let notes = vec![note(7, "Notes"), note(9, "Notes")];
+        assert_eq!(find_note_id_by_title(&notes, "Notes"), Some(7));
+    }
+
+    #[test]
+    fn wikilink_block_renders_without_panicking() {
+        // End-to-end through the renderer (nav: None — inert click): a body that
+        // is just a wikilink must still produce a real, positive-height block.
+        assert!(rendered_height("Jump to [[Some Note]] now.").size_is_positive());
     }
 
     // Tiny readability shim so the empty-source asserts read intention-first.
