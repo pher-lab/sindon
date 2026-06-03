@@ -19,6 +19,7 @@ use shroud::widgets::tree::WidgetTree;
 use crate::editor;
 use crate::sidebar;
 use crate::state::{AppState, Phase};
+use crate::tag_editor::TagRefresh;
 
 pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     // Seed the editor signals from the initially-selected note (which
@@ -44,6 +45,12 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
 
     let root = tree.set_root(Container::row().width_full().height_full());
 
+    // Bridges the sidebar (which switches the active note) to the editor's
+    // tag chips (which must re-render for the newly selected note). The
+    // editor installs the rebuild closure; the sidebar fires it on every
+    // select / create / delete.
+    let tag_refresh = TagRefresh::new();
+
     sidebar::build(
         tree,
         root,
@@ -51,7 +58,16 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         title_sig,
         body_sig,
         preview_sig,
+        tag_refresh.clone(),
     );
 
-    editor::build(tree, root, state, title_sig, body_sig, preview_sig);
+    editor::build(
+        tree,
+        root,
+        state,
+        title_sig,
+        body_sig,
+        preview_sig,
+        tag_refresh,
+    );
 }

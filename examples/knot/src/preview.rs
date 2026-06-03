@@ -1300,6 +1300,7 @@ fn main() {}
             id,
             title: title.to_string(),
             body: String::new(),
+            tags: Vec::new(),
         }
     }
 

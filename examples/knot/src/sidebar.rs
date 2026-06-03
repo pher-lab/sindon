@@ -22,6 +22,7 @@ use shroud::widgets::{Button, Container, ScrollView, TextWidget};
 
 use crate::settings;
 use crate::state::{AppState, Note, NoteId, Phase};
+use crate::tag_editor::TagRefresh;
 
 const SIDEBAR_WIDTH: f32 = 260.0;
 
@@ -37,6 +38,7 @@ pub fn build(
     title_sig: Signal<String>,
     body_sig: Signal<String>,
     preview_sig: Signal<bool>,
+    tag_refresh: TagRefresh,
 ) -> Rc<Cell<usize>> {
     let pane = tree.add_child(
         parent,
@@ -55,6 +57,7 @@ pub fn build(
     let new_state = Rc::clone(&state);
     let list_cell: Rc<Cell<usize>> = Rc::new(Cell::new(0));
     let new_cell = Rc::clone(&list_cell);
+    let new_refresh = tag_refresh.clone();
     tree.add_child(
         header,
         Button::new("+ New").radius(6.0).on_click(move |ctx| {
@@ -62,9 +65,13 @@ pub fn build(
                 let parent_idx = new_cell.get();
                 let s = Rc::clone(&new_state);
                 let c = Rc::clone(&new_cell);
+                let r = new_refresh.clone();
                 ctx.rebuild_children(parent_idx, move |tree, parent| {
-                    rebuild_list_into(tree, parent, s, title_sig, body_sig, preview_sig, c);
+                    rebuild_list_into(tree, parent, s, title_sig, body_sig, preview_sig, c, r);
                 });
+                // The new note is now selected and has no tags — refresh the
+                // editor's chip row to match.
+                new_refresh.fire(ctx);
             }
         }),
     );
@@ -81,6 +88,7 @@ pub fn build(
         body_sig,
         preview_sig,
         Rc::clone(&list_cell),
+        tag_refresh,
     );
 
     // Pinned to the bottom of the pane (the scroll above takes grow:1).
@@ -109,6 +117,7 @@ pub fn build(
 
 /// Push one Button per current note into `parent`. Called both at initial
 /// build and from `rebuild_children` after add / delete.
+#[allow(clippy::too_many_arguments)]
 fn rebuild_list_into(
     tree: &mut WidgetTree,
     parent: usize,
@@ -117,6 +126,7 @@ fn rebuild_list_into(
     body_sig: Signal<String>,
     preview_sig: Signal<bool>,
     list_cell: Rc<Cell<usize>>,
+    tag_refresh: TagRefresh,
 ) {
     let ids: Vec<NoteId> = match &state.borrow().phase {
         Phase::Unlocked { notes, .. } => notes.iter().map(|n| n.id).collect(),
@@ -141,6 +151,7 @@ fn rebuild_list_into(
             body_sig,
             preview_sig,
             Rc::clone(&list_cell),
+            tag_refresh.clone(),
         );
     }
 }
@@ -159,6 +170,7 @@ fn add_row(
     body_sig: Signal<String>,
     preview_sig: Signal<bool>,
     list_cell: Rc<Cell<usize>>,
+    tag_refresh: TagRefresh,
 ) {
     // Row container — holds the click-target button and a "✕" delete button
     // side by side. The container reads selection state to flip its bg, so
@@ -190,6 +202,7 @@ fn add_row(
 
     let label_state = Rc::clone(&state);
     let click_state = Rc::clone(&state);
+    let click_refresh = tag_refresh.clone();
     tree.add_child(
         row,
         Button::reactive_label(move || {
@@ -218,13 +231,16 @@ fn add_row(
         // surprising, especially since the row's selection background
         // suggests the whole row is the affordance.
         .grow(1.0)
-        .on_click(move |_ctx| {
+        .on_click(move |ctx| {
             select_note(&click_state, note_id, &title_sig, &body_sig, preview_sig);
+            // Re-render the editor's chips for the newly selected note.
+            click_refresh.fire(ctx);
         }),
     );
 
     let del_state = Rc::clone(&state);
     let del_cell = list_cell;
+    let del_refresh = tag_refresh;
     tree.add_child(
         row,
         // Themed red so the destructive action stays legible on both
@@ -238,9 +254,13 @@ fn add_row(
                 let parent_idx = del_cell.get();
                 let s = Rc::clone(&del_state);
                 let c = Rc::clone(&del_cell);
+                let r = del_refresh.clone();
                 ctx.rebuild_children(parent_idx, move |tree, parent| {
-                    rebuild_list_into(tree, parent, s, title_sig, body_sig, preview_sig, c);
+                    rebuild_list_into(tree, parent, s, title_sig, body_sig, preview_sig, c, r);
                 });
+                // Selection may have moved to a sibling (or none) — sync the
+                // editor's chip row to whatever note is active now.
+                del_refresh.fire(ctx);
             }),
     );
 }
@@ -301,6 +321,7 @@ fn create_note(
             id,
             title: String::new(),
             body: String::new(),
+            tags: Vec::new(),
         });
         *selected = Some(id);
         Some(id)

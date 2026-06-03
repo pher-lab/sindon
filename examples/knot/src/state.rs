@@ -26,12 +26,16 @@ pub struct EncryptedNote {
 
 /// Decrypted note as shown in the editor. Title is held plaintext
 /// alongside the body for editing convenience — when saving, the whole
-/// `{title, body}` payload is serialized then encrypted as one blob.
+/// `{title, tags, body}` payload is serialized then encrypted as one blob.
 #[derive(Clone)]
 pub struct Note {
     pub id: NoteId,
     pub title: String,
     pub body: String,
+    /// Free-form labels, normalized to lowercase + trimmed and kept unique
+    /// in insertion order (see [`normalize_tag`]). Persisted inside the
+    /// encrypted payload alongside title/body — never as plaintext metadata.
+    pub tags: Vec<String>,
 }
 
 pub enum Phase {
@@ -161,6 +165,101 @@ impl AppState {
         }
     }
 
+    /// Tags of the currently selected note, in insertion order. Empty when
+    /// nothing is selected or the app is locked. Used by the tag editor to
+    /// (re)render the chip row.
+    pub fn selected_tags(&self) -> Vec<String> {
+        if let Phase::Unlocked {
+            selected: Some(id),
+            notes,
+            ..
+        } = &self.phase
+        {
+            if let Some(note) = notes.iter().find(|n| n.id == *id) {
+                return note.tags.clone();
+            }
+        }
+        Vec::new()
+    }
+
+    /// Every distinct tag across the whole vault, sorted. Feeds the tag
+    /// editor's autocomplete suggestions — the union of what the user has
+    /// used before so related notes converge on the same labels.
+    pub fn all_tags(&self) -> Vec<String> {
+        let Phase::Unlocked { notes, .. } = &self.phase else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for note in notes {
+            for tag in &note.tags {
+                if !out.contains(tag) {
+                    out.push(tag.clone());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Add a tag to the selected note. Normalizes (lowercase + trim) and
+    /// no-ops on an empty result or a duplicate. Marks the note dirty on a
+    /// real insertion so the auto-save tick persists it. Returns whether a
+    /// tag was actually added.
+    pub fn add_tag_to_selected(&mut self, raw: &str) -> bool {
+        let tag = normalize_tag(raw);
+        if tag.is_empty() {
+            return false;
+        }
+        let added = if let Phase::Unlocked {
+            selected: Some(id),
+            notes,
+            ..
+        } = &mut self.phase
+        {
+            if let Some(note) = notes.iter_mut().find(|n| n.id == *id) {
+                if note.tags.iter().any(|t| t == &tag) {
+                    false
+                } else {
+                    note.tags.push(tag);
+                    true
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if added {
+            self.mark_selected_dirty();
+        }
+        added
+    }
+
+    /// Remove a tag from the selected note (exact match against the already
+    /// normalized stored form). Marks the note dirty when a tag was removed.
+    pub fn remove_tag_from_selected(&mut self, tag: &str) -> bool {
+        let removed = if let Phase::Unlocked {
+            selected: Some(id),
+            notes,
+            ..
+        } = &mut self.phase
+        {
+            if let Some(note) = notes.iter_mut().find(|n| n.id == *id) {
+                let before = note.tags.len();
+                note.tags.retain(|t| t != tag);
+                note.tags.len() < before
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if removed {
+            self.mark_selected_dirty();
+        }
+        removed
+    }
+
     /// Persist every dirty note via `storage.save_note`. Clears the
     /// dirty set on success; on the first error, the offending id is
     /// preserved (along with every later one) so the next tick retries.
@@ -194,7 +293,7 @@ impl AppState {
                 dirty.remove(&id);
                 continue;
             };
-            let payload = join_payload(&note.title, &note.body);
+            let payload = join_payload(&note.title, &note.body, &note.tags);
             let (nonce, ciphertext) = seal(dek, &payload);
             let row = EncryptedNote {
                 id: note.id,
@@ -226,7 +325,7 @@ impl AppState {
         let rows: Vec<EncryptedNote> = notes
             .iter()
             .map(|note| {
-                let payload = join_payload(&note.title, &note.body);
+                let payload = join_payload(&note.title, &note.body, &note.tags);
                 let (nonce, ciphertext) = seal(dek, &payload);
                 EncryptedNote {
                     id: note.id,
@@ -304,30 +403,93 @@ pub fn decrypt_all(dek: &MasterKey, vault: &[EncryptedNote]) -> Option<Vec<Note>
     let mut out = Vec::with_capacity(vault.len());
     for enc in vault {
         let pt = open(dek, &enc.nonce, &enc.ciphertext)?;
-        let (title, body) = split_payload(&pt)?;
+        let (title, body, tags) = split_payload(&pt)?;
         out.push(Note {
             id: enc.id,
             title,
             body,
+            tags,
         });
     }
     Some(out)
 }
 
-/// Payload encoding: 4-byte big-endian title length + title bytes + body bytes.
-/// Plenty for M2 — switch to bincode/postcard when we add tags / timestamps.
-fn join_payload(title: &str, body: &str) -> Vec<u8> {
+/// Normalize a raw tag input to its stored form: trimmed and lowercased.
+/// Tags compare and dedupe in this form so `Work`, ` work ` and `WORK`
+/// collapse to one. An all-whitespace input normalizes to the empty string,
+/// which callers treat as "no tag."
+pub fn normalize_tag(raw: &str) -> String {
+    raw.trim().to_lowercase()
+}
+
+/// First byte of a v1 payload. The legacy format begins with the
+/// big-endian *high* byte of the title length, which is `0` for any
+/// realistic title (< 16 MiB), so a leading `1` unambiguously flags the
+/// newer tag-carrying layout. Old vaults written before tags existed stay
+/// readable; new writes always use v1.
+const PAYLOAD_V1: u8 = 1;
+
+/// Payload encoding (v1):
+///
+/// ```text
+/// [1]  version = PAYLOAD_V1
+/// [4]  title length, big-endian
+/// [N]  title bytes
+/// [2]  tag count, big-endian
+///   repeated: [2] tag length BE, [M] tag bytes
+/// [..] body bytes (remainder)
+/// ```
+///
+/// Switch to bincode/postcard if this grows another field — the manual
+/// layout is fine for three.
+fn join_payload(title: &str, body: &str, tags: &[String]) -> Vec<u8> {
     let tb = title.as_bytes();
     let bb = body.as_bytes();
-    let mut out = Vec::with_capacity(4 + tb.len() + bb.len());
-    let len = u32::try_from(tb.len()).expect("title under 4GB");
-    out.extend_from_slice(&len.to_be_bytes());
+    let mut out = Vec::with_capacity(1 + 4 + tb.len() + 2 + bb.len());
+    out.push(PAYLOAD_V1);
+    let title_len = u32::try_from(tb.len()).expect("title under 4GB");
+    out.extend_from_slice(&title_len.to_be_bytes());
     out.extend_from_slice(tb);
+    let tag_count = u16::try_from(tags.len()).expect("under 65536 tags");
+    out.extend_from_slice(&tag_count.to_be_bytes());
+    for tag in tags {
+        let gb = tag.as_bytes();
+        let tag_len = u16::try_from(gb.len()).expect("tag under 64KB");
+        out.extend_from_slice(&tag_len.to_be_bytes());
+        out.extend_from_slice(gb);
+    }
     out.extend_from_slice(bb);
     out
 }
 
-fn split_payload(bytes: &[u8]) -> Option<(String, String)> {
+fn split_payload(bytes: &[u8]) -> Option<(String, String, Vec<String>)> {
+    match bytes.first() {
+        Some(&PAYLOAD_V1) => split_payload_v1(&bytes[1..]),
+        // Legacy: no version byte, no tags. (A pre-tags vault.)
+        _ => split_payload_legacy(bytes).map(|(t, b)| (t, b, Vec::new())),
+    }
+}
+
+/// Parse the v1 body (the slice *after* the version byte).
+fn split_payload_v1(bytes: &[u8]) -> Option<(String, String, Vec<String>)> {
+    let mut pos = 0usize;
+    let title_len = read_u32(bytes, &mut pos)? as usize;
+    let title = read_str(bytes, &mut pos, title_len)?;
+
+    let tag_count = read_u16(bytes, &mut pos)? as usize;
+    let mut tags = Vec::with_capacity(tag_count);
+    for _ in 0..tag_count {
+        let tag_len = read_u16(bytes, &mut pos)? as usize;
+        tags.push(read_str(bytes, &mut pos, tag_len)?);
+    }
+
+    // Whatever remains is the body.
+    let body = String::from_utf8(bytes[pos..].to_vec()).ok()?;
+    Some((title, body, tags))
+}
+
+/// Parse the pre-tags layout: 4-byte BE title length, title, then body.
+fn split_payload_legacy(bytes: &[u8]) -> Option<(String, String)> {
     if bytes.len() < 4 {
         return None;
     }
@@ -338,6 +500,27 @@ fn split_payload(bytes: &[u8]) -> Option<(String, String)> {
     let title = String::from_utf8(bytes[4..4 + title_len].to_vec()).ok()?;
     let body = String::from_utf8(bytes[4 + title_len..].to_vec()).ok()?;
     Some((title, body))
+}
+
+fn read_u16(bytes: &[u8], pos: &mut usize) -> Option<u16> {
+    let end = pos.checked_add(2)?;
+    let v = u16::from_be_bytes(bytes.get(*pos..end)?.try_into().ok()?);
+    *pos = end;
+    Some(v)
+}
+
+fn read_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let end = pos.checked_add(4)?;
+    let v = u32::from_be_bytes(bytes.get(*pos..end)?.try_into().ok()?);
+    *pos = end;
+    Some(v)
+}
+
+fn read_str(bytes: &[u8], pos: &mut usize, len: usize) -> Option<String> {
+    let end = pos.checked_add(len)?;
+    let s = String::from_utf8(bytes.get(*pos..end)?.to_vec()).ok()?;
+    *pos = end;
+    Some(s)
 }
 
 const _ASSERT_KEY_SIZE: usize = KEY_SIZE;
@@ -390,5 +573,114 @@ mod tests {
         assert_eq!(state.next_id, 1);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn payload_round_trips_title_body_and_tags() {
+        let tags = vec!["work".to_string(), "日本語".to_string()];
+        let bytes = join_payload("My Title", "Body\nwith newline", &tags);
+        // v1 always carries the version marker so legacy parsing is skipped.
+        assert_eq!(bytes[0], PAYLOAD_V1);
+        let (title, body, got_tags) = split_payload(&bytes).expect("v1 payload parses");
+        assert_eq!(title, "My Title");
+        assert_eq!(body, "Body\nwith newline");
+        assert_eq!(got_tags, tags);
+    }
+
+    #[test]
+    fn payload_round_trips_with_no_tags() {
+        let bytes = join_payload("t", "b", &[]);
+        let (title, body, tags) = split_payload(&bytes).expect("parses");
+        assert_eq!((title.as_str(), body.as_str()), ("t", "b"));
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn legacy_payload_without_version_byte_still_reads() {
+        // Reproduce the pre-tags on-disk format by hand: 4-byte BE title
+        // length, title, body — no leading version byte.
+        let title = "Old Note";
+        let body = "decrypted from a pre-tags vault";
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&(title.len() as u32).to_be_bytes());
+        legacy.extend_from_slice(title.as_bytes());
+        legacy.extend_from_slice(body.as_bytes());
+        // High byte of a short title length is 0, never PAYLOAD_V1.
+        assert_eq!(legacy[0], 0);
+
+        let (got_title, got_body, tags) = split_payload(&legacy).expect("legacy parses");
+        assert_eq!(got_title, title);
+        assert_eq!(got_body, body);
+        assert!(tags.is_empty(), "legacy notes have no tags");
+    }
+
+    #[test]
+    fn normalize_tag_lowercases_and_trims() {
+        assert_eq!(normalize_tag("  Work "), "work");
+        assert_eq!(normalize_tag("RUST"), "rust");
+        assert_eq!(normalize_tag("   "), "");
+    }
+
+    fn unlocked_state_with_one_note() -> AppState {
+        let mut notes = Vec::new();
+        notes.push(Note {
+            id: 1,
+            title: "n".into(),
+            body: "b".into(),
+            tags: Vec::new(),
+        });
+        AppState {
+            salt: [0u8; SALT_SIZE],
+            next_id: 2,
+            phase: Phase::Unlocked {
+                dek: derive_key(b"x", &[0u8; SALT_SIZE]),
+                notes,
+                selected: Some(1),
+                storage: open_tmp_storage(),
+                dirty: HashSet::new(),
+            },
+        }
+    }
+
+    fn open_tmp_storage() -> VaultStorage {
+        let path = tmp_db_path();
+        let key = derive_key(b"x", &[0u8; SALT_SIZE]);
+        VaultStorage::open(&path, &key).expect("open tmp vault")
+    }
+
+    #[test]
+    fn add_tag_normalizes_dedupes_and_marks_dirty() {
+        let mut s = unlocked_state_with_one_note();
+        assert!(s.add_tag_to_selected("  Work "));
+        // Duplicate after normalization is rejected.
+        assert!(!s.add_tag_to_selected("WORK"));
+        // Empty input is rejected.
+        assert!(!s.add_tag_to_selected("   "));
+        assert!(s.add_tag_to_selected("rust"));
+
+        assert_eq!(
+            s.selected_tags(),
+            vec!["work".to_string(), "rust".to_string()]
+        );
+        if let Phase::Unlocked { dirty, .. } = &s.phase {
+            assert!(dirty.contains(&1), "an inserted tag marks the note dirty");
+        } else {
+            panic!("expected Unlocked");
+        }
+    }
+
+    #[test]
+    fn remove_tag_and_all_tags_union() {
+        let mut s = unlocked_state_with_one_note();
+        s.add_tag_to_selected("work");
+        s.add_tag_to_selected("rust");
+        assert!(s.remove_tag_from_selected("work"));
+        assert!(
+            !s.remove_tag_from_selected("work"),
+            "second remove is a no-op"
+        );
+        assert_eq!(s.selected_tags(), vec!["rust".to_string()]);
+        // all_tags is the sorted union across notes (one note here).
+        assert_eq!(s.all_tags(), vec!["rust".to_string()]);
     }
 }

@@ -17,6 +17,7 @@ use crate::lock_screen;
 use crate::preview;
 use crate::settings;
 use crate::state::{AppState, Phase};
+use crate::tag_editor::{self, TagRefresh};
 
 /// True when the app is unlocked *and* a note is selected — the condition for
 /// showing any editing surface at all (inputs or preview). Shared by the
@@ -39,6 +40,7 @@ pub fn build(
     title_sig: Signal<String>,
     body_sig: Signal<String>,
     preview_sig: Signal<bool>,
+    tag_refresh: TagRefresh,
 ) {
     let pane = tree.add_child(
         parent,
@@ -184,6 +186,12 @@ pub fn build(
                 });
             }),
     );
+
+    // Tag editor (chips + input + inline autocomplete), between the title and
+    // the body so it stays visible without scrolling. It reads/writes the
+    // selected note's tags directly; `tag_refresh` lets the sidebar rebuild
+    // the chips when the active note changes.
+    tag_editor::build(tree, editor_area, Rc::clone(&state), &tag_refresh);
 
     // Body input (multiline, grows to fill remaining height).
     //
