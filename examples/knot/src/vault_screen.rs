@@ -18,6 +18,7 @@ use shroud::widgets::tree::WidgetTree;
 
 use crate::editor;
 use crate::sidebar;
+use crate::sidebar::SidebarRefresh;
 use crate::state::{AppState, Phase};
 use crate::tag_editor::TagRefresh;
 
@@ -51,6 +52,11 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     // select / create / delete.
     let tag_refresh = TagRefresh::new();
 
+    // The reverse bridge: the editor fires this after a tag is added or
+    // removed so the sidebar's tag-filter chips track the vault's tag set.
+    // The sidebar installs the rebuild closure.
+    let sidebar_refresh = SidebarRefresh::new();
+
     sidebar::build(
         tree,
         root,
@@ -59,6 +65,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         body_sig,
         preview_sig,
         tag_refresh.clone(),
+        sidebar_refresh.clone(),
     );
 
     editor::build(
@@ -69,5 +76,6 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         body_sig,
         preview_sig,
         tag_refresh,
+        sidebar_refresh,
     );
 }

@@ -16,6 +16,7 @@ use shroud::widgets::{Button, Container, Input, ScrollView, TextWidget};
 use crate::lock_screen;
 use crate::preview;
 use crate::settings;
+use crate::sidebar::SidebarRefresh;
 use crate::state::{AppState, Phase};
 use crate::tag_editor::{self, TagRefresh};
 
@@ -33,6 +34,11 @@ fn note_selected(state: &Rc<RefCell<AppState>>) -> bool {
     )
 }
 
+// Wide by nature: the editor pane threads the two shared note signals, the
+// edit/preview toggle, and both refresh bridges alongside the usual
+// tree/parent/state. They have no smaller natural grouping at this single call
+// site (from `vault_screen`), so a bundling struct would be churn for no gain.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     tree: &mut WidgetTree,
     parent: usize,
@@ -41,6 +47,7 @@ pub fn build(
     body_sig: Signal<String>,
     preview_sig: Signal<bool>,
     tag_refresh: TagRefresh,
+    sidebar_refresh: SidebarRefresh,
 ) {
     let pane = tree.add_child(
         parent,
@@ -190,8 +197,16 @@ pub fn build(
     // Tag editor (chips + input + inline autocomplete), between the title and
     // the body so it stays visible without scrolling. It reads/writes the
     // selected note's tags directly; `tag_refresh` lets the sidebar rebuild
-    // the chips when the active note changes.
-    tag_editor::build(tree, editor_area, Rc::clone(&state), &tag_refresh);
+    // the chips when the active note changes, and `sidebar_refresh` lets the
+    // tag editor rebuild the sidebar's filter chips when a tag is added or
+    // removed here.
+    tag_editor::build(
+        tree,
+        editor_area,
+        Rc::clone(&state),
+        &tag_refresh,
+        sidebar_refresh,
+    );
 
     // Body input (multiline, grows to fill remaining height).
     //

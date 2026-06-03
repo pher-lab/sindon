@@ -38,6 +38,15 @@ pub struct Note {
     pub tags: Vec<String>,
 }
 
+// The `Unlocked` variant is much larger than the others — it carries the
+// live SQLCipher connection, the DEK, the resident notes and the dirty/filter
+// sets, i.e. the whole decrypted session — while `Setup` / `Locked` /
+// `Recovery` hold only an `Option<String>`. That size gap trips
+// `large_enum_variant`, but there is exactly one `Phase` value alive at a time
+// (it's the app's state machine, never stored in a collection), so the lint's
+// memory-waste rationale doesn't apply; boxing the live connection would only
+// add an allocation + deref on the hot auto-save path for no real gain.
+#[allow(clippy::large_enum_variant)]
 pub enum Phase {
     /// First launch — no vault on disk yet. The setup screen collects a
     /// master password (and a confirmation) before any salt or DB
@@ -68,6 +77,11 @@ pub enum Phase {
         /// alone so the next tick retries instead of silently losing
         /// the edit.
         dirty: HashSet<NoteId>,
+        /// Tags the sidebar is currently filtering the note list by
+        /// (intersection — a note shows only if it carries *every* tag here;
+        /// empty = show all). Pure session UI state that lives and dies with
+        /// the unlocked vault, exactly like `selected`; it is never persisted.
+        filter_tags: Vec<String>,
     },
 }
 
@@ -117,6 +131,7 @@ impl AppState {
             selected,
             storage,
             dirty: HashSet::new(),
+            filter_tags: Vec::new(),
         };
     }
 
@@ -258,6 +273,97 @@ impl AppState {
             self.mark_selected_dirty();
         }
         removed
+    }
+
+    // ── Sidebar tag filter ─────────────────────────────────────────────
+    //
+    // Session-only UI state: which tags the note list is narrowed by. Lives
+    // in `Unlocked` next to `selected`, so it drops on lock and is never
+    // persisted. Semantics are intersection (AND) — see `note_matches_filter`.
+
+    /// Whether any tag filter is active (the note list is being narrowed).
+    pub fn is_filtering(&self) -> bool {
+        matches!(&self.phase, Phase::Unlocked { filter_tags, .. } if !filter_tags.is_empty())
+    }
+
+    /// Whether `tag` (already in normalized form) is one of the active filter
+    /// tags. Drives a filter chip's highlighted/selected styling.
+    pub fn is_filter_active(&self, tag: &str) -> bool {
+        matches!(&self.phase, Phase::Unlocked { filter_tags, .. } if filter_tags.iter().any(|t| t == tag))
+    }
+
+    /// Whether any note carries at least one tag — i.e. whether there is
+    /// anything to filter by at all. Lets the sidebar hide the filter row
+    /// entirely on a vault with no tags yet.
+    pub fn has_any_tags(&self) -> bool {
+        matches!(&self.phase, Phase::Unlocked { notes, .. } if notes.iter().any(|n| !n.tags.is_empty()))
+    }
+
+    /// Toggle a tag in the sidebar filter, normalizing it first so it
+    /// compares against the (already normalized) stored note tags. Returns
+    /// the new state (true = now filtering on it). No-op on an empty input or
+    /// when locked.
+    pub fn toggle_filter_tag(&mut self, raw: &str) -> bool {
+        let tag = normalize_tag(raw);
+        if tag.is_empty() {
+            return false;
+        }
+        if let Phase::Unlocked { filter_tags, .. } = &mut self.phase {
+            if let Some(pos) = filter_tags.iter().position(|t| t == &tag) {
+                filter_tags.remove(pos);
+                false
+            } else {
+                filter_tags.push(tag);
+                true
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Clear the sidebar filter, so every note shows again.
+    pub fn clear_filter(&mut self) {
+        if let Phase::Unlocked { filter_tags, .. } = &mut self.phase {
+            filter_tags.clear();
+        }
+    }
+
+    /// Drop filter tags that no longer exist anywhere in the vault — e.g. the
+    /// last note carrying one was deleted, or had the tag removed in the
+    /// editor. Without this the list could stay filtered on a tag with no chip
+    /// left to toggle it off, stranding the user on an empty list.
+    pub fn prune_filter(&mut self) {
+        let existing = self.all_tags();
+        if let Phase::Unlocked { filter_tags, .. } = &mut self.phase {
+            filter_tags.retain(|t| existing.contains(t));
+        }
+    }
+
+    /// Note ids to show in the sidebar given the active filter, in stored
+    /// order. With no filter this is every note; otherwise only notes that
+    /// carry *all* the active filter tags (see `note_matches_filter`). Empty
+    /// when locked.
+    pub fn filtered_note_ids(&self) -> Vec<NoteId> {
+        let Phase::Unlocked {
+            notes, filter_tags, ..
+        } = &self.phase
+        else {
+            return Vec::new();
+        };
+        notes
+            .iter()
+            .filter(|n| note_matches_filter(&n.tags, filter_tags))
+            .map(|n| n.id)
+            .collect()
+    }
+
+    /// Total resident note count, ignoring the filter. Lets the sidebar tell
+    /// "no notes yet" apart from "the filter hid them all". Zero when locked.
+    pub fn note_count(&self) -> usize {
+        match &self.phase {
+            Phase::Unlocked { notes, .. } => notes.len(),
+            _ => 0,
+        }
     }
 
     /// Persist every dirty note via `storage.save_note`. Clears the
@@ -420,6 +526,16 @@ pub fn decrypt_all(dek: &MasterKey, vault: &[EncryptedNote]) -> Option<Vec<Note>
 /// which callers treat as "no tag."
 pub fn normalize_tag(raw: &str) -> String {
     raw.trim().to_lowercase()
+}
+
+/// True when `tags` satisfies the active `filter`. An empty filter matches
+/// everything; otherwise every filter tag must be present (intersection /
+/// AND — each tag added to the filter narrows the result further). Both sides
+/// are already normalized (note tags by [`AppState::add_tag_to_selected`],
+/// filter tags by [`AppState::toggle_filter_tag`]), so this is a plain
+/// membership test. Flip the `all` to `any` here for OR/union semantics.
+pub fn note_matches_filter(tags: &[String], filter: &[String]) -> bool {
+    filter.iter().all(|f| tags.iter().any(|t| t == f))
 }
 
 /// First byte of a v1 payload. The legacy format begins with the
@@ -622,13 +738,12 @@ mod tests {
     }
 
     fn unlocked_state_with_one_note() -> AppState {
-        let mut notes = Vec::new();
-        notes.push(Note {
+        let notes = vec![Note {
             id: 1,
             title: "n".into(),
             body: "b".into(),
             tags: Vec::new(),
-        });
+        }];
         AppState {
             salt: [0u8; SALT_SIZE],
             next_id: 2,
@@ -638,6 +753,36 @@ mod tests {
                 selected: Some(1),
                 storage: open_tmp_storage(),
                 dirty: HashSet::new(),
+                filter_tags: Vec::new(),
+            },
+        }
+    }
+
+    fn unlocked_state_with_two_tagged_notes() -> AppState {
+        let notes = vec![
+            Note {
+                id: 1,
+                title: "a".into(),
+                body: String::new(),
+                tags: vec!["work".into()],
+            },
+            Note {
+                id: 2,
+                title: "b".into(),
+                body: String::new(),
+                tags: vec!["personal".into()],
+            },
+        ];
+        AppState {
+            salt: [0u8; SALT_SIZE],
+            next_id: 3,
+            phase: Phase::Unlocked {
+                dek: derive_key(b"x", &[0u8; SALT_SIZE]),
+                notes,
+                selected: Some(1),
+                storage: open_tmp_storage(),
+                dirty: HashSet::new(),
+                filter_tags: Vec::new(),
             },
         }
     }
@@ -682,5 +827,76 @@ mod tests {
         assert_eq!(s.selected_tags(), vec!["rust".to_string()]);
         // all_tags is the sorted union across notes (one note here).
         assert_eq!(s.all_tags(), vec!["rust".to_string()]);
+    }
+
+    #[test]
+    fn note_matches_filter_is_intersection() {
+        let tags = vec!["work".to_string(), "rust".to_string()];
+        // Empty filter matches anything.
+        assert!(note_matches_filter(&tags, &[]));
+        // A single present tag matches.
+        assert!(note_matches_filter(&tags, &["work".to_string()]));
+        // Every filter tag must be present (AND).
+        assert!(note_matches_filter(
+            &tags,
+            &["work".to_string(), "rust".to_string()]
+        ));
+        // A missing tag fails the match even when others are present.
+        assert!(!note_matches_filter(
+            &tags,
+            &["work".to_string(), "play".to_string()]
+        ));
+        assert!(!note_matches_filter(&tags, &["play".to_string()]));
+    }
+
+    #[test]
+    fn toggle_filter_normalizes_and_round_trips() {
+        let mut s = unlocked_state_with_one_note();
+        assert!(!s.is_filtering());
+        // Adds (normalized), and reports active.
+        assert!(s.toggle_filter_tag("  Work "));
+        assert!(s.is_filtering());
+        assert!(s.is_filter_active("work"));
+        // Toggling the same tag (any case) removes it.
+        assert!(!s.toggle_filter_tag("WORK"));
+        assert!(!s.is_filtering());
+        // Empty input is a no-op.
+        assert!(!s.toggle_filter_tag("   "));
+    }
+
+    #[test]
+    fn filtered_ids_narrow_to_matching_notes() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        // No filter → both notes, in stored order.
+        assert_eq!(s.filtered_note_ids(), vec![1, 2]);
+        assert!(s.has_any_tags());
+        // Filter on "work" → only note 1.
+        s.toggle_filter_tag("work");
+        assert_eq!(s.filtered_note_ids(), vec![1]);
+        // Add "personal" (note 1 lacks it) → the intersection empties.
+        s.toggle_filter_tag("personal");
+        assert!(s.filtered_note_ids().is_empty());
+        // note_count ignores the filter.
+        assert_eq!(s.note_count(), 2);
+    }
+
+    #[test]
+    fn clear_and_prune_filter() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        s.toggle_filter_tag("work");
+        s.toggle_filter_tag("personal");
+        s.clear_filter();
+        assert!(!s.is_filtering());
+
+        // Filter on a tag, then remove it from the only note carrying it:
+        // prune drops the now-orphaned filter tag so the list isn't stuck
+        // filtering on a tag with no chip left to toggle it off. (Note 1 is
+        // selected in the helper and holds "work".)
+        s.toggle_filter_tag("work");
+        assert!(s.is_filter_active("work"));
+        assert!(s.remove_tag_from_selected("work"));
+        s.prune_filter();
+        assert!(!s.is_filter_active("work"));
+        assert!(!s.is_filtering());
     }
 }

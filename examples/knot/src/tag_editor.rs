@@ -27,6 +27,7 @@ use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, EventContext, Input, TextWidget};
 
 use crate::settings;
+use crate::sidebar::SidebarRefresh;
 use crate::state::{AppState, normalize_tag};
 
 /// Cap on how many autocomplete rows show at once — keeps the inline list
@@ -87,6 +88,10 @@ struct Wiring {
     input: Signal<String>,
     chips: Rc<Cell<usize>>,
     suggestions: Rc<Cell<usize>>,
+    /// Editor → sidebar bridge, fired after a tag is added or removed so the
+    /// sidebar's filter chips track the vault's (possibly grown / shrunk) tag
+    /// set. The sidebar installs the rebuild; here we only fire it.
+    sidebar_refresh: SidebarRefresh,
 }
 
 /// Build the tag editor under `parent` and install the cross-module refresh
@@ -97,12 +102,14 @@ pub fn build(
     parent: usize,
     state: Rc<RefCell<AppState>>,
     refresh: &TagRefresh,
+    sidebar_refresh: SidebarRefresh,
 ) {
     let w = Wiring {
         state,
         input: Signal::new(String::new()),
         chips: Rc::new(Cell::new(0)),
         suggestions: Rc::new(Cell::new(0)),
+        sidebar_refresh,
     };
 
     let section = tree.add_child(parent, Container::column().width_full().gap(6.0));
@@ -204,6 +211,9 @@ fn populate_chips(tree: &mut WidgetTree, parent: usize, w: &Wiring) {
                     rebuild_chips(&w, ctx);
                     // Removing a tag can free it up to reappear as a suggestion.
                     rebuild_suggestions(&w, ctx);
+                    // It may also have been the vault's last use of that tag —
+                    // refresh the sidebar filter chips (which prunes it).
+                    w.sidebar_refresh.fire(ctx);
                 }),
         );
     }
@@ -263,6 +273,9 @@ fn commit_tag(w: &Wiring, raw: &str, ctx: &mut EventContext) {
     w.input.set(String::new());
     if added {
         rebuild_chips(w, ctx);
+        // A genuinely new tag may have grown the vault's tag set — refresh the
+        // sidebar filter chips so it shows up there too.
+        w.sidebar_refresh.fire(ctx);
     }
     rebuild_suggestions(w, ctx);
 }
@@ -302,6 +315,9 @@ fn on_input_change(w: &Wiring, val: &str, ctx: &mut EventContext) {
         w.input.set(remainder);
         if added_any {
             rebuild_chips(w, ctx);
+            // New tags may have grown the vault's tag set — refresh the
+            // sidebar filter chips.
+            w.sidebar_refresh.fire(ctx);
         }
         rebuild_suggestions(w, ctx);
     } else {
