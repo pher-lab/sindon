@@ -7,6 +7,7 @@
 //! in `AppState`.
 
 use std::cell::{Cell, RefCell};
+use std::path::Path;
 use std::rc::Rc;
 
 use shroud::platform::FileDialog;
@@ -68,6 +69,21 @@ pub fn build(
             .background(settings::background()),
     );
 
+    // Accept image files dragged from the OS file manager onto the window.
+    // winit carries no drop coordinates (see `WidgetTree::on_file_drop`), so
+    // this is a window-level hook rather than a drop-zone: a dropped image is
+    // inserted into the *currently selected* note exactly as the "Image"
+    // button does. Non-image files, and drops while no note is selected, are
+    // ignored. Registered per vault screen so it's cleared automatically when
+    // the vault locks — a drop on the lock screen does nothing.
+    let drop_state = Rc::clone(&state);
+    tree.on_file_drop(move |path, _ctx| {
+        if !note_selected(&drop_state) || !is_image_path(path) {
+            return;
+        }
+        insert_image_from_path(&drop_state, body_sig, path);
+    });
+
     // Header: status text on the left, then a spacer, then the Preview/Edit
     // toggle and the Lock button on the right. Status reads selection from
     // state so it nudges the user when nothing is selected ("No note selected
@@ -126,34 +142,7 @@ pub fn build(
                 else {
                     return;
                 };
-                let bytes = match std::fs::read(&path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        eprintln!("knot: could not read image file: {e}");
-                        return;
-                    }
-                };
-                // Reject anything that doesn't decode *before* storing it, so a
-                // bad file never becomes a dead `knot-img:` reference.
-                if Image::from_bytes(&bytes).is_err() {
-                    eprintln!("knot: unsupported image (only PNG/JPEG)");
-                    return;
-                }
-                let Some(id) = img_btn_state.borrow_mut().add_attachment(&bytes) else {
-                    eprintln!("knot: could not store attachment");
-                    return;
-                };
-                // Append the reference on its own line, keeping the bound
-                // signal and the note body in lockstep. The body input rebases
-                // from the signal on the next paint (the button click moved
-                // focus off the input), so the new line shows immediately.
-                let mut body = body_sig.get_clone();
-                if !body.is_empty() && !body.ends_with('\n') {
-                    body.push('\n');
-                }
-                body.push_str(&format!("![image]({}{})\n", crate::state::IMG_SCHEME, id));
-                body_sig.set(body.clone());
-                write_selected(&img_btn_state, move |note| note.body = body);
+                insert_image_from_path(&img_btn_state, body_sig, &path);
             }),
     );
 
@@ -306,6 +295,58 @@ pub fn build(
     preview_content_cell.set(preview_content);
 }
 
+/// True when `path` looks like a supported image by extension (PNG / JPEG,
+/// case-insensitive). A cheap pre-filter for the drop handler so a dropped
+/// `.txt` or `.zip` is ignored without reading it — the authoritative check
+/// is still the decode in [`insert_image_from_path`].
+fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            e.eq_ignore_ascii_case("png")
+                || e.eq_ignore_ascii_case("jpg")
+                || e.eq_ignore_ascii_case("jpeg")
+        })
+        .unwrap_or(false)
+}
+
+/// Read an image file, store it as an encrypted attachment, and append a
+/// `![image](knot-img:<id>)` reference to the body. The shared core of both
+/// the "Image" button (file dialog) and the drag-and-drop handler. No-op
+/// (with a stderr note) when the file can't be read, doesn't decode as a
+/// supported image, or can't be stored. The caller is responsible for only
+/// invoking this while a note is selected (`write_selected` no-ops otherwise).
+fn insert_image_from_path(state: &Rc<RefCell<AppState>>, body_sig: Signal<String>, path: &Path) {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("knot: could not read image file: {e}");
+            return;
+        }
+    };
+    // Reject anything that doesn't decode *before* storing it, so a bad file
+    // never becomes a dead `knot-img:` reference.
+    if Image::from_bytes(&bytes).is_err() {
+        eprintln!("knot: unsupported image (only PNG/JPEG)");
+        return;
+    }
+    let Some(id) = state.borrow_mut().add_attachment(&bytes) else {
+        eprintln!("knot: could not store attachment");
+        return;
+    };
+    // Append the reference on its own line, keeping the bound signal and the
+    // note body in lockstep. The body input is a text source, which always
+    // rebases from the signal on the next paint, so the new line shows
+    // immediately even when the body still holds focus (e.g. after a drop).
+    let mut body = body_sig.get_clone();
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&format!("![image]({}{})\n", crate::state::IMG_SCHEME, id));
+    body_sig.set(body.clone());
+    write_selected(state, move |note| note.body = body);
+}
+
 /// Apply `f` to the currently selected note's mutable state and mark
 /// it dirty so the auto-save tick (`AppState::flush_dirty`) writes the
 /// change back to SQLCipher within a tick interval. No-op when no
@@ -329,4 +370,28 @@ where
     // borrow. (RefCell will panic on overlapping borrows.)
     drop(s);
     state.borrow_mut().mark_selected_dirty();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_image_path_accepts_supported_extensions_case_insensitively() {
+        assert!(is_image_path(Path::new("a.png")));
+        assert!(is_image_path(Path::new("a.jpg")));
+        assert!(is_image_path(Path::new("a.jpeg")));
+        // Drag-and-drop hands over whatever case the file has on disk.
+        assert!(is_image_path(Path::new("PHOTO.JPG")));
+        assert!(is_image_path(Path::new("/some/dir/Shot.PNG")));
+    }
+
+    #[test]
+    fn is_image_path_rejects_non_images_and_extensionless() {
+        // The drop handler ignores these silently (no read, no insert).
+        assert!(!is_image_path(Path::new("notes.txt")));
+        assert!(!is_image_path(Path::new("archive.zip")));
+        assert!(!is_image_path(Path::new("image.gif"))); // not a supported decode
+        assert!(!is_image_path(Path::new("README")));
+    }
 }
