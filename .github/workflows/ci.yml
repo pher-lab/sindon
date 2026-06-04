@@ -13,25 +13,26 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# The Rust toolchain version (and its clippy/rustfmt components) is the single
+# source of truth in rust-toolchain.toml. `rustup show` reads that file and
+# installs the pinned toolchain eagerly, so there is no separate setup action to
+# keep in sync and no double toolchain install.
+
 jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - uses: actions/checkout@v5
+      - run: rustup show
       - run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - uses: actions/checkout@v5
+      - run: rustup show
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -47,8 +48,8 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      - run: rustup show
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -64,8 +65,8 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      - run: rustup show
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -83,8 +84,8 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      - run: rustup show
       - name: Install system deps
         run: |
           sudo apt-get update
