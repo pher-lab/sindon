@@ -56,7 +56,18 @@ impl ScrollView {
             scroll_y: 0.0,
             explicit_content_height: None,
             auto_content_height: 0.0,
-            style: FlexStyle::new().column(),
+            // A scroll container must declare `overflow: hidden` so flex
+            // layout lets it shrink below its content. By default a flex item's
+            // automatic minimum size is its content size, so a `grow(1.0)`
+            // viewport nested under grow containers (no explicit height) would
+            // balloon to its overflowing content instead of clamping to the
+            // allocated space — leaving nothing to scroll. `overflow: hidden`
+            // sets that automatic minimum to 0 *and* stops the overflow from
+            // contributing to ancestors' scroll regions, so the intermediate
+            // `grow` containers don't balloon either. Visual clipping is done
+            // in paint; this only affects layout, and `Hidden` reserves no
+            // scrollbar gutter (we draw our own).
+            style: FlexStyle::new().column().overflow_hidden(),
             show_scrollbar: true,
             base_padding: 0.0,
             background: None,

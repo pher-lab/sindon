@@ -170,6 +170,20 @@ impl Container {
         self
     }
 
+    /// Mark the container a scroll-clipping box (`overflow: hidden`), letting a
+    /// flex parent size it below its content. See [`FlexStyle::overflow_hidden`].
+    ///
+    /// Use this on an intermediate `grow(1.0)` container that wraps a
+    /// `ScrollView`: without it, the wrapper's automatic minimum size equals its
+    /// (overflowing) content, so it balloons to the content height instead of
+    /// clamping to the space the parent allocated — and the inner viewport never
+    /// becomes scrollable. The `ScrollView` itself already sets this; the
+    /// wrapper between it and the height-defining ancestor needs it too.
+    pub fn overflow_hidden(mut self) -> Self {
+        self.style = self.style.overflow_hidden();
+        self
+    }
+
     /// Center children on both axes. See [`FlexStyle::center`] — note that
     /// this collapses children to min-content on the cross axis. For
     /// vertical-only centering in a column without collapsing child width,

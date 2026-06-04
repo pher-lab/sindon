@@ -1,6 +1,7 @@
 //! Convenience builder for Taffy `Style`.
 
 use taffy::prelude::*;
+use taffy::style::Overflow;
 
 /// Builder for common flexbox layout styles.
 ///
@@ -243,6 +244,30 @@ impl FlexStyle {
             FlexWrap::Wrap
         } else {
             FlexWrap::NoWrap
+        };
+        self
+    }
+
+    /// Mark this node a scroll container (`overflow: hidden` on both axes).
+    ///
+    /// Two effects matter for a viewport that fills flex space:
+    /// - Its **automatic minimum size becomes 0**, so a flex parent can size
+    ///   it smaller than its content (the default `overflow: visible` forces
+    ///   a flex item to be at least as tall as its content, which makes a
+    ///   `grow(1.0)` viewport balloon to its overflowing content instead of
+    ///   clamping to the allocated space — leaving nothing to scroll).
+    /// - Its overflowing content **does not contribute to the parent's scroll
+    ///   region**, so intermediate `grow` containers between this node and the
+    ///   sized ancestor don't balloon either.
+    ///
+    /// Visual clipping is handled separately by the widget's paint (this only
+    /// affects layout). `Hidden` reserves no scrollbar gutter — unlike
+    /// `Overflow::Scroll` — so widgets that draw their own scrollbar keep full
+    /// control of the gutter.
+    pub fn overflow_hidden(mut self) -> Self {
+        self.style.overflow = taffy::Point {
+            x: Overflow::Hidden,
+            y: Overflow::Hidden,
         };
         self
     }

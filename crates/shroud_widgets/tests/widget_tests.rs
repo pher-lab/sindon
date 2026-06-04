@@ -1661,6 +1661,237 @@ fn scroll_view_auto_content_height_skips_invisible_children() {
     assert_eq!(sv.max_scroll_y(300.0), 100.0);
 }
 
+#[test]
+fn scroll_view_grow_in_fixed_height_parent_clamps_to_viewport() {
+    // The sidebar pattern: a `grow(1.0)` ScrollView is a *direct* child of a
+    // fixed-height column, with tall content. Before the ScrollView declared
+    // `overflow: hidden`, its automatic minimum was its content height, so a
+    // `grow` item ballooned to the content (overflowing the parent) and there
+    // was nothing to scroll. It must instead clamp to the leftover space and
+    // scroll its content. No wrapper fix is needed here because the parent's
+    // height is definite (unlike the preview, whose grow wrapper also needs
+    // `overflow_hidden`).
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(240.0).height(400.0));
+    // A fixed header eats some of the column, the scroll view takes the rest.
+    tree.add_child(root, Container::row().width_full().height(40.0));
+    let scroll = tree.add_child(root, ScrollView::new().width_full().grow(1.0));
+    let list = tree.add_child(scroll, Container::column().width_full());
+    // Populate a list taller than the viewport (20 * 50 = 1000px).
+    for _ in 0..20 {
+        tree.add_child(list, Container::row().width_full().height(50.0));
+    }
+    let mut engine = shroud_text::TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(240.0, 400.0, &mut engine, &theme);
+
+    // Viewport clamps to the column's leftover (~360), not the 1000px list.
+    let viewport_h = tree.layout_rect(scroll).size.height;
+    assert!(
+        viewport_h < 400.0,
+        "scroll viewport should clamp below the parent height, got {viewport_h}"
+    );
+    let sv = tree
+        .widget_as::<ScrollView>(scroll)
+        .expect("ScrollView node");
+    assert!(
+        sv.max_scroll_y(viewport_h) > 0.0,
+        "tall list must be scrollable (viewport {viewport_h}, max_scroll {})",
+        sv.max_scroll_y(viewport_h)
+    );
+}
+
+// Build a `w x h` solid-red PNG for image layout tests.
+fn solid_png(w: u32, h: u32) -> Vec<u8> {
+    let mut img = image::RgbaImage::new(w, h);
+    for px in img.pixels_mut() {
+        *px = image::Rgba([255, 0, 0, 255]);
+    }
+    let mut out = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+#[test]
+fn scroll_view_auto_content_height_includes_nested_tall_image() {
+    // Mirrors knot's markdown preview: ScrollView → Container::column →
+    // [tall Image (width-only, aspect-derived height), text]. The image is a
+    // *grandchild* of the ScrollView, so it does not get the `shrink(0)`
+    // override the tree applies to direct children — it must keep its full
+    // aspect-derived height anyway so the auto content_height (and thus the
+    // scrollable extent) reaches past the image to the content below it.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(ScrollView::new().width(200.0).height(300.0));
+    let column = tree.add_child(root, Container::column().width_full().gap(12.0));
+    // 10x40 decoded, pinned to width 480 (wider than the 200px viewport) →
+    // aspect-derived height 1920. Mirrors knot capping a large image to
+    // MAX_PREVIEW_IMAGE_WIDTH while the preview pane is narrower than the cap.
+    let png = solid_png(10, 40);
+    let image_idx = tree.add_child(column, Image::from_bytes(&png).unwrap().width(480.0));
+    let text_idx = tree.add_child(column, TextWidget::new("below the image"));
+    let mut engine = shroud_text::TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(400.0, 400.0, &mut engine, &theme);
+
+    // The image must keep its tall aspect-derived height, not be squashed to
+    // fit the 300px viewport.
+    let img_rect = tree.layout_rect(image_idx);
+    assert!(
+        (img_rect.size.height - 1920.0).abs() < 1.0,
+        "image should keep aspect-derived height 1920, got {}",
+        img_rect.size.height
+    );
+
+    // The text block must sit below the full image height, not on top of it.
+    let text_rect = tree.layout_rect(text_idx);
+    assert!(
+        text_rect.origin.y >= img_rect.origin.y + img_rect.size.height,
+        "text (y={}) should start below the image bottom (y={})",
+        text_rect.origin.y,
+        img_rect.origin.y + img_rect.size.height
+    );
+
+    // Auto content_height must reach past the image so you can scroll down to
+    // the text. Viewport is 300; content is at least the image's 720.
+    let sv = tree.widget_as::<ScrollView>(root).expect("ScrollView root");
+    assert!(
+        sv.max_scroll_y(300.0) >= 1620.0,
+        "should be able to scroll past the tall image, max_scroll_y={}",
+        sv.max_scroll_y(300.0)
+    );
+
+    // A wheel event with the cursor over the (overflowing) image must reach the
+    // ScrollView and move the offset — the image does not swallow the scroll.
+    let mut ectx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::Scroll {
+            position: Point::new(50.0, 150.0),
+            delta_x: 0.0,
+            delta_y: -120.0,
+        },
+        &mut ectx,
+    );
+    let sv = tree.widget_as::<ScrollView>(root).expect("ScrollView root");
+    assert_eq!(
+        sv.scroll_y(),
+        120.0,
+        "wheel over the tall image should scroll the viewport"
+    );
+}
+
+#[test]
+fn knot_preview_full_pane_scrolls_past_tall_image() {
+    // Faithful reproduction of knot's editor pane: a root row holding a
+    // fixed-width sidebar and a `flex: 1 1 0` pane; the pane stacks a header
+    // and two grow(1) siblings (editor hidden via display:none, preview
+    // visible); the preview's grow(1) ScrollView holds a width_full content
+    // column whose grandchildren are a tall capped image + trailing text.
+    //
+    // The point is the full grow/flex-basis/height_full chain above the
+    // ScrollView, which my simpler repro doesn't exercise: the ScrollView gets
+    // a *definite* viewport height from grow, but its content column must still
+    // be content-sized (unshrunk) so the auto content_height reaches past the
+    // image.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::row().width_full().height_full());
+    // Fixed sidebar.
+    tree.add_child(root, Container::column().width(240.0).height_full());
+    // Pane: flex 1 1 0, fills height, padded.
+    let pane = tree.add_child(
+        root,
+        Container::column()
+            .flex_basis(0.0)
+            .grow(1.0)
+            .height_full()
+            .padding(24.0)
+            .gap(12.0),
+    );
+    // Header (fixed-ish height via a child).
+    let header = tree.add_child(pane, Container::row().gap(12.0));
+    tree.add_child(header, TextWidget::new("Editing: note"));
+    // Editor area sibling — hidden while previewing (display:none).
+    tree.add_child(
+        pane,
+        Container::column()
+            .width_full()
+            .grow(1.0)
+            .visible(Signal::new(false)),
+    );
+    // Preview area — visible.
+    let preview_area = tree.add_child(
+        pane,
+        Container::column()
+            .width_full()
+            .grow(1.0)
+            .overflow_hidden()
+            .visible(Signal::new(true)),
+    );
+    let preview_scroll = tree.add_child(preview_area, ScrollView::new().width_full().grow(1.0));
+    let preview_content =
+        tree.add_child(preview_scroll, Container::column().width_full().gap(12.0));
+    // Image wider than the pane (480 cap) over a narrow root → overflows
+    // horizontally; 10x40 decoded → aspect-derived height 1920.
+    let png = solid_png(10, 40);
+    let image_idx = tree.add_child(
+        preview_content,
+        Image::from_bytes(&png).unwrap().width(480.0),
+    );
+    let text_idx = tree.add_child(preview_content, TextWidget::new("below the image"));
+
+    let mut engine = shroud_text::TextEngine::new();
+    let theme = Theme::default();
+    // Root viewport: 700 wide (pane ~ 700-240-48 = 412 < 480 image), 600 tall.
+    tree.compute_layout_with_measure(700.0, 600.0, &mut engine, &theme);
+
+    // Image keeps full aspect-derived height despite the grow-chain above it.
+    let img_rect = tree.layout_rect(image_idx);
+    assert!(
+        (img_rect.size.height - 1920.0).abs() < 1.0,
+        "image should keep aspect-derived height 1920, got {}",
+        img_rect.size.height
+    );
+    // Trailing text sits below the image.
+    let text_rect = tree.layout_rect(text_idx);
+    assert!(
+        text_rect.origin.y >= img_rect.origin.y + img_rect.size.height,
+        "text (y={}) should start below the image bottom (y={})",
+        text_rect.origin.y,
+        img_rect.origin.y + img_rect.size.height
+    );
+    // The preview scroll's content extent must reach past the image. Viewport
+    // is well under the image's 1920 height.
+    let sv = tree
+        .widget_as::<ScrollView>(preview_scroll)
+        .expect("preview ScrollView");
+    let viewport_h = tree.layout_rect(preview_scroll).size.height;
+    assert!(
+        sv.max_scroll_y(viewport_h) > 0.0,
+        "preview must be scrollable past the tall image (viewport {viewport_h}, \
+         max_scroll {})",
+        sv.max_scroll_y(viewport_h)
+    );
+
+    // A wheel event over the image scrolls the preview.
+    let mut ectx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::Scroll {
+            position: Point::new(200.0, 200.0),
+            delta_x: 0.0,
+            delta_y: -90.0,
+        },
+        &mut ectx,
+    );
+    let sv = tree
+        .widget_as::<ScrollView>(preview_scroll)
+        .expect("preview ScrollView");
+    assert_eq!(
+        sv.scroll_y(),
+        90.0,
+        "wheel over the preview image should scroll"
+    );
+}
+
 // ── Reactive TextWidget ───────────────────────────────────────────
 
 #[test]
