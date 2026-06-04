@@ -750,11 +750,13 @@ fn collect_inline(
     (runs, i)
 }
 
-/// Hard cap on an embedded image's rendered width (px). Larger images scale
-/// down to this; smaller ones keep their natural size (never upscaled). A
-/// fixed cap rather than the preview pane's width because an `Image` reports
-/// its size to layout *before* the pane width is known — true pane-relative
-/// image sizing would need a measure-time hook the framework doesn't expose.
+/// Upper cap on an embedded image's rendered width (px), passed to
+/// [`Image::max_width`]. The image fills the preview column up to this cap,
+/// scaling *down* to the column when it is narrower (so a wide image in a
+/// narrow window shrinks to fit instead of overflowing and inflating the
+/// column's height), and never upscaling a smaller image past its natural
+/// size. Keeps long-form images readable without letting them dominate a wide
+/// window.
 const MAX_PREVIEW_IMAGE_WIDTH: f32 = 480.0;
 
 /// Render a paragraph's inline content, breaking it into vertically stacked
@@ -856,10 +858,13 @@ fn emit_image_block(
 ) {
     if let Some(id) = state::parse_attachment_ref(dest) {
         if let Some(img) = nav.and_then(|n| n.resolve_image(id)) {
-            // Scale down to the width cap (aspect ratio preserved); a smaller
-            // image keeps its natural size.
-            let display_w = (img.width() as f32).min(MAX_PREVIEW_IMAGE_WIDTH);
-            tree.add_child(parent, Image::from_decoded(img).width(display_w));
+            // Responsive: fill the preview column up to the width cap, scaling
+            // the image (and its height, aspect preserved) down to a narrower
+            // column rather than overflowing it. Never upscales a small image.
+            tree.add_child(
+                parent,
+                Image::from_decoded(img).max_width(MAX_PREVIEW_IMAGE_WIDTH),
+            );
         } else {
             tree.add_child(
                 parent,
