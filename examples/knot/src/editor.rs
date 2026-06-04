@@ -285,6 +285,14 @@ pub fn build(
         Container::column()
             .width_full()
             .grow(1.0)
+            // The ScrollView fills this wrapper's height via `grow`, but a flex
+            // item defaults to a content-sized minimum — so without this the
+            // wrapper would balloon to the (overflowing) preview content's
+            // height instead of clamping to the pane's leftover space, and a
+            // tall image would leave nothing to scroll. `overflow_hidden` lets
+            // the pane size it and the content scroll inside (the ScrollView
+            // sets the same on itself; the wrapper between them needs it too).
+            .overflow_hidden()
             .visible(Reactive::derive(move || {
                 note_selected(&preview_state) && preview_sig.get()
             })),
