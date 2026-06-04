@@ -20,6 +20,7 @@
 
 mod crypto;
 mod editor;
+mod highlight;
 mod lock_screen;
 mod preview;
 mod recovery_screen;

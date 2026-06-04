@@ -49,16 +49,21 @@
 //! body must not be able to phone home (a tracking pixel) or pull an arbitrary
 //! local file into view.
 //!
-//! Still out of scope: syntax highlighting. Strikethrough inside a `~~...~~`
-//! span suppresses wikilink expansion (deleted text shouldn't sprout a live
-//! link), so `~~[[x]]~~` stays literal.
+//! Fenced code blocks are syntax-highlighted by a small, dependency-free
+//! tokenizer ([`crate::highlight`]) — no `syntect`. The block's info string
+//! ("```rust", "```json", …) selects a grammar; recognized tokens map to theme
+//! color tokens (so highlighting tracks a Light/Dark swap), and an unknown or
+//! absent language renders flat in the base code color.
+//!
+//! Strikethrough inside a `~~...~~` span suppresses wikilink expansion (deleted
+//! text shouldn't sprout a live link), so `~~[[x]]~~` stays literal.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use std::sync::Arc;
 
-use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use shroud::core::Color;
 use shroud::reactive::{Reactive, Signal};
 use shroud::render::DecodedImage;
@@ -66,6 +71,7 @@ use shroud::text::TextSpan;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Container, Image, TextWidget};
 
+use crate::highlight::{self, TokenClass};
 use crate::settings;
 use crate::state::{self, AppState, AttachmentId, Note, NoteId, Phase};
 
@@ -79,8 +85,11 @@ fn body_color() -> Reactive<Color> {
 fn muted_color() -> Reactive<Color> {
     Reactive::derive(|| settings::current_theme().colors.on_surface_variant)
 }
-fn accent_color() -> Reactive<Color> {
-    Reactive::derive(|| settings::current_theme().colors.primary)
+/// Base foreground for code-block text and plain (un-highlighted) tokens.
+/// Reactive, so it follows a live theme swap; highlighted token colors layer on
+/// top of it statically (see [`token_color`]).
+fn code_base_color() -> Reactive<Color> {
+    Reactive::derive(|| settings::current_theme().colors.on_surface)
 }
 fn code_bg_color() -> Reactive<Color> {
     Reactive::derive(|| settings::current_theme().colors.surface_variant)
@@ -95,6 +104,24 @@ fn border_color() -> Reactive<Color> {
 /// block at build time (see the module note on why spans can't be reactive).
 fn inline_accent() -> Color {
     settings::current_theme().colors.primary
+}
+
+/// Static color for a highlighted code token, mapped to a theme token so the
+/// palette tracks Light/Dark. `Plain` returns `None` so the span inherits the
+/// reactive widget base ([`code_base_color`]); the rest pin a class color.
+///
+/// Like inline `code`/link spans, these are resolved at build time (TextSpan
+/// colors aren't reactive), so a theme swap mid-preview leaves token tints a
+/// beat stale until the next edit⇄preview toggle — the documented tradeoff.
+fn token_color(class: TokenClass) -> Option<Color> {
+    let colors = settings::current_theme().colors;
+    match class {
+        TokenClass::Plain => None,
+        TokenClass::Keyword => Some(colors.primary),
+        TokenClass::Str => Some(colors.success),
+        TokenClass::Number => Some(colors.warning),
+        TokenClass::Comment => Some(colors.on_surface_variant),
+    }
 }
 
 /// Internal target prefix marking a `[[wikilink]]`. The framework treats a
@@ -433,7 +460,13 @@ fn render_block(
             inner_end + 1
         }
         Event::Start(Tag::CodeBlock(kind)) => {
-            let _ = kind; // language ignored (no syntect in scope)
+            // A fenced block carries an info string ("rust", "json", …) that
+            // drives the lite highlighter; an indented block has none and falls
+            // back to the flat base color, as does an unrecognized language.
+            let info = match kind {
+                CodeBlockKind::Fenced(info) => info.to_string(),
+                CodeBlockKind::Indented => String::new(),
+            };
             let mut buf = String::new();
             let mut i = start + 1;
             while i < events.len() {
@@ -453,17 +486,7 @@ fn render_block(
                     .background(code_bg_color())
                     .radius(6.0),
             );
-            // One TextWidget per code line. A single TextWidget would also work
-            // (cosmic-text honors '\n') but per-line is closer to how a real
-            // highlighter would emit decorated spans.
-            for line in buf.split('\n') {
-                tree.add_child(
-                    block,
-                    TextWidget::new(if line.is_empty() { " " } else { line })
-                        .color(accent_color())
-                        .monospace(),
-                );
-            }
+            emit_code_block(tree, block, &buf, &info);
             i + 1
         }
         Event::Start(Tag::List(first_num)) => {
@@ -880,6 +903,52 @@ fn emit_image_block(
         parent,
         TextWidget::new(format!("[external image: {label}]")).color(muted_color()),
     );
+}
+
+/// Render a fenced/indented code block's lines into `block` (a column).
+///
+/// When `highlight::highlight` recognizes the language, each line becomes a
+/// `TextWidget::rich` with one span per token, colored by class — `Plain` spans
+/// set no color and inherit the reactive [`code_base_color`], while keyword /
+/// string / number / comment spans pin their static class color. An unknown
+/// language (or an empty line) renders as a single flat monospace `TextWidget`
+/// in the base color, the pre-highlighter look.
+///
+/// One widget per line — rather than a single multi-line widget — keeps each
+/// line a stable wrap unit and lets a blank line hold its height via a space
+/// placeholder.
+fn emit_code_block(tree: &mut WidgetTree, block: usize, code: &str, info: &str) {
+    let highlighted = highlight::highlight(code, info);
+    for (idx, line) in code.split('\n').enumerate() {
+        match highlighted.as_ref().and_then(|lines| lines.get(idx)) {
+            Some(tokens) if !tokens.is_empty() => {
+                let spans: Vec<TextSpan> = tokens
+                    .iter()
+                    .map(|t| {
+                        let mut span = TextSpan::new(t.text.clone()).monospace();
+                        if let Some(c) = token_color(t.class) {
+                            span = span.color(c);
+                        }
+                        span
+                    })
+                    .collect();
+                tree.add_child(
+                    block,
+                    TextWidget::rich(spans).color(code_base_color()).monospace(),
+                );
+            }
+            // Unknown language, or an empty highlighted line: one flat monospace
+            // line. The space placeholder keeps a blank line tall.
+            _ => {
+                tree.add_child(
+                    block,
+                    TextWidget::new(if line.is_empty() { " " } else { line })
+                        .color(code_base_color())
+                        .monospace(),
+                );
+            }
+        }
+    }
 }
 
 /// Emit one paragraph- or heading-shaped block from `runs`.
