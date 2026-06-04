@@ -16,7 +16,7 @@
 //! widgets are inserted into the tree.
 //!
 //! [`SidebarRefresh`] is the editor → sidebar counterpart of
-//! [`TagRefresh`](crate::tag_editor::TagRefresh): the editor fires it after a
+//! [`TagRefresh`]: the editor fires it after a
 //! tag is added or removed so the filter chips track the vault's tag set,
 //! since the editor can't reach this subtree directly and there is no
 //! reactive-children primitive to do it declaratively.
@@ -44,7 +44,7 @@ type RefreshFn = Rc<dyn Fn(&mut EventContext)>;
 /// [`build`]; the editor fires it whenever a tag is added or removed (see
 /// `tag_editor`), since it can't reach this subtree and there is no
 /// reactive-children primitive. Mirror of
-/// [`TagRefresh`](crate::tag_editor::TagRefresh), which runs the other way.
+/// [`TagRefresh`], which runs the other way.
 #[derive(Clone, Default)]
 pub struct SidebarRefresh {
     inner: Rc<RefCell<Option<RefreshFn>>>,

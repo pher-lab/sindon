@@ -390,14 +390,9 @@ fn push(tokens: &mut Vec<Token>, slice: &[char], class: TokenClass) {
 
 /// Whether `pat` (a short ASCII marker) appears in `chars` starting at `i`.
 fn matches_at(chars: &[char], i: usize, pat: &str) -> bool {
-    let mut j = i;
-    for pc in pat.chars() {
-        if j >= chars.len() || chars[j] != pc {
-            return false;
-        }
-        j += 1;
-    }
-    true
+    pat.chars()
+        .enumerate()
+        .all(|(k, pc)| chars.get(i + k) == Some(&pc))
 }
 
 /// Identifier start: ASCII letter, `_`, or any non-ASCII (so identifiers in
