@@ -11,6 +11,11 @@ use shroud_reactive::Reactive;
 /// so the struct field stays inside `clippy::type_complexity`.
 type ContextMenuHandler = Box<dyn FnMut(Point, &mut EventContext)>;
 
+/// Callback type for [`Container::on_press`]. Same shape as
+/// [`ContextMenuHandler`] — a left-button press reported with the click
+/// position in the subtree's local coordinate space.
+type PressHandler = Box<dyn FnMut(Point, &mut EventContext)>;
+
 /// A flexbox container widget.
 ///
 /// Containers can have a background color and arrange their children
@@ -43,6 +48,20 @@ pub struct Container {
     /// `ctx.push_layer(LayerAnchor::AnchorRect { ... }, ...)` so a context
     /// menu pops up at the cursor.
     on_context_menu: Option<ContextMenuHandler>,
+    /// Optional left-press handler. When set, `MouseDown { button: Left }`
+    /// inside the container's layout rect invokes the handler with the click
+    /// position (already translated to the subtree's local coordinate space)
+    /// and the event context, and consumes the event.
+    ///
+    /// Unlike a [`Button`](crate::Button) — which fires its click on
+    /// `MouseUp` after a press latch — this fires on the *press* itself. That
+    /// matters for transient UI like an autocomplete list that dismisses when
+    /// the owning input loses focus: focus moves (and the dismiss is queued)
+    /// on the same `MouseDown`, so a release-based commit would arrive after
+    /// the list has already been torn down. A press-based commit is queued in
+    /// the same dispatch and survives the teardown. The container does not
+    /// need to be focusable, so clicking it never steals keyboard focus.
+    on_press: Option<PressHandler>,
 }
 
 impl Container {
@@ -59,6 +78,7 @@ impl Container {
             radius: 0.0,
             visible: Reactive::Static(true),
             on_context_menu: None,
+            on_press: None,
         }
     }
 
@@ -78,6 +98,7 @@ impl Container {
             radius: 0.0,
             visible: Reactive::Static(true),
             on_context_menu: None,
+            on_press: None,
         }
     }
 
@@ -298,6 +319,25 @@ impl Container {
         self.on_context_menu = Some(Box::new(handler));
         self
     }
+
+    /// Register a left-press handler, firing on `MouseDown` (not release).
+    ///
+    /// The handler receives the click position (in the subtree's local
+    /// coordinate space, same frame as `paint`'s `layout`) and the event
+    /// context; the press is consumed so a parent doesn't also see it.
+    ///
+    /// Use this for clickable rows that must commit *before* a focus change
+    /// queued on the same click can tear them down — e.g. an autocomplete
+    /// suggestion that disappears when its input blurs. For ordinary buttons
+    /// prefer [`Button`](crate::Button), which commits on release and so
+    /// supports press-and-drag-off-to-cancel. Setting this also opts the
+    /// container into pointer events, so there's no need to chain
+    /// [`Container::hoverable`] for the press alone (do chain it, or set a
+    /// hover background, if you also want a hover highlight).
+    pub fn on_press(mut self, handler: impl FnMut(Point, &mut EventContext) + 'static) -> Self {
+        self.on_press = Some(Box::new(handler));
+        self
+    }
 }
 
 impl Widget for Container {
@@ -336,6 +376,20 @@ impl Widget for Container {
         } = event
         {
             if let Some(handler) = &mut self.on_context_menu {
+                handler(*position, ctx);
+                return EventResult::Consumed;
+            }
+        }
+
+        // Left press → on_press (independent of hoverable, like the
+        // right-click path above). Fires on the press so the commit is
+        // queued in the same dispatch that may move focus elsewhere.
+        if let WidgetEvent::MouseDown {
+            button: MouseButton::Left,
+            position,
+        } = event
+        {
+            if let Some(handler) = &mut self.on_press {
                 handler(*position, ctx);
                 return EventResult::Consumed;
             }

@@ -130,6 +130,8 @@ pub fn build(
     let input_sig = w.input;
     let w_submit = w.clone();
     let w_change = w.clone();
+    let w_blur = w.clone();
+    let w_backspace = w.clone();
     tree.add_child(
         section,
         Input::new()
@@ -142,7 +144,15 @@ pub fn build(
             // Typing refreshes suggestions; a comma commits the segment(s)
             // before it (so "a,b," adds two tags and leaves the trailing
             // partial in the field).
-            .on_change(move |val, ctx| on_input_change(&w_change, val, ctx)),
+            .on_change(move |val, ctx| on_input_change(&w_change, val, ctx))
+            // Losing focus discards the uncommitted partial entry and
+            // collapses the suggestion list (otherwise it lingers over the
+            // body). A suggestion click also blurs the input, but its commit
+            // is press-based (see `populate_suggestions`) so it still lands.
+            .on_blur(move |ctx| dismiss_suggestions(&w_blur, ctx))
+            // Backspace on an empty field deletes the most recent chip,
+            // matching the reference app's chip-editor feel.
+            .on_backspace_empty(move |ctx| remove_last_tag(&w_backspace, ctx)),
     );
 
     let suggestions = tree.add_child(section, Container::column().width_full().gap(2.0));
@@ -251,16 +261,26 @@ fn populate_suggestions(tree: &mut WidgetTree, parent: usize, w: &Wiring) {
     for suggestion in matches {
         let w = w.clone();
         let value = suggestion.clone();
-        tree.add_child(
+        // Press-commit (not a Button's release-commit): clicking a suggestion
+        // blurs the input, which queues the list teardown on the same
+        // MouseDown. A release-based commit would arrive after the row was
+        // destroyed; an on_press commit is queued in that same dispatch and
+        // survives. The row isn't focusable, so the click never steals focus.
+        let row = tree.add_child(
             list,
-            Button::new(suggestion)
-                .font_size(13.0)
-                .background(Color::TRANSPARENT)
-                .hover_background(settings::hover())
-                .text_color(settings::on_surface())
+            Container::row()
+                .width_full()
+                .align_center()
+                .padding(4.0)
                 .radius(4.0)
-                .grow(1.0)
-                .on_click(move |ctx| commit_tag(&w, &value, ctx)),
+                .hover_background(settings::hover())
+                .on_press(move |_pos, ctx| commit_tag(&w, &value, ctx)),
+        );
+        tree.add_child(
+            row,
+            TextWidget::new(suggestion)
+                .color(settings::on_surface())
+                .font_size(13.0),
         );
     }
 }
@@ -278,6 +298,33 @@ fn commit_tag(w: &Wiring, raw: &str, ctx: &mut EventContext) {
         w.sidebar_refresh.fire(ctx);
     }
     rebuild_suggestions(w, ctx);
+}
+
+/// Blur handler: discard the uncommitted partial entry and collapse the
+/// suggestion list so it doesn't hang over the body editor. No-op when the
+/// field is already empty (the list is already gone), avoiding a needless
+/// rebuild on every focus change. A genuinely-typed partial is intentionally
+/// dropped on blur, mirroring `TagRefresh` clearing the field on note switch.
+fn dismiss_suggestions(w: &Wiring, ctx: &mut EventContext) {
+    if w.input.get_clone().is_empty() {
+        return;
+    }
+    w.input.set(String::new());
+    rebuild_suggestions(w, ctx);
+}
+
+/// Empty-Backspace handler: remove the most recently added chip. Mirrors the
+/// reference app, where Backspace in an empty tag field deletes the last tag.
+/// Removing a tag may free it to reappear as a suggestion and may have been
+/// the vault's last use of it, so refresh both lists and the sidebar filter.
+fn remove_last_tag(w: &Wiring, ctx: &mut EventContext) {
+    let last = w.state.borrow().selected_tags().last().cloned();
+    if let Some(tag) = last {
+        w.state.borrow_mut().remove_tag_from_selected(&tag);
+        rebuild_chips(w, ctx);
+        rebuild_suggestions(w, ctx);
+        w.sidebar_refresh.fire(ctx);
+    }
 }
 
 /// Enter handler: commit the top autocomplete match for the current input,

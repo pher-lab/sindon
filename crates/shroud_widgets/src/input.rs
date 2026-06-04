@@ -58,6 +58,11 @@ use shroud_reactive::Signal;
 /// ```
 type TextCallback = Box<dyn FnMut(&str, &mut EventContext)>;
 
+/// Context-only callback (no text payload) — used for [`Input::on_blur`] and
+/// [`Input::on_backspace_empty`], where the handler reacts to a focus/key
+/// event rather than to the buffer contents.
+type CtxCallback = Box<dyn FnMut(&mut EventContext)>;
+
 /// Clamp `v` to the inclusive `[min, max]` range when either bound is set.
 /// `None` bounds are unbounded on that side. Used by numeric-mode editing.
 fn clamp_opt(v: i64, min: Option<i64>, max: Option<i64>) -> i64 {
@@ -123,6 +128,14 @@ pub struct Input {
     number_source: Option<Signal<i64>>,
     on_change: Option<TextCallback>,
     on_submit: Option<TextCallback>,
+    /// Fires when the field loses keyboard focus (`FocusLost`), after any
+    /// internal canonicalization. Lets apps dismiss transient UI tied to the
+    /// field — e.g. an autocomplete suggestion list.
+    on_blur: Option<CtxCallback>,
+    /// Fires when Backspace is pressed while the buffer is empty. Lets a
+    /// chip/tag editor remove the last committed chip when the user keeps
+    /// deleting past the start of the text.
+    on_backspace_empty: Option<CtxCallback>,
     // Colors (None = read from theme).
     //
     // The focus ring (Phase 19b) is now the canonical signal that this
@@ -155,6 +168,8 @@ impl Input {
             number_source: None,
             on_change: None,
             on_submit: None,
+            on_blur: None,
+            on_backspace_empty: None,
             bg_color: None,
             text_color: None,
             placeholder_color: None,
@@ -309,6 +324,31 @@ impl Input {
     /// drive screen transitions (`ctx.replace_screen(...)`) in response.
     pub fn on_submit(mut self, f: impl FnMut(&str, &mut EventContext) + 'static) -> Self {
         self.on_submit = Some(Box::new(f));
+        self
+    }
+
+    /// Set a callback for when the field loses keyboard focus.
+    ///
+    /// Fires on `FocusLost` — after numeric canonicalization (so the bound
+    /// signal is already settled) and after `focused` is cleared. The handler
+    /// only receives the [`EventContext`]; read the current text from the
+    /// bound signal if needed. Typical use is dismissing transient UI the
+    /// field owns, like an autocomplete list. Tree mutations should be queued
+    /// on the context (e.g. `ctx.rebuild_children(...)`), exactly as in other
+    /// handlers.
+    pub fn on_blur(mut self, f: impl FnMut(&mut EventContext) + 'static) -> Self {
+        self.on_blur = Some(Box::new(f));
+        self
+    }
+
+    /// Set a callback for Backspace pressed while the buffer is empty.
+    ///
+    /// A focused input swallows Backspace, so an app can't otherwise observe
+    /// it. This hook fires *only* when the field is already empty — a
+    /// Backspace at the start of non-empty text remains an inert no-op — which
+    /// is the signal a chip/tag editor uses to remove the last committed chip.
+    pub fn on_backspace_empty(mut self, f: impl FnMut(&mut EventContext) + 'static) -> Self {
+        self.on_backspace_empty = Some(Box::new(f));
         self
     }
 
@@ -686,6 +726,9 @@ impl Widget for Input {
                 if self.numeric {
                     self.canonicalize_numeric_buffer();
                 }
+                if let Some(handler) = self.on_blur.as_mut() {
+                    handler(ctx);
+                }
                 EventResult::Ignored
             }
 
@@ -736,6 +779,14 @@ impl Widget for Input {
                         if let Some(handler) = self.on_change.as_mut() {
                             let snapshot = self.value.borrow().clone();
                             handler(&snapshot, ctx);
+                        }
+                    } else if self.value.borrow().is_empty() {
+                        // Empty buffer + Backspace: hand off to the app (e.g.
+                        // a tag editor removing the last chip). Gated on a
+                        // truly-empty buffer so a Backspace at the start of
+                        // non-empty text stays an inert no-op.
+                        if let Some(handler) = self.on_backspace_empty.as_mut() {
+                            handler(ctx);
                         }
                     }
                     EventResult::Consumed
