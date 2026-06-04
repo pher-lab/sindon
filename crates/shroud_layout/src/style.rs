@@ -116,6 +116,18 @@ impl FlexStyle {
         self
     }
 
+    /// Preferred aspect ratio (`width / height`). When one axis is resolved
+    /// (by a definite size, a percentage, or flex stretching), Taffy derives
+    /// the other from this ratio instead of from content measurement.
+    ///
+    /// Pair with [`Self::max_width`] for a "responsive image" that fills the
+    /// available width up to a cap and scales its height to match, rather than
+    /// pinning a fixed box that overflows a narrower container.
+    pub fn aspect_ratio(mut self, ratio: f32) -> Self {
+        self.style.aspect_ratio = Some(ratio);
+        self
+    }
+
     /// Uniform padding on all sides.
     pub fn padding(mut self, px: f32) -> Self {
         let val = length(px);

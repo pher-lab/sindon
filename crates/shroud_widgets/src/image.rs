@@ -58,6 +58,7 @@ pub struct Image {
     image: Arc<DecodedImage>,
     width: Option<f32>,
     height: Option<f32>,
+    max_width: Option<f32>,
     fit: ImageFit,
     tint: Color,
 }
@@ -81,6 +82,7 @@ impl Image {
             image,
             width: None,
             height: None,
+            max_width: None,
             fit: ImageFit::default(),
             tint: Color::WHITE,
         }
@@ -97,6 +99,24 @@ impl Image {
     /// aspect ratio if not also pinned.
     pub fn height(mut self, px: f32) -> Self {
         self.height = Some(px);
+        self
+    }
+
+    /// Render responsively: fill the available width *up to* `px`, never
+    /// upscaling beyond the image's intrinsic width, with the height scaled to
+    /// preserve aspect ratio.
+    ///
+    /// Unlike [`Self::width`] — which pins a fixed box that *overflows* a
+    /// container narrower than the pin and (under some flex ancestors)
+    /// inflates the container's reported height — this hands Taffy a flexible
+    /// width plus an aspect ratio, so a too-narrow column scales the whole
+    /// image down instead of letting it spill out. This is the right mode for
+    /// images embedded in a fluid text column (e.g. a markdown preview) whose
+    /// runtime width isn't known at build time.
+    ///
+    /// Takes precedence over [`Self::width`] / [`Self::height`] pins.
+    pub fn max_width(mut self, px: f32) -> Self {
+        self.max_width = Some(px);
         self
     }
 
@@ -139,6 +159,14 @@ impl Image {
             (None, Some(h)) => Size::new(h * self.aspect(), h),
             (None, None) => Size::new(iw, ih),
         }
+    }
+
+    /// The effective width cap in responsive ([`Self::max_width`]) mode: never
+    /// wider than the requested cap, and never wider than the intrinsic image
+    /// (so a small image is not upscaled).
+    fn responsive_cap(&self, cap: f32) -> f32 {
+        let (iw, _) = self.intrinsic_size();
+        cap.min(iw).max(0.0)
     }
 }
 
@@ -194,6 +222,19 @@ fn fit_rect(layout: Rect, intrinsic: (f32, f32), fit: ImageFit) -> (Rect, bool) 
 
 impl Widget for Image {
     fn style(&self) -> FlexStyle {
+        if let Some(cap) = self.max_width {
+            // Responsive: fill the available width, but clamp it to the cap so
+            // a wide container doesn't upscale the image, and let Taffy derive
+            // the height from the aspect ratio so it tracks whatever width the
+            // (possibly narrower) container resolves to. Because the height is
+            // proportional to the resolved width — not a fixed pin — a
+            // narrower column scales the whole image down instead of
+            // overflowing and inflating the column's measured height.
+            return FlexStyle::new()
+                .width_full()
+                .max_width(self.responsive_cap(cap))
+                .aspect_ratio(self.aspect());
+        }
         let Size { width, height, .. } = self.resolved_size();
         // Pin both axes so flex doesn't shrink the image below its
         // intrinsic / requested size. Callers that want a flexible
@@ -202,7 +243,19 @@ impl Widget for Image {
         FlexStyle::new().width(width).height(height)
     }
 
-    fn measure(&self, _available_width: Option<f32>, _ctx: &mut MeasureContext) -> Option<Size> {
+    fn measure(&self, available_width: Option<f32>, _ctx: &mut MeasureContext) -> Option<Size> {
+        if let Some(cap) = self.max_width {
+            // Mirror the style: width is the available column width clamped to
+            // the cap (and never beyond intrinsic), height scaled to match.
+            // At the min-content probe (available_width == Some(0.0)) this
+            // reports a near-zero box, so the image contributes no phantom
+            // height to a min-content sizing pass.
+            let cap = self.responsive_cap(cap);
+            let w = available_width.map(|a| a.min(cap)).unwrap_or(cap).max(0.0);
+            let (iw, ih) = self.intrinsic_size();
+            let h = if iw > 0.0 { w * ih / iw } else { 0.0 };
+            return Some(Size::new(w, h));
+        }
         Some(self.resolved_size())
     }
 
@@ -329,6 +382,53 @@ mod tests {
         assert_eq!(dest.size.height, 30.0);
         assert_eq!(dest.origin.x, -5.0);
         assert_eq!(dest.origin.y, -10.0);
+    }
+
+    #[test]
+    fn max_width_measure_shrinks_to_available_and_preserves_aspect() {
+        // 2x4 image (aspect 0.5). Cap 100, but only 1px wide available → width
+        // clamps to the available 1, height = 1 / 0.5 = 2.
+        let img = Image::from_bytes(&red_2x4_png()).unwrap().max_width(100.0);
+        let mut engine = shroud_text::TextEngine::new();
+        let theme = shroud_core::Theme::default();
+        let mut ctx = MeasureContext::new(&mut engine, &theme);
+        let size = img.measure(Some(1.0), &mut ctx).unwrap();
+        assert!((size.width - 1.0).abs() < 0.001, "width {}", size.width);
+        assert!((size.height - 2.0).abs() < 0.001, "height {}", size.height);
+    }
+
+    #[test]
+    fn max_width_never_upscales_past_intrinsic() {
+        // 2x4 intrinsic. Cap 100 and a generous 500px available, but the image
+        // is only 2px wide — it must not upscale beyond its intrinsic width.
+        let img = Image::from_bytes(&red_2x4_png()).unwrap().max_width(100.0);
+        let mut engine = shroud_text::TextEngine::new();
+        let theme = shroud_core::Theme::default();
+        let mut ctx = MeasureContext::new(&mut engine, &theme);
+        let size = img.measure(Some(500.0), &mut ctx).unwrap();
+        assert!((size.width - 2.0).abs() < 0.001, "width {}", size.width);
+        assert!((size.height - 4.0).abs() < 0.001, "height {}", size.height);
+    }
+
+    #[test]
+    fn responsive_cap_clamps_to_intrinsic() {
+        // 2x4 intrinsic: a cap above the 2px width clamps to 2 (never upscale);
+        // a smaller cap is honored as-is.
+        let img = Image::from_bytes(&red_2x4_png()).unwrap();
+        assert!((img.responsive_cap(100.0) - 2.0).abs() < 0.001);
+        assert!((img.responsive_cap(1.0) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn max_width_style_sets_aspect_ratio() {
+        // 2x4 intrinsic → aspect 0.5 plumbed into the Taffy style so height
+        // tracks the resolved width.
+        let style = Image::from_bytes(&red_2x4_png())
+            .unwrap()
+            .max_width(100.0)
+            .style()
+            .build();
+        assert_eq!(style.aspect_ratio, Some(0.5));
     }
 
     #[test]

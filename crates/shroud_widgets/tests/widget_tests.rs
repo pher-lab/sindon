@@ -1892,6 +1892,109 @@ fn knot_preview_full_pane_scrolls_past_tall_image() {
     );
 }
 
+#[test]
+fn knot_preview_responsive_image_fits_column_without_phantom_height() {
+    // Regression: in knot's markdown preview a too-wide embedded image used to
+    // be pinned with a fixed `.width(cap)`. When the preview column is narrower
+    // than that cap, the pinned image overflows horizontally AND inflates the
+    // content column's reported *height* by a few hundred px (a Taffy
+    // min-content-width interaction that only fires under the pane's
+    // `flex_basis(0)`), leaving phantom empty scroll space below the content.
+    //
+    // `Image::max_width` fixes this: it scales the image down to the available
+    // column width with an aspect-derived height, so the column height is
+    // exactly image_height + gap + text_height — no phantom inflation. Same
+    // full pane chain as `knot_preview_full_pane_scrolls_past_tall_image`.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::row().width_full().height_full());
+    tree.add_child(root, Container::column().width(240.0).height_full());
+    let pane = tree.add_child(
+        root,
+        Container::column()
+            .flex_basis(0.0)
+            .grow(1.0)
+            .height_full()
+            .padding(24.0)
+            .gap(12.0),
+    );
+    let header = tree.add_child(pane, Container::row().gap(12.0));
+    tree.add_child(header, TextWidget::new("Editing: note"));
+    tree.add_child(
+        pane,
+        Container::column()
+            .width_full()
+            .grow(1.0)
+            .visible(Signal::new(false)),
+    );
+    let preview_area = tree.add_child(
+        pane,
+        Container::column()
+            .width_full()
+            .grow(1.0)
+            .overflow_hidden()
+            .visible(Signal::new(true)),
+    );
+    let preview_scroll = tree.add_child(preview_area, ScrollView::new().width_full().grow(1.0));
+    let content_gap = 12.0;
+    let preview_content = tree.add_child(
+        preview_scroll,
+        Container::column().width_full().gap(content_gap),
+    );
+    // Intrinsic 480x1920 (aspect 0.25): the 480 width cap exceeds the ~400px
+    // preview column, so a fixed `.width(480)` pin would overflow it and
+    // inflate the column. Responsive `.max_width` scales it to the column.
+    let png = solid_png(480, 1920);
+    let image_idx = tree.add_child(
+        preview_content,
+        Image::from_bytes(&png).unwrap().max_width(480.0),
+    );
+    let text_idx = tree.add_child(preview_content, TextWidget::new("below the image"));
+
+    let mut engine = shroud_text::TextEngine::new();
+    let theme = Theme::default();
+    // Pane content width ≈ 700 - 240 - 48(padding) = 412, narrower than 480.
+    tree.compute_layout_with_measure(700.0, 600.0, &mut engine, &theme);
+
+    let img_rect = tree.layout_rect(image_idx);
+    let text_rect = tree.layout_rect(text_idx);
+    let col_rect = tree.layout_rect(preview_content);
+
+    // The image fits within the column width — no horizontal overflow.
+    assert!(
+        img_rect.size.width <= col_rect.size.width + 0.5,
+        "responsive image width {} should fit the column width {}",
+        img_rect.size.width,
+        col_rect.size.width
+    );
+    // Its height tracks the resolved width via the 0.25 aspect ratio (height =
+    // width / 0.25 = 4x), so it shrank with the column instead of staying at
+    // the cap's 1920.
+    assert!(
+        (img_rect.size.height - img_rect.size.width * 4.0).abs() < 1.0,
+        "image height {} should be 4x its width {} (aspect-preserved)",
+        img_rect.size.height,
+        img_rect.size.width
+    );
+    assert!(
+        img_rect.size.height < 1920.0,
+        "image should have scaled down below the 480-cap height of 1920, got {}",
+        img_rect.size.height
+    );
+    // The column height is exactly image + gap + text — the phantom is gone.
+    let expected = img_rect.size.height + content_gap + text_rect.size.height;
+    assert!(
+        (col_rect.size.height - expected).abs() < 1.0,
+        "column height {} should equal image({}) + gap({}) + text({}) = {} \
+         (phantom inflation = {})",
+        col_rect.size.height,
+        img_rect.size.height,
+        content_gap,
+        text_rect.size.height,
+        expected,
+        col_rect.size.height - expected
+    );
+}
+
 // ── Reactive TextWidget ───────────────────────────────────────────
 
 #[test]
