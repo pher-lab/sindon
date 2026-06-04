@@ -531,6 +531,7 @@ fn is_user_input(event: &WindowEvent) -> bool {
             | WindowEvent::MouseInput { .. }
             | WindowEvent::MouseWheel { .. }
             | WindowEvent::Ime(_)
+            | WindowEvent::DroppedFile(_)
     )
 }
 
@@ -1007,6 +1008,21 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 // the final Commit lands via the arm above.
             }
 
+            // ── File drop (drag-and-drop from the OS) ─────────────
+            //
+            // winit delivers one `DroppedFile` per file with no drop
+            // coordinates (and stops emitting `CursorMoved` during the
+            // drag), so this routes to the tree's window-level file-drop
+            // handler rather than hit-testing a position. Apps register a
+            // handler via `WidgetTree::on_file_drop`; with none registered
+            // this is a no-op.
+            WindowEvent::DroppedFile(path) => {
+                if let Some(tree) = &mut self.tree {
+                    tree.dispatch_file_drop(&path, &mut self.event_ctx);
+                    self.request_redraw();
+                }
+            }
+
             // ── Render ───────────────────────────────────────────
             WindowEvent::RedrawRequested => {
                 if self.renderer.is_none() || self.tree.is_none() || self.paint_ctx.is_none() {
@@ -1117,6 +1133,19 @@ mod tests {
             matches!(event, Some(WidgetEvent::CharInput { ch: ' ' })),
             "Space must translate to CharInput {{ ch: ' ' }}, got {event:?}"
         );
+    }
+
+    #[test]
+    fn dropped_file_counts_as_user_input() {
+        // A drag-drop is deliberate user activity, so it must reset the
+        // idle clock behind `FrameContext::idle` — otherwise an auto-lock
+        // could fire while the user is dropping a file. OS-driven events
+        // (focus, resize, theme) deliberately stay non-input so an
+        // unattended session still locks.
+        assert!(is_user_input(&WindowEvent::DroppedFile(
+            std::path::PathBuf::from("image.png")
+        )));
+        assert!(!is_user_input(&WindowEvent::Focused(true)));
     }
 
     #[test]

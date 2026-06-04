@@ -1,6 +1,7 @@
 //! Widget tree — manages the widget hierarchy and coordinates layout/paint/events.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::event::{
     EventContext, EventResult, Key, MouseButton, NamedKey, TreeCommand, WidgetEvent,
@@ -76,7 +77,28 @@ pub struct WidgetTree {
     /// `AppScope::on_shortcut` after the build closure returns. See
     /// [`crate::shortcut`].
     shortcuts: ShortcutRouter,
+    /// Screen-scoped handler for OS file drops (drag-and-drop from the
+    /// desktop / file manager). Registered via [`Self::on_file_drop`] and
+    /// invoked by [`Self::dispatch_file_drop`] when the event loop
+    /// receives a `DroppedFile`. Cleared on every `replace_screen`
+    /// transition so a handler installed by one screen never fires after
+    /// that screen is torn down — matching the per-screen lifetime of the
+    /// signals such a handler typically captures.
+    ///
+    /// Deliberately a window-level hook rather than a position-routed
+    /// per-widget callback: winit 0.30 carries no drop coordinates on
+    /// `DroppedFile` and suppresses cursor-move events during an OS drag,
+    /// so there is no reliable way to hit-test the drop against the widget
+    /// under the cursor (notably on Windows).
+    file_drop_handler: Option<FileDropHandler>,
 }
+
+/// Handler for an OS file drop onto the window — receives the dropped
+/// file's path and the event context (so it can enqueue tree commands,
+/// exactly like a widget event handler). Boxed as a type alias to keep
+/// the [`WidgetTree`] field and [`WidgetTree::on_file_drop`] signature
+/// clear of `clippy::type_complexity`. See [`WidgetTree::on_file_drop`].
+type FileDropHandler = Box<dyn FnMut(&Path, &mut EventContext)>;
 
 /// Find the deepest node that appears in both ancestor chains (each
 /// leaf-first, root-last). Returns `None` when the chains share no
@@ -156,6 +178,7 @@ impl WidgetTree {
             layers: Vec::new(),
             viewport: (0.0, 0.0),
             shortcuts: ShortcutRouter::new(),
+            file_drop_handler: None,
         }
     }
 
@@ -564,6 +587,12 @@ impl WidgetTree {
                     if let Some(old) = self.root {
                         self.remove(old);
                     }
+                    // A screen swap tears down the screen that registered
+                    // any file-drop handler; clear it so a stale handler
+                    // (capturing the old screen's signals) never fires on
+                    // the new screen. The replacement re-registers in its
+                    // build closure if it accepts drops.
+                    self.file_drop_handler = None;
                     build(self);
                 }
                 TreeCommand::RebuildChildren { parent, build } => {
@@ -1001,6 +1030,47 @@ impl WidgetTree {
         self.drain_commands(event_ctx);
 
         result
+    }
+
+    /// Register a handler for OS file drops onto the window (drag-and-drop
+    /// from the desktop / file manager).
+    ///
+    /// Fires once per file dropped — winit delivers a multi-file drop as a
+    /// burst of separate events. The handler receives the file's path and
+    /// the event context; enqueue tree commands on the context (e.g.
+    /// `ctx.rebuild_children(...)`) to mutate the tree in response, exactly
+    /// like a widget event handler.
+    ///
+    /// The registration is **screen-scoped**: it is cleared automatically
+    /// on the next [`EventContext::replace_screen`] transition, so a
+    /// handler installed by the current screen never fires after that
+    /// screen is replaced. Re-register inside each screen's build closure
+    /// that wants to accept drops. Only one handler is supported — a second
+    /// call replaces the first.
+    ///
+    /// **No drop position is provided.** winit 0.30 carries no coordinates
+    /// on `DroppedFile` and stops emitting cursor-move events during an OS
+    /// drag, so a reliable per-widget hit-test isn't possible (notably on
+    /// Windows). Treat a drop as "a file arrived on the window" and route
+    /// it from app state — e.g. insert it into the currently open document.
+    pub fn on_file_drop(&mut self, handler: impl FnMut(&Path, &mut EventContext) + 'static) {
+        self.file_drop_handler = Some(Box::new(handler));
+    }
+
+    /// Deliver an OS file drop to the registered [`Self::on_file_drop`]
+    /// handler, if any, then drain whatever tree commands it enqueued.
+    ///
+    /// Called by the event loop on `WindowEvent::DroppedFile`. A no-op when
+    /// no handler is registered (e.g. on a screen that doesn't accept
+    /// drops). The handler borrows `&mut self.file_drop_handler` for the
+    /// call while `event_ctx` (an independent borrow) carries the deferred
+    /// command queue — handlers can't re-enter `WidgetTree` directly, so
+    /// there's no take/restore dance.
+    pub fn dispatch_file_drop(&mut self, path: &Path, event_ctx: &mut EventContext) {
+        if let Some(handler) = self.file_drop_handler.as_mut() {
+            handler(path, event_ctx);
+        }
+        self.drain_commands(event_ctx);
     }
 
     fn dispatch_with_target(
