@@ -40,22 +40,34 @@
 //! break (not CommonMark's soft-break-as-space), since note writers expect
 //! Enter to start a new line. A blank line is still a paragraph gap.
 //!
-//! Still out of scope: syntax highlighting and images. Strikethrough inside a
-//! `~~...~~` span suppresses wikilink expansion (deleted text shouldn't sprout
-//! a live link), so `~~[[x]]~~` stays literal.
+//! Embedded images render from the encrypted attachment store: a
+//! `![alt](knot-img:<id>)` reference is decrypted (via the preview's
+//! [`WikiNav`] handle to live state) and drawn inline as its own block. An
+//! image whose src is *not* a `knot-img:` reference — an http/file/data URL —
+//! is **never fetched or read from disk**; it renders as an inert labeled
+//! placeholder. That gate is the image analog of the link allowlist: a note
+//! body must not be able to phone home (a tracking pixel) or pull an arbitrary
+//! local file into view.
+//!
+//! Still out of scope: syntax highlighting. Strikethrough inside a `~~...~~`
+//! span suppresses wikilink expansion (deleted text shouldn't sprout a live
+//! link), so `~~[[x]]~~` stays literal.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use std::sync::Arc;
+
 use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use shroud::core::Color;
 use shroud::reactive::{Reactive, Signal};
+use shroud::render::DecodedImage;
 use shroud::text::TextSpan;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, TextWidget};
+use shroud::widgets::{Container, Image, TextWidget};
 
 use crate::settings;
-use crate::state::{AppState, Note, NoteId, Phase};
+use crate::state::{self, AppState, AttachmentId, Note, NoteId, Phase};
 
 // ── Reactive block-level theme colors ───────────────────────────────────────
 // Each re-reads `current_theme()` on every paint, so block text and panel
@@ -91,13 +103,16 @@ fn inline_accent() -> Color {
 /// strip it back off in `handle_link_click` to recover the note title.
 const WIKI_SCHEME: &str = "knot-wiki:";
 
-/// What a clicked wikilink needs to switch the active note: the shared app
-/// state plus the editor's bound signals. Cheap to clone (an `Rc` and three
-/// `Copy` signal handles), which matters because every link block captures its
-/// own clone into the click closure.
+/// The preview's handle to live app state. It does double duty: it carries
+/// what a clicked wikilink needs to switch the active note (shared state plus
+/// the editor's bound signals), *and* it resolves `knot-img:<id>` references
+/// against the encrypted attachment store (see [`WikiNav::resolve_image`]).
+/// Cheap to clone (an `Rc` and three `Copy` signal handles), which matters
+/// because every link/image block captures its own clone.
 ///
-/// `None` is a valid "no navigation" mode — the preview tests and any caller
-/// that doesn't wire routing render wikilinks as inert accent text.
+/// `None` is a valid "no live state" mode — the preview tests and any caller
+/// that doesn't wire routing render wikilinks as inert accent text and embedded
+/// images as "unavailable" placeholders.
 #[derive(Clone)]
 pub struct WikiNav {
     state: Rc<RefCell<AppState>>,
@@ -150,6 +165,14 @@ impl WikiNav {
         self.title_sig.set(new_title);
         self.body_sig.set(new_body);
         self.preview_sig.set(false);
+    }
+
+    /// Resolve an embedded-image attachment id to its decoded pixels via the
+    /// live vault, decrypting (and caching) on first use. `None` when the id
+    /// has no stored attachment, the bytes don't decode, or the app isn't
+    /// unlocked — the caller then renders an "unavailable" placeholder.
+    fn resolve_image(&self, id: AttachmentId) -> Option<Arc<DecodedImage>> {
+        self.state.borrow_mut().resolve_attachment(id)
     }
 }
 
@@ -364,8 +387,10 @@ fn render_block(
             end + 1
         }
         Event::Start(Tag::Paragraph) => {
-            let (runs, end) = collect_inline(events, start + 1, |t| matches!(t, TagEnd::Paragraph));
-            emit_inline_block(tree, parent, runs, None, false, nav);
+            // Paragraphs can carry embedded images, which become their own
+            // stacked blocks — so route through `render_paragraph`, which
+            // splits the inline stream at image boundaries.
+            let end = render_paragraph(tree, parent, events, start + 1, nav);
             end + 1
         }
         Event::Start(Tag::BlockQuote) => {
@@ -512,8 +537,7 @@ fn render_list_item(
             // pulldown-cmark wraps loose item text in a paragraph; tight lists
             // emit raw inline events directly inside Item.
             Event::Start(Tag::Paragraph) => {
-                let (runs, end) = collect_inline(events, i + 1, |t| matches!(t, TagEnd::Paragraph));
-                emit_inline_block(tree, parent, runs, None, false, nav);
+                let end = render_paragraph(tree, parent, events, i + 1, nav);
                 i = end + 1;
             }
             Event::Text(_)
@@ -667,16 +691,23 @@ fn collect_inline(
     // Strikethrough nesting depth. Orthogonal to `style_stack` because GFM
     // strikethrough composes with bold/italic/links rather than replacing them.
     let mut strike_depth = 0u32;
+    // Image nesting depth. An image's alt text arrives as `Text` events
+    // between `Start(Image)` and `End(Image)`; while inside one we drop that
+    // text so the alt never leaks into the body. Paragraphs render images as
+    // real blocks via `render_paragraph` (which splits before reaching here);
+    // this guard covers the contexts that don't — headings, table cells, and
+    // tight list items — where an image is simply suppressed rather than shown.
+    let mut image_depth = 0u32;
     let mut i = start;
     while i < events.len() {
         let strike = strike_depth > 0;
         match &events[i] {
             Event::End(t) if is_end(t) => return (runs, i),
-            Event::Text(s) => {
+            Event::Text(s) if image_depth == 0 => {
                 let style = *style_stack.last().unwrap();
                 push_run(&mut runs, s, style, strike, link_stack.last().cloned());
             }
-            Event::Code(s) => {
+            Event::Code(s) if image_depth == 0 => {
                 push_run(
                     &mut runs,
                     s,
@@ -685,6 +716,8 @@ fn collect_inline(
                     link_stack.last().cloned(),
                 );
             }
+            Event::Start(Tag::Image { .. }) => image_depth += 1,
+            Event::End(TagEnd::Image) => image_depth = image_depth.saturating_sub(1),
             // Render every line break as an actual line break ("breaks" mode),
             // not CommonMark's soft-break-as-space. A note app's users expect
             // Enter to start a new line, so `文字\n文字` should break rather than
@@ -715,6 +748,133 @@ fn collect_inline(
         i += 1;
     }
     (runs, i)
+}
+
+/// Hard cap on an embedded image's rendered width (px). Larger images scale
+/// down to this; smaller ones keep their natural size (never upscaled). A
+/// fixed cap rather than the preview pane's width because an `Image` reports
+/// its size to layout *before* the pane width is known — true pane-relative
+/// image sizing would need a measure-time hook the framework doesn't expose.
+const MAX_PREVIEW_IMAGE_WIDTH: f32 = 480.0;
+
+/// Render a paragraph's inline content, breaking it into vertically stacked
+/// blocks at embedded-image boundaries. Text segments go through the usual
+/// inline path (`collect_inline` + `emit_inline_block`); each image renders as
+/// its own block via `emit_image_block`. Returns the index of the paragraph's
+/// closing `TagEnd::Paragraph` (the caller adds the `+ 1`).
+///
+/// Most images sit alone in a paragraph (`![alt](url)` on its own line), so the
+/// common result is a single image block. A mixed `text ![img] text` paragraph
+/// degrades to three stacked blocks rather than a true inline image — there is
+/// no inline-image-in-a-text-run primitive, and note writers rarely interleave.
+fn render_paragraph(
+    tree: &mut WidgetTree,
+    parent: usize,
+    events: &[Event],
+    start: usize,
+    nav: Option<&WikiNav>,
+) -> usize {
+    let mut seg_start = start;
+    let mut i = start;
+    while i < events.len() {
+        match &events[i] {
+            Event::End(TagEnd::Paragraph) => {
+                flush_text_segment(tree, parent, events, seg_start, i, nav);
+                return i;
+            }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                flush_text_segment(tree, parent, events, seg_start, i, nav);
+                let dest = dest_url.to_string();
+                let (alt, img_end) = collect_image_alt(events, i + 1);
+                emit_image_block(tree, parent, &dest, &alt, nav);
+                i = img_end + 1;
+                seg_start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    // Unterminated paragraph (not expected from a well-formed parse): flush
+    // the remainder and report the end of the stream.
+    flush_text_segment(tree, parent, events, seg_start, events.len(), nav);
+    events.len()
+}
+
+/// Emit the text segment `[from, to)` of a paragraph as one inline block, or
+/// nothing when it is empty or only whitespace / line breaks — so the gaps
+/// around a standalone image don't fan out into empty blocks.
+fn flush_text_segment(
+    tree: &mut WidgetTree,
+    parent: usize,
+    events: &[Event],
+    from: usize,
+    to: usize,
+    nav: Option<&WikiNav>,
+) {
+    if to <= from {
+        return;
+    }
+    // `collect_inline` over the sub-slice ending at `to`, with an end predicate
+    // that never fires, walks exactly `[from, to)`.
+    let (runs, _end) = collect_inline(&events[..to], from, |_| false);
+    if runs
+        .iter()
+        .all(|r| r.text.trim().is_empty() && r.link.is_none())
+    {
+        return;
+    }
+    emit_inline_block(tree, parent, runs, None, false, nav);
+}
+
+/// Collect an image's alt text — the `Text` / `Code` events between
+/// `Start(Image)` and its `End(Image)` — and return it with the index of the
+/// closing `TagEnd::Image`.
+fn collect_image_alt(events: &[Event], start: usize) -> (String, usize) {
+    let mut alt = String::new();
+    let mut i = start;
+    while i < events.len() {
+        match &events[i] {
+            Event::End(TagEnd::Image) => return (alt, i),
+            Event::Text(t) | Event::Code(t) => alt.push_str(t),
+            _ => {}
+        }
+        i += 1;
+    }
+    (alt, i)
+}
+
+/// Emit one embedded-image block. A `knot-img:<id>` reference is decrypted via
+/// `nav` and drawn; a missing attachment (or no live `nav`, e.g. in tests)
+/// shows an "unavailable" placeholder. Any other src is treated as an
+/// *external* image — never fetched or read from disk — and shows an inert
+/// labeled placeholder, the image analog of the link allowlist.
+fn emit_image_block(
+    tree: &mut WidgetTree,
+    parent: usize,
+    dest: &str,
+    alt: &str,
+    nav: Option<&WikiNav>,
+) {
+    if let Some(id) = state::parse_attachment_ref(dest) {
+        if let Some(img) = nav.and_then(|n| n.resolve_image(id)) {
+            // Scale down to the width cap (aspect ratio preserved); a smaller
+            // image keeps its natural size.
+            let display_w = (img.width() as f32).min(MAX_PREVIEW_IMAGE_WIDTH);
+            tree.add_child(parent, Image::from_decoded(img).width(display_w));
+        } else {
+            tree.add_child(
+                parent,
+                TextWidget::new("[image unavailable]").color(muted_color()),
+            );
+        }
+        return;
+    }
+    // External / unknown src: surface the alt (or raw src) so the reader knows
+    // an image was intended, but never touch the network or disk.
+    let label = if alt.trim().is_empty() { dest } else { alt };
+    tree.add_child(
+        parent,
+        TextWidget::new(format!("[external image: {label}]")).color(muted_color()),
+    );
 }
 
 /// Emit one paragraph- or heading-shaped block from `runs`.
@@ -1326,6 +1486,49 @@ fn main() {}
         // End-to-end through the renderer (nav: None — inert click): a body that
         // is just a wikilink must still produce a real, positive-height block.
         assert!(rendered_height("Jump to [[Some Note]] now.").size_is_positive());
+    }
+
+    // ── Embedded images ─────────────────────────────────────────────────────
+
+    #[test]
+    fn standalone_attachment_image_is_one_block() {
+        // `![alt](knot-img:1)` alone in a paragraph renders exactly one block.
+        // With no live nav the attachment can't resolve, so it's the
+        // "unavailable" placeholder — and crucially NOT the alt text leaked as
+        // a stray paragraph (alt is consumed by `collect_image_alt`).
+        let (tree, col) = build("![my picture](knot-img:1)");
+        let blocks = tree.children(col);
+        assert_eq!(blocks.len(), 1, "a standalone image is one block");
+    }
+
+    #[test]
+    fn mixed_text_and_image_paragraph_splits_into_stacked_blocks() {
+        // "before ![x](knot-img:1) after" degrades to three stacked blocks:
+        // text, image, text (no inline-image-in-a-run primitive).
+        let (tree, col) = build("before ![x](knot-img:1) after");
+        let blocks = tree.children(col);
+        assert_eq!(blocks.len(), 3, "text / image / text");
+    }
+
+    #[test]
+    fn images_lay_out_and_external_sources_stay_inert() {
+        // An internal ref (unresolvable here), an http URL, and a file path all
+        // produce a real block without panicking — and the external ones go the
+        // inert-placeholder path: the renderer never fetches or reads them.
+        assert!(rendered_height("![a](knot-img:1)").size_is_positive());
+        assert!(rendered_height("![a](https://example.com/a.png)").size_is_positive());
+        assert!(rendered_height("![a](file:///etc/passwd)").size_is_positive());
+        assert!(rendered_height("![a](data:image/png;base64,AAAA)").size_is_positive());
+    }
+
+    #[test]
+    fn external_image_routes_away_from_the_attachment_path() {
+        // The gate is in `parse_attachment_ref`: only `knot-img:` is treated as
+        // an attachment; every external scheme returns None and so renders as an
+        // inert placeholder rather than reaching `resolve_image`.
+        assert_eq!(crate::state::parse_attachment_ref("knot-img:5"), Some(5));
+        assert!(crate::state::parse_attachment_ref("https://example.com/a.png").is_none());
+        assert!(crate::state::parse_attachment_ref("file:///etc/passwd").is_none());
     }
 
     // Tiny readability shim so the empty-source asserts read intention-first.

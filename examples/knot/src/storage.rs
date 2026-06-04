@@ -6,6 +6,12 @@
 //! The belt-and-suspenders setup means a future flaw in either layer
 //! doesn't immediately leak note plaintext.
 //!
+//! The DB carries two tables: `notes` and `attachments`. An attachment is
+//! an embedded preview image, sealed under the same DEK and referenced from
+//! a note body via the `knot-img:<id>` markdown scheme — so image bytes get
+//! the same at-rest protection as the note text, while the body stays small
+//! and editable in plain text.
+//!
 //! Layout on disk (under [`shroud::platform::storage::config_dir`]):
 //!
 //! ```text
@@ -32,7 +38,7 @@ use rusqlite::{Connection, params};
 use zeroize::Zeroize;
 
 use crate::crypto::{MasterKey, NONCE_SIZE, SALT_SIZE};
-use crate::state::{EncryptedNote, NoteId};
+use crate::state::{AttachmentId, EncryptedAttachment, EncryptedNote, NoteId};
 
 const APP_NAME: &str = "knot";
 const DB_FILENAME: &str = "vault.db";
@@ -255,6 +261,11 @@ impl VaultStorage {
                 nonce BLOB NOT NULL,
                 ciphertext BLOB NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS attachments (
+                id INTEGER PRIMARY KEY,
+                nonce BLOB NOT NULL,
+                ciphertext BLOB NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -324,6 +335,100 @@ impl VaultStorage {
         self.conn
             .execute("DELETE FROM notes WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    // ── Attachments ─────────────────────────────────────────────────────
+    //
+    // Embedded preview images live in their own table, sealed under the same
+    // DEK as notes (so they ride the same XChaCha + SQLCipher double layer).
+    // A note body references one by id via the `knot-img:<id>` markdown
+    // scheme; the body itself stays small and editable in plain text.
+
+    /// Insert a new encrypted attachment blob and return its freshly
+    /// allocated id (highest existing + 1, picked inside the same
+    /// transaction as the insert so an id is never handed out twice for
+    /// concurrent inserts).
+    ///
+    /// Deleting the current highest-id attachment frees that id for the next
+    /// insert to reuse. That's safe: attachments are only ever deleted by the
+    /// orphan sweep ([`crate::state::AppState::prune_orphan_attachments`]),
+    /// which removes an id precisely *because* no note body references it — so
+    /// a reused id can never collide with a still-live `knot-img:<id>`.
+    pub fn insert_attachment(
+        &mut self,
+        nonce: &[u8; NONCE_SIZE],
+        ciphertext: &[u8],
+    ) -> Result<AttachmentId, StorageError> {
+        let tx = self.conn.transaction()?;
+        let next: AttachmentId = {
+            let max: i64 =
+                tx.query_row("SELECT COALESCE(MAX(id), 0) FROM attachments", [], |r| {
+                    r.get(0)
+                })?;
+            AttachmentId::try_from(max + 1)
+                .map_err(|_| StorageError::Corrupt("attachment id space exhausted".into()))?
+        };
+        tx.execute(
+            "INSERT INTO attachments (id, nonce, ciphertext) VALUES (?1, ?2, ?3)",
+            params![next, &nonce[..], ciphertext],
+        )?;
+        tx.commit()?;
+        Ok(next)
+    }
+
+    /// Load one attachment's `nonce || ciphertext` by id, or `None` if no
+    /// such row exists (a dangling reference — the caller shows a
+    /// placeholder rather than erroring).
+    pub fn load_attachment(
+        &self,
+        id: AttachmentId,
+    ) -> Result<Option<EncryptedAttachment>, StorageError> {
+        let row = self.conn.query_row(
+            "SELECT nonce, ciphertext FROM attachments WHERE id = ?1",
+            params![id],
+            |r| {
+                let nonce: Vec<u8> = r.get(0)?;
+                let ciphertext: Vec<u8> = r.get(1)?;
+                Ok((nonce, ciphertext))
+            },
+        );
+        match row {
+            Ok((nonce_blob, ciphertext)) => {
+                if nonce_blob.len() != NONCE_SIZE {
+                    return Err(StorageError::Corrupt(format!(
+                        "attachment id {} has nonce length {} (expected {})",
+                        id,
+                        nonce_blob.len(),
+                        NONCE_SIZE
+                    )));
+                }
+                let mut nonce = [0u8; NONCE_SIZE];
+                nonce.copy_from_slice(&nonce_blob);
+                Ok(Some(EncryptedAttachment { nonce, ciphertext }))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StorageError::Sqlite(e)),
+        }
+    }
+
+    pub fn delete_attachment(&mut self, id: AttachmentId) -> Result<(), StorageError> {
+        self.conn
+            .execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Every stored attachment id, ascending. Feeds the orphan sweep, which
+    /// deletes any id no live note body still references.
+    pub fn all_attachment_ids(&self) -> Result<Vec<AttachmentId>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM attachments ORDER BY id")?;
+        let rows = stmt.query_map([], |r| r.get::<_, AttachmentId>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 }
 
@@ -465,6 +570,68 @@ mod tests {
         let loaded = store.load_notes().expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn attachments_round_trip() {
+        // Insert -> load -> delete for an attachment blob, plus the "no such
+        // row" read path. Attachments store opaque bytes (the sealed image),
+        // so this test doesn't need real image data.
+        let path = tmp_db_path();
+        let (key, _) = make_key("attach-rt");
+        let mut store = VaultStorage::open(&path, &key).expect("open");
+
+        let nonce = [7u8; NONCE_SIZE];
+        let id = store
+            .insert_attachment(&nonce, b"sealed-image-bytes")
+            .expect("insert");
+        assert_eq!(id, 1, "the first attachment gets id 1");
+
+        let loaded = store
+            .load_attachment(id)
+            .expect("load ok")
+            .expect("present");
+        assert_eq!(loaded.nonce, nonce);
+        assert_eq!(loaded.ciphertext, b"sealed-image-bytes");
+
+        // A missing id reads back as None, not an error (dangling reference).
+        assert!(store.load_attachment(999).expect("load ok").is_none());
+
+        store.delete_attachment(id).expect("delete");
+        assert!(store.load_attachment(id).expect("load ok").is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn attachment_ids_increment_then_reuse_only_the_freed_top() {
+        // Ids climb as MAX+1. Deleting a non-top id leaves a permanent gap;
+        // deleting the *top* id frees it for the next insert to reuse (safe,
+        // since only orphans are ever deleted — see `insert_attachment`).
+        let path = tmp_db_path();
+        let (key, _) = make_key("attach-ids");
+        let mut store = VaultStorage::open(&path, &key).expect("open");
+        let n = [0u8; NONCE_SIZE];
+
+        let a = store.insert_attachment(&n, b"a").unwrap();
+        let b = store.insert_attachment(&n, b"b").unwrap();
+        let c = store.insert_attachment(&n, b"c").unwrap();
+        assert_eq!((a, b, c), (1, 2, 3));
+        assert_eq!(store.all_attachment_ids().unwrap(), vec![1, 2, 3]);
+
+        // Delete the middle id -> a gap that is never backfilled.
+        store.delete_attachment(b).unwrap();
+        let d = store.insert_attachment(&n, b"d").unwrap();
+        assert_eq!(d, 4, "MAX+1 skips the freed middle id");
+        assert_eq!(store.all_attachment_ids().unwrap(), vec![1, 3, 4]);
+
+        // Delete the current top (4) -> the next insert reuses 4.
+        store.delete_attachment(d).unwrap();
+        let e = store.insert_attachment(&n, b"e").unwrap();
+        assert_eq!(e, 4, "deleting the top id frees it for reuse");
+        assert_eq!(store.all_attachment_ids().unwrap(), vec![1, 3, 4]);
 
         let _ = std::fs::remove_file(&path);
     }

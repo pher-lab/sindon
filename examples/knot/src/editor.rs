@@ -9,9 +9,10 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use shroud::platform::FileDialog;
 use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, Input, ScrollView, TextWidget};
+use shroud::widgets::{Button, Container, Image, Input, ScrollView, TextWidget};
 
 use crate::lock_screen;
 use crate::preview;
@@ -102,6 +103,59 @@ pub fn build(
 
     // Spacer pushes the trailing buttons to the far right.
     tree.add_child(header, Container::row().grow(1.0));
+
+    // Insert-image button. Picks a PNG/JPEG, stores it as an encrypted
+    // attachment, and appends a `![image](knot-img:<id>)` reference to the
+    // body. Shown only while editing a selected note (not in preview), since
+    // it edits the raw markdown. The bytes are decrypted again only when the
+    // preview renders the reference (see `preview::emit_image_block`).
+    let img_btn_state = Rc::clone(&state);
+    let img_vis_state = Rc::clone(&state);
+    tree.add_child(
+        header,
+        Button::new("Image")
+            .radius(8.0)
+            .visible(Reactive::derive(move || {
+                note_selected(&img_vis_state) && !preview_sig.get()
+            }))
+            .on_click(move |_ctx| {
+                let Some(path) = FileDialog::new()
+                    .title("Insert image")
+                    .filter("Images", &["png", "jpg", "jpeg"])
+                    .open_file()
+                else {
+                    return;
+                };
+                let bytes = match std::fs::read(&path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("knot: could not read image file: {e}");
+                        return;
+                    }
+                };
+                // Reject anything that doesn't decode *before* storing it, so a
+                // bad file never becomes a dead `knot-img:` reference.
+                if Image::from_bytes(&bytes).is_err() {
+                    eprintln!("knot: unsupported image (only PNG/JPEG)");
+                    return;
+                }
+                let Some(id) = img_btn_state.borrow_mut().add_attachment(&bytes) else {
+                    eprintln!("knot: could not store attachment");
+                    return;
+                };
+                // Append the reference on its own line, keeping the bound
+                // signal and the note body in lockstep. The body input rebases
+                // from the signal on the next paint (the button click moved
+                // focus off the input), so the new line shows immediately.
+                let mut body = body_sig.get_clone();
+                if !body.is_empty() && !body.ends_with('\n') {
+                    body.push('\n');
+                }
+                body.push_str(&format!("![image]({}{})\n", crate::state::IMG_SCHEME, id));
+                body_sig.set(body.clone());
+                write_selected(&img_btn_state, move |note| note.body = body);
+            }),
+    );
 
     // Preview / Edit toggle. The content column it rebuilds is created below
     // (inside `preview_area`); its index is stashed in this cell because this

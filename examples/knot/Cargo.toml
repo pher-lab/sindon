@@ -39,3 +39,7 @@ rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"]
 # Settings round-trip tests serialize directly; the app itself only needs
 # serde (the storage helper owns serde_json).
 serde_json = { workspace = true }
+# Attachment tests generate a tiny in-memory PNG to exercise the
+# seal -> store -> decrypt -> decode round-trip (the app decodes via
+# `shroud::widgets::Image`, but tests need to *produce* valid image bytes).
+image = { workspace = true }

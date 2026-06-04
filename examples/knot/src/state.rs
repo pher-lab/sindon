@@ -8,18 +8,35 @@
 //! go in one move, which is what makes "lock" actually release plaintext /
 //! re-seal the on-disk DB.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use shroud::render::DecodedImage;
+use zeroize::Zeroizing;
 
 use crate::crypto::{KEY_SIZE, MasterKey, NONCE_SIZE, SALT_SIZE, open, seal};
 use crate::storage::{StorageError, VaultStorage};
 
 pub type NoteId = u32;
 
+/// Id of an embedded preview-image attachment. Allocated by the storage
+/// layer (highest existing + 1) and embedded in a note body as
+/// `![alt](knot-img:<id>)`. Distinct id space from [`NoteId`].
+pub type AttachmentId = u32;
+
 /// On-disk shape of a single note row. The ciphertext already contains
 /// the XChaCha20-Poly1305 auth tag; the SQLCipher layer adds page-level
 /// encryption *on top* of this when these bytes are stored.
 pub struct EncryptedNote {
     pub id: NoteId,
+    pub nonce: [u8; NONCE_SIZE],
+    pub ciphertext: Vec<u8>,
+}
+
+/// On-disk shape of one attachment blob (`nonce || ciphertext`). The id is
+/// carried by the caller, not the struct, since the only reader
+/// ([`AppState::resolve_attachment`]) already knows which id it asked for.
+pub struct EncryptedAttachment {
     pub nonce: [u8; NONCE_SIZE],
     pub ciphertext: Vec<u8>,
 }
@@ -82,6 +99,13 @@ pub enum Phase {
         /// empty = show all). Pure session UI state that lives and dies with
         /// the unlocked vault, exactly like `selected`; it is never persisted.
         filter_tags: Vec<String>,
+        /// Decoded preview images, keyed by attachment id. Populated lazily by
+        /// [`AppState::resolve_attachment`] the first time a `knot-img:<id>`
+        /// reference is rendered, so only images actually viewed this session
+        /// get decrypted into memory. Dropped wholesale on lock with the rest
+        /// of `Unlocked` — the decoded pixels (which the framework cannot yet
+        /// zeroize) don't outlive the vault session.
+        image_cache: HashMap<AttachmentId, Arc<DecodedImage>>,
     },
 }
 
@@ -132,6 +156,7 @@ impl AppState {
             storage,
             dirty: HashSet::new(),
             filter_tags: Vec::new(),
+            image_cache: HashMap::new(),
         };
     }
 
@@ -366,6 +391,81 @@ impl AppState {
         }
     }
 
+    // ── Attachments (embedded preview images) ───────────────────────────
+
+    /// Seal `bytes` under the DEK and store them as a new attachment,
+    /// returning the allocated id to embed in a note body as
+    /// `![alt](knot-img:<id>)`. Returns `None` when locked, when the input
+    /// is empty, when it exceeds [`MAX_ATTACHMENT_BYTES`], or when the write
+    /// fails — the caller (the editor's image button) simply doesn't insert
+    /// a reference in any of those cases. Caller is expected to have already
+    /// validated the bytes decode as an image.
+    pub fn add_attachment(&mut self, bytes: &[u8]) -> Option<AttachmentId> {
+        if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
+            return None;
+        }
+        let Phase::Unlocked { dek, storage, .. } = &mut self.phase else {
+            return None;
+        };
+        let (nonce, ciphertext) = seal(dek, bytes);
+        storage.insert_attachment(&nonce, &ciphertext).ok()
+    }
+
+    /// Resolve an attachment id to its decoded pixels, decrypting on first
+    /// use and caching the result for the rest of the session. Returns
+    /// `None` when locked, when no such attachment exists (a dangling
+    /// reference), when decryption fails (tampered DB), or when the bytes
+    /// don't decode as a supported image. The intermediate plaintext is
+    /// zeroized after decoding — only the `DecodedImage`'s own pixel copy
+    /// remains resident.
+    pub fn resolve_attachment(&mut self, id: AttachmentId) -> Option<Arc<DecodedImage>> {
+        let Phase::Unlocked {
+            dek,
+            storage,
+            image_cache,
+            ..
+        } = &mut self.phase
+        else {
+            return None;
+        };
+        if let Some(img) = image_cache.get(&id) {
+            return Some(Arc::clone(img));
+        }
+        let enc = storage.load_attachment(id).ok()??;
+        let plaintext = Zeroizing::new(open(dek, &enc.nonce, &enc.ciphertext)?);
+        let decoded = DecodedImage::from_bytes(&plaintext).ok()?;
+        image_cache.insert(id, Arc::clone(&decoded));
+        Some(decoded)
+    }
+
+    /// Delete every stored attachment no live note body still references.
+    /// Run at lock time (after the final note rewrite) so deleting a note or
+    /// editing out an `![](knot-img:<id>)` reference eventually reclaims the
+    /// orphaned ciphertext rather than leaving it as dead weight in the DB.
+    /// No-op when locked.
+    pub fn prune_orphan_attachments(&mut self) -> Result<(), StorageError> {
+        let Phase::Unlocked {
+            notes,
+            storage,
+            image_cache,
+            ..
+        } = &mut self.phase
+        else {
+            return Ok(());
+        };
+        let mut referenced: HashSet<AttachmentId> = HashSet::new();
+        for note in notes.iter() {
+            extract_attachment_refs(&note.body, &mut referenced);
+        }
+        for id in storage.all_attachment_ids()? {
+            if !referenced.contains(&id) {
+                storage.delete_attachment(id)?;
+                image_cache.remove(&id);
+            }
+        }
+        Ok(())
+    }
+
     /// Persist every dirty note via `storage.save_note`. Clears the
     /// dirty set on success; on the first error, the offending id is
     /// preserved (along with every later one) so the next tick retries.
@@ -495,8 +595,14 @@ impl AppState {
                 e
             );
         }
+        // Reclaim any attachment no note still references. Best-effort: a
+        // failure just leaves (still-encrypted) dead ciphertext to be swept
+        // next lock, so it must not block the lock either.
+        if let Err(e) = self.prune_orphan_attachments() {
+            eprintln!("knot: failed to prune orphan attachments on lock: {}", e);
+        }
         // Replace the variant; key, storage (closing conn), notes,
-        // dirty all drop here.
+        // dirty, image cache all drop here.
         self.phase = Phase::Locked { error: None };
     }
 }
@@ -536,6 +642,43 @@ pub fn normalize_tag(raw: &str) -> String {
 /// membership test. Flip the `all` to `any` here for OR/union semantics.
 pub fn note_matches_filter(tags: &[String], filter: &[String]) -> bool {
     filter.iter().all(|f| tags.iter().any(|t| t == f))
+}
+
+/// Upper bound on a single stored attachment. Guards the DB and memory
+/// against a pathological multi-hundred-MB blob; ordinary screenshots and
+/// photos sit comfortably under this.
+const MAX_ATTACHMENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Internal markdown URL scheme marking an embedded attachment reference:
+/// `![alt](knot-img:<id>)`. The preview resolves it against the encrypted
+/// attachment store; every other src (http/https/file/data/…) is treated as
+/// an inert external image and never fetched or read.
+pub const IMG_SCHEME: &str = "knot-img:";
+
+/// Parse a `knot-img:<id>` reference into its attachment id. Returns `None`
+/// for any other src, which routes external/unknown images to the inert path.
+pub fn parse_attachment_ref(dest: &str) -> Option<AttachmentId> {
+    dest.strip_prefix(IMG_SCHEME)?.parse::<AttachmentId>().ok()
+}
+
+/// Collect every attachment id `body` references into `out`. Used by the
+/// orphan sweep to learn which stored attachments are still live. Scans for
+/// the `knot-img:` scheme followed by ASCII digits, so it matches the ids
+/// inside `![alt](knot-img:<id>)` without a full markdown parse.
+pub fn extract_attachment_refs(body: &str, out: &mut HashSet<AttachmentId>) {
+    let mut rest = body;
+    while let Some(pos) = rest.find(IMG_SCHEME) {
+        // Advance past the scheme we just found before scanning digits, so
+        // the same occurrence can never be re-matched (no infinite loop).
+        let after = &rest[pos + IMG_SCHEME.len()..];
+        let digit_len = after
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after.len());
+        if let Ok(id) = after[..digit_len].parse::<AttachmentId>() {
+            out.insert(id);
+        }
+        rest = &after[digit_len..];
+    }
 }
 
 /// First byte of a v1 payload. The legacy format begins with the
@@ -754,6 +897,7 @@ mod tests {
                 storage: open_tmp_storage(),
                 dirty: HashSet::new(),
                 filter_tags: Vec::new(),
+                image_cache: HashMap::new(),
             },
         }
     }
@@ -783,6 +927,7 @@ mod tests {
                 storage: open_tmp_storage(),
                 dirty: HashSet::new(),
                 filter_tags: Vec::new(),
+                image_cache: HashMap::new(),
             },
         }
     }
@@ -898,5 +1043,119 @@ mod tests {
         s.prune_filter();
         assert!(!s.is_filter_active("work"));
         assert!(!s.is_filtering());
+    }
+
+    // ── Attachments ─────────────────────────────────────────────────────
+
+    /// A minimal valid 2x2 PNG, generated in memory. Tests need to *produce*
+    /// real image bytes (the app only *consumes* them via `Image::from_bytes`).
+    fn tiny_png() -> Vec<u8> {
+        let mut img = image::RgbaImage::new(2, 2);
+        for px in img.pixels_mut() {
+            *px = image::Rgba([10, 20, 30, 255]);
+        }
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .expect("encode png");
+        out
+    }
+
+    #[test]
+    fn parse_attachment_ref_only_matches_the_internal_scheme() {
+        assert_eq!(parse_attachment_ref("knot-img:7"), Some(7));
+        assert_eq!(parse_attachment_ref("knot-img:0"), Some(0));
+        // Scheme present but no / non-numeric id.
+        assert_eq!(parse_attachment_ref("knot-img:"), None);
+        assert_eq!(parse_attachment_ref("knot-img:abc"), None);
+        // External / unknown srcs never resolve as attachments.
+        assert_eq!(parse_attachment_ref("https://example.com/a.png"), None);
+        assert_eq!(parse_attachment_ref("file:///x.png"), None);
+        assert_eq!(parse_attachment_ref("data:image/png;base64,AAAA"), None);
+    }
+
+    #[test]
+    fn extract_attachment_refs_collects_every_embedded_id() {
+        let body = "intro\n![a](knot-img:1)\nmid ![b](knot-img:42), ![c](https://x/y.png)\n![d](knot-img:1)";
+        let mut out = HashSet::new();
+        extract_attachment_refs(body, &mut out);
+        // ids 1 and 42 (1 appears twice -> deduped); the external image
+        // contributes nothing.
+        let mut got: Vec<AttachmentId> = out.into_iter().collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![1, 42]);
+    }
+
+    #[test]
+    fn extract_attachment_refs_ignores_scheme_without_digits() {
+        let mut out = HashSet::new();
+        extract_attachment_refs("knot-img: then knot-img:x then knot-img:9z", &mut out);
+        // Only "knot-img:9z" yields a number (9); bare/alpha forms don't, and
+        // the scan never spins on a non-numeric occurrence.
+        let got: Vec<AttachmentId> = out.into_iter().collect();
+        assert_eq!(got, vec![9]);
+    }
+
+    #[test]
+    fn add_attachment_then_resolve_round_trips_through_encryption() {
+        let mut s = unlocked_state_with_one_note();
+        let png = tiny_png();
+        let id = s.add_attachment(&png).expect("store attachment");
+
+        // Resolving decrypts + decodes back to the 2x2 image.
+        let img = s.resolve_attachment(id).expect("resolve");
+        assert_eq!((img.width(), img.height()), (2, 2));
+
+        // A second resolve hits the cache — same Arc, no re-decrypt.
+        let again = s.resolve_attachment(id).expect("cached resolve");
+        assert!(
+            Arc::ptr_eq(&img, &again),
+            "the second resolve must return the cached Arc"
+        );
+    }
+
+    #[test]
+    fn add_attachment_rejects_empty_and_oversized() {
+        let mut s = unlocked_state_with_one_note();
+        assert!(s.add_attachment(&[]).is_none(), "empty input is rejected");
+        let huge = vec![0u8; MAX_ATTACHMENT_BYTES + 1];
+        assert!(
+            s.add_attachment(&huge).is_none(),
+            "input past the size cap is rejected"
+        );
+    }
+
+    #[test]
+    fn resolve_missing_or_undecodable_attachment_is_none() {
+        let mut s = unlocked_state_with_one_note();
+        // No such id.
+        assert!(s.resolve_attachment(999).is_none());
+        // Stored bytes that aren't a valid image decode to None — the editor
+        // validates before storing, but resolve must stay defensive.
+        let id = s.add_attachment(b"not actually an image").expect("store");
+        assert!(s.resolve_attachment(id).is_none());
+    }
+
+    #[test]
+    fn prune_deletes_only_unreferenced_attachments() {
+        let mut s = unlocked_state_with_one_note();
+        let png = tiny_png();
+        let keep = s.add_attachment(&png).expect("store keep");
+        let _orphan = s.add_attachment(&png).expect("store orphan");
+
+        // Reference only `keep` from the single note body.
+        if let Phase::Unlocked { notes, .. } = &mut s.phase {
+            notes[0].body = format!("![image](knot-img:{keep})");
+        }
+        s.prune_orphan_attachments().expect("prune");
+
+        if let Phase::Unlocked { storage, .. } = &s.phase {
+            assert_eq!(
+                storage.all_attachment_ids().expect("ids"),
+                vec![keep],
+                "only the referenced attachment survives the sweep"
+            );
+        } else {
+            panic!("expected Unlocked");
+        }
     }
 }
