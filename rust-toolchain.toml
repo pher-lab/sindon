@@ -1,0 +1,10 @@
+# Pin the toolchain so local builds match CI exactly. The divergence that
+# motivated this: local `stable` lagged at 1.93 while CI's `@stable` pulled
+# 1.96, so newer clippy/rustdoc lints failed only in CI. Bump this in lockstep
+# when intentionally moving to a newer stable.
+#
+# Keep in sync with the moxcms `=0.8.0` pin in the workspace Cargo.toml: 0.8.1
+# ICEs on some stable toolchains, so verify a build before bumping either pin.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
