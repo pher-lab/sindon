@@ -12,6 +12,16 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Debug info in the wgpu/winit/image static-link graph dominates target/
+  # size. `cargo build --workspace --all-targets` links 18 example binaries
+  # plus every crate's test binary, each statically pulling in that graph, and
+  # the combined debuginfo exhausted the runner's disk/memory -- rust-lld then
+  # died with "ld terminated with signal 7 [Bus error]" mid-link (the failing
+  # target moved around between runs, proving it was footprint, not code).
+  # Dropping debuginfo for CI shrinks each binary enough to keep headroom.
+  # Local builds are unaffected (this only applies inside the workflow).
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 # The Rust toolchain version (and its clippy/rustfmt components) is the single
 # source of truth in rust-toolchain.toml. `rustup show` reads that file and
@@ -66,6 +76,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # `--all-targets` is the heaviest job (all examples + all test binaries).
+      # Reclaim ~20GB of preinstalled toolchains we never use so the debug
+      # target/ tree has room, as extra insurance on top of the debuginfo cut.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       - run: rustup show
       - name: Install system deps
         run: |
