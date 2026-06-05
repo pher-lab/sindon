@@ -266,6 +266,7 @@ struct AppConfig {
     disable_core_dumps: bool,
     ptrace_protection: bool,
     exploit_mitigation: bool,
+    image_load_hardening: bool,
     capture_prevention: bool,
     /// Theme source. `Reactive::Static(t)` for the historical
     /// `App::theme(Theme::dark())` shape; `Reactive::Dynamic(...)`
@@ -292,6 +293,11 @@ impl Default for AppConfig {
             // explicitly via `App::exploit_mitigation(true)` after deciding
             // they don't need IME (numeric kiosks, English-only flows).
             exploit_mitigation: false,
+            // On by default: unlike the extension-point policy above, the
+            // `ProcessImageLoadPolicy` hardening only constrains where DLLs
+            // load from (no remote / no low-IL / prefer System32) and leaves
+            // the IME path untouched, so it is safe to apply in every app.
+            image_load_hardening: true,
             capture_prevention: false,
             theme: Reactive::Static(Theme::default()),
             tick_interval: DEFAULT_TICK_INTERVAL,
@@ -413,11 +419,31 @@ impl App {
     /// Korean typing in every shroud app. Opt in explicitly for flows that
     /// don't accept text input (numeric kiosks, English-only utilities)
     /// where the added defence-in-depth against legacy DLL injection is
-    /// worth losing IME support. A more granular replacement
-    /// (`ProcessImageLoadPolicy` restricted to System32 / signed images,
-    /// say) is a future-phase candidate.
+    /// worth losing IME support. For the IME-safe subset of DLL-injection
+    /// hardening that *is* on by default, see
+    /// [`Self::image_load_hardening`].
     pub fn exploit_mitigation(mut self, on: bool) -> Self {
         self.config.exploit_mitigation = on;
+        self
+    }
+
+    /// Control the always-on, IME-safe DLL image-load hardening.
+    ///
+    /// - Windows: `SetProcessMitigationPolicy` with `ProcessImageLoadPolicy`
+    ///   — rejects DLLs loaded from remote shares (`NoRemoteImages`) or with
+    ///   a low integrity label (`NoLowMandatoryLabelImages`), and searches
+    ///   System32 ahead of the application directory (`PreferSystem32Images`,
+    ///   blunting DLL search-order hijacking). Unlike
+    ///   [`Self::exploit_mitigation`] it does **not** touch the
+    ///   extension-point / IME path, so it stays on even for apps that take
+    ///   CJK text input.
+    /// - Linux / macOS: no-op.
+    ///
+    /// Defaults to `true`. Flip to `false` only if the app deliberately
+    /// loads DLLs from a layout the restricted loader search order would
+    /// reject.
+    pub fn image_load_hardening(mut self, on: bool) -> Self {
+        self.config.image_load_hardening = on;
         self
     }
 
@@ -457,6 +483,11 @@ impl App {
         if self.config.exploit_mitigation {
             if let Err(e) = hardening::enable_exploit_mitigation() {
                 log::warn!("Failed to enable exploit mitigation: {}", e);
+            }
+        }
+        if self.config.image_load_hardening {
+            if let Err(e) = hardening::enable_image_load_hardening() {
+                log::warn!("Failed to enable image-load hardening: {}", e);
             }
         }
 

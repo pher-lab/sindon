@@ -50,15 +50,36 @@ break, that is a bug.
 - Size classes: 64 / 256 / 1024 / 4096 bytes. Larger allocations
   fail with `ArenaError::AllocationTooLarge`.
 
-### Process-level hardening (default on)
+### Process-level hardening
+
+Applied automatically by the `App` builder at startup. The core-dump,
+ptrace, and DLL image-load defences are **default on** (opt-out is
+explicit); the extension-point policy is **opt-in** because it breaks CJK
+IME — see below.
+
+**Default on:**
 
 - Linux: `prctl(PR_SET_DUMPABLE, 0)` disables core dumps and ptrace
   attach.
-- macOS: `PT_DENY_ATTACH` denies ptrace.
-- Windows: ACG / dynamic-code-prohibition / extension-point-disable
-  exploit mitigations applied at startup.
+- macOS: `setrlimit(RLIMIT_CORE, 0)` disables core dumps; `PT_DENY_ATTACH`
+  denies ptrace.
+- Windows: core-dump suppression (`SetErrorMode`), plus IME-safe DLL
+  image-load hardening — `SetProcessMitigationPolicy(ProcessImageLoadPolicy)`
+  with `NoRemoteImages` + `NoLowMandatoryLabelImages` +
+  `PreferSystem32Images`. This rejects DLLs loaded from remote shares or
+  with a low integrity label and prefers System32 in the loader search
+  order (blunting DLL search-order hijacking). It leaves the extension-point
+  / IME path untouched, so CJK input still works.
 
-All applied automatically by the `App` builder; opt-out is explicit.
+**Opt-in** (`App::exploit_mitigation(true)`):
+
+- Windows: `SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy)`
+  blocks legacy extension-point injection (AppInit DLLs, global Windows
+  hooks, IMM-based IMEs). Because it disables the same extension-DLL path
+  that CJK IMEs load through, it is **off by default** — enable it only for
+  flows that don't accept CJK text input (numeric kiosks, English-only
+  utilities).
+- Linux / macOS: no-op today; reserved for future seccomp / sandbox hooks.
 
 ### Display-capture prevention (Windows)
 

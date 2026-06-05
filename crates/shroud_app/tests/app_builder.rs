@@ -29,6 +29,7 @@ fn builder_methods_chain() {
         .disable_core_dumps(false)
         .ptrace_protection(false)
         .exploit_mitigation(false)
+        .image_load_hardening(false)
         .tick_interval(Duration::from_millis(100));
 }
 

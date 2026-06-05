@@ -12,7 +12,8 @@
 //! test threads calling them race each other harmlessly but unnecessarily.
 
 use shroud_security::hardening::{
-    disable_core_dumps, enable_exploit_mitigation, enable_ptrace_protection,
+    disable_core_dumps, enable_exploit_mitigation, enable_image_load_hardening,
+    enable_ptrace_protection,
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -25,4 +26,8 @@ fn hardening_hooks_return_ok_on_host() {
     disable_core_dumps().expect("disable_core_dumps failed on host");
     enable_ptrace_protection().expect("enable_ptrace_protection failed on host");
     enable_exploit_mitigation().expect("enable_exploit_mitigation failed on host");
+    // IME-safe DLL image-load policy. One-way like the others; applying it
+    // to the test process only constrains subsequent loads, which is benign
+    // for a local, system-IL test binary.
+    enable_image_load_hardening().expect("enable_image_load_hardening failed on host");
 }

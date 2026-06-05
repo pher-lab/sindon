@@ -32,10 +32,35 @@ pub fn enable_ptrace_protection() -> Result<(), HardeningError> {
 /// - Windows: `SetProcessMitigationPolicy` with
 ///   `ProcessExtensionPointDisablePolicy` — blocks legacy AppInit DLLs,
 ///   global IME hooks, and similar extension-point DLL injection vectors.
+///   **This also disables the extension-DLL path that CJK IMEs load
+///   through**, so it is opt-in rather than always-on — see
+///   [`enable_image_load_hardening`] for the IME-safe alternative.
 /// - Linux / macOS: no-op. Reserved for future seccomp / sandbox hooks;
 ///   kept in the public surface so apps can call it unconditionally.
 pub fn enable_exploit_mitigation() -> Result<(), HardeningError> {
     platform::enable_exploit_mitigation()
+}
+
+/// Apply IME-safe DLL image-load hardening.
+///
+/// Unlike [`enable_exploit_mitigation`] — which disables legacy extension
+/// points and, as a side effect, breaks the plumbing CJK IMEs rely on —
+/// this policy only constrains *where* DLLs may be loaded from. It never
+/// touches the extension-point / IME path, so it is safe to apply by
+/// default even for apps that accept Japanese / Chinese / Korean input.
+///
+/// - Windows: `SetProcessMitigationPolicy` with `ProcessImageLoadPolicy`,
+///   setting `NoRemoteImages` (reject DLLs from UNC / remote shares),
+///   `NoLowMandatoryLabelImages` (reject DLLs written by a low-integrity
+///   process), and `PreferSystem32Images` (search System32 ahead of the
+///   application directory, blunting DLL search-order hijacking). Takes
+///   effect for images mapped *after* this call, which is the injection
+///   window we care about — trusted DLLs already mapped at startup are
+///   unaffected.
+/// - Linux / macOS: no-op. Reserved for future loader-hardening hooks;
+///   kept in the public surface so apps can call it unconditionally.
+pub fn enable_image_load_hardening() -> Result<(), HardeningError> {
+    platform::enable_image_load_hardening()
 }
 
 /// Install a panic hook that attempts to zeroize sensitive memory before aborting.
@@ -96,6 +121,12 @@ mod platform {
         // No-op on Linux today. Reserved for future seccomp-bpf filters.
         Ok(())
     }
+
+    pub fn enable_image_load_hardening() -> Result<(), HardeningError> {
+        // No-op on Linux today. Loader hardening here would live in a
+        // future seccomp / namespace layer.
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -135,6 +166,12 @@ mod platform {
 
     pub fn enable_exploit_mitigation() -> Result<(), HardeningError> {
         // No-op on macOS today. Reserved for future sandbox_init hook.
+        Ok(())
+    }
+
+    pub fn enable_image_load_hardening() -> Result<(), HardeningError> {
+        // No-op on macOS today. Reserved for a future dyld-environment /
+        // library-validation hook.
         Ok(())
     }
 }
@@ -187,6 +224,35 @@ mod platform {
             ))
         })
     }
+
+    pub fn enable_image_load_hardening() -> Result<(), HardeningError> {
+        use windows::Win32::System::Threading::{
+            ProcessImageLoadPolicy, SetProcessMitigationPolicy,
+        };
+
+        // PROCESS_MITIGATION_IMAGE_LOAD_POLICY is a single DWORD bitfield:
+        //   bit 0 = NoRemoteImages
+        //   bit 1 = NoLowMandatoryLabelImages
+        //   bit 2 = PreferSystem32Images
+        // We set all three. As with the extension-point policy above we pass
+        // a raw u32 to dodge the anonymous-union bitfield binding, whose shape
+        // has shifted across `windows` crate versions.
+        let flags: u32 = 0b111;
+        let result = unsafe {
+            SetProcessMitigationPolicy(
+                ProcessImageLoadPolicy,
+                &flags as *const u32 as *const core::ffi::c_void,
+                std::mem::size_of::<u32>(),
+            )
+        };
+
+        result.map_err(|e| {
+            HardeningError::OsError(format!(
+                "SetProcessMitigationPolicy(ProcessImageLoadPolicy) failed: {}",
+                e
+            ))
+        })
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -202,6 +268,10 @@ mod platform {
     }
 
     pub fn enable_exploit_mitigation() -> Result<(), HardeningError> {
+        Err(HardeningError::Unsupported)
+    }
+
+    pub fn enable_image_load_hardening() -> Result<(), HardeningError> {
         Err(HardeningError::Unsupported)
     }
 }
