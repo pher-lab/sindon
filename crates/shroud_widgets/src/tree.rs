@@ -9,6 +9,7 @@ use crate::event::{
 use crate::focus::{FocusDirection, FocusManager};
 use crate::layer::{LayerAnchor, LayerEntry, LayerOptions, Placement};
 use crate::paint::PaintContext;
+use crate::reactive_children::ReactiveChildren;
 use crate::scroll_view::ScrollView;
 use crate::shortcut::ShortcutRouter;
 use crate::widget::{MeasureContext, Widget};
@@ -699,6 +700,7 @@ impl WidgetTree {
     /// anchor-derived offset cached for paint and event dispatch.
     pub fn compute_layout(&mut self, width: f32, height: f32) {
         self.viewport = (width, height);
+        self.sync_reactive_children();
         self.refresh_visibility_styles();
         if let Some(root) = self.root {
             let root_node = self
@@ -807,6 +809,7 @@ impl WidgetTree {
         theme: &Theme,
     ) {
         self.viewport = (width, height);
+        self.sync_reactive_children();
         self.refresh_visibility_styles();
 
         // Invalidate Taffy's measure cache. Taffy memoizes leaf measure
@@ -881,6 +884,77 @@ impl WidgetTree {
         self.sync_scroll_view_content_heights();
     }
 
+    /// Walk every live widget; for each [`ReactiveChildren`], compare its
+    /// current version token against the one its children were last built at,
+    /// and rebuild the subtree when they differ.
+    ///
+    /// Called at the *top* of both `compute_layout` and
+    /// `compute_layout_with_measure` so a rebuild's fresh children get Taffy
+    /// nodes and are measured/laid out in the same pass (the scroll auto-height
+    /// pass at the end then sees them). When nothing changed the cost is one
+    /// `version()` call (a cheap compare) per node.
+    ///
+    /// The rebuild mirrors the `TreeCommand::RebuildChildren` arm: tombstone
+    /// every current child of the node, then run the builder against the stable
+    /// parent index. Interior mutability on the widget (`RefCell`/`Cell`) lets
+    /// us take the builder out and update the version through the `&self` the
+    /// downcast yields, so it doesn't fight the `&mut self` that `remove` and
+    /// the builder need.
+    fn sync_reactive_children(&mut self) {
+        let candidates: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                let node = slot.as_ref()?;
+                let w: &dyn Widget = node.widget.as_ref();
+                (w as &dyn std::any::Any)
+                    .downcast_ref::<ReactiveChildren>()
+                    .map(|_| i)
+            })
+            .collect();
+
+        for idx in candidates {
+            // Decide + take the builder under a short borrow, then drop it
+            // before touching `&mut self`.
+            let builder = {
+                let Some(node) = self.node(idx) else { continue };
+                let w: &dyn Widget = node.widget.as_ref();
+                let Some(rc) = (w as &dyn std::any::Any).downcast_ref::<ReactiveChildren>() else {
+                    continue;
+                };
+                let v = rc.version();
+                if rc.last_version() == Some(v) {
+                    continue; // unchanged — nothing to rebuild
+                }
+                rc.set_last_version(v);
+                match rc.take_builder() {
+                    Some(b) => b,
+                    None => continue, // source-less node, or reentrant take
+                }
+            };
+
+            // Tombstone current children, then repopulate from the builder.
+            let children: Vec<usize> = self
+                .node(idx)
+                .map(|n| n.children.clone())
+                .unwrap_or_default();
+            for c in children {
+                self.remove(c);
+            }
+            let mut builder = builder;
+            builder(self, idx);
+
+            // Put the builder back for the next change.
+            if let Some(node) = self.node(idx) {
+                let w: &dyn Widget = node.widget.as_ref();
+                if let Some(rc) = (w as &dyn std::any::Any).downcast_ref::<ReactiveChildren>() {
+                    rc.restore_builder(builder);
+                }
+            }
+        }
+    }
+
     /// Walk every live widget; for each `ScrollView`, sum the relative
     /// bottoms of its visible direct children and write the result (plus the
     /// scroll view's bottom padding) back into its `auto_content_height`.
@@ -914,6 +988,7 @@ impl WidgetTree {
                 continue;
             };
             let children = node.children.clone();
+            let sv_layout_node = node.layout_node;
             let mut max_bottom: f32 = 0.0;
             for child in &children {
                 let Some(child_node) = self.node(*child) else {
@@ -928,6 +1003,10 @@ impl WidgetTree {
                     max_bottom = bottom;
                 }
             }
+            // Capture the viewport height before the mutable borrow below so we
+            // can re-clamp the scroll offset against the (just-updated) content
+            // extent in the same pass.
+            let viewport_h = self.layout.layout(sv_layout_node).size.height;
 
             let sv_node = self
                 .node_mut(sv_idx)
@@ -936,6 +1015,10 @@ impl WidgetTree {
             if let Some(sv) = widget_any.downcast_mut::<ScrollView>() {
                 let bottom_pad = sv.measured_bottom_padding();
                 sv.set_measured_content_height(max_bottom + bottom_pad);
+                // Content may have shrunk (e.g. switched to a shorter note); pull
+                // a now-too-large offset back so the top isn't scrolled out of
+                // view. Growing content leaves the offset alone.
+                sv.clamp_scroll(viewport_h);
             }
         }
     }

@@ -187,6 +187,20 @@ impl ScrollView {
     pub fn max_scroll_y(&self, viewport_height: f32) -> f32 {
         (self.effective_content_height() - viewport_height).max(0.0)
     }
+
+    /// Re-clamp the scroll offset to the current content/viewport. The tree
+    /// calls this after each layout pass (see
+    /// `WidgetTree::sync_scroll_view_content_heights`) so that when the content
+    /// shrinks — e.g. switching to a shorter note, or deleting text — a stale
+    /// offset doesn't leave the top scrolled out of view. The offset only ever
+    /// moves *down* to the new maximum (0 when nothing overflows); growing
+    /// content leaves it untouched, so an active scroll position is preserved.
+    pub(crate) fn clamp_scroll(&mut self, viewport_height: f32) {
+        let max = self.max_scroll_y(viewport_height);
+        if self.scroll_y > max {
+            self.scroll_y = max;
+        }
+    }
 }
 
 impl Default for ScrollView {

@@ -132,10 +132,11 @@ const WIKI_SCHEME: &str = "knot-wiki:";
 
 /// The preview's handle to live app state. It does double duty: it carries
 /// what a clicked wikilink needs to switch the active note (shared state plus
-/// the editor's bound signals), *and* it resolves `knot-img:<id>` references
-/// against the encrypted attachment store (see [`WikiNav::resolve_image`]).
-/// Cheap to clone (an `Rc` and three `Copy` signal handles), which matters
-/// because every link/image block captures its own clone.
+/// the editor's bound title/body signals), *and* it resolves `knot-img:<id>`
+/// references against the encrypted attachment store (see
+/// [`WikiNav::resolve_image`]). Cheap to clone (an `Rc` and two `Copy` signal
+/// handles), which matters because every link/image block captures its own
+/// clone.
 ///
 /// `None` is a valid "no live state" mode — the preview tests and any caller
 /// that doesn't wire routing render wikilinks as inert accent text and embedded
@@ -145,7 +146,6 @@ pub struct WikiNav {
     state: Rc<RefCell<AppState>>,
     title_sig: Signal<String>,
     body_sig: Signal<String>,
-    preview_sig: Signal<bool>,
 }
 
 impl WikiNav {
@@ -153,19 +153,19 @@ impl WikiNav {
         state: Rc<RefCell<AppState>>,
         title_sig: Signal<String>,
         body_sig: Signal<String>,
-        preview_sig: Signal<bool>,
     ) -> Self {
         Self {
             state,
             title_sig,
             body_sig,
-            preview_sig,
         }
     }
 
-    /// Select the note whose title matches `title` and return to the editor —
-    /// the same end state as clicking that note in the sidebar. A title with
-    /// no match is a no-op, so a dangling `[[wikilink]]` simply does nothing.
+    /// Select the note whose title matches `title` — the same end state as
+    /// clicking that note in the sidebar. A title with no match is a no-op, so
+    /// a dangling `[[wikilink]]` simply does nothing. The live preview keys off
+    /// the body signal, so it re-renders for the target note without leaving
+    /// preview mode.
     fn navigate_to(&self, title: &str) {
         // Snapshot the match under a shared borrow, then re-borrow mutably to
         // flip the selection (RefCell panics on overlapping borrows).
@@ -187,11 +187,10 @@ impl WikiNav {
                 *selected = Some(id);
             }
         }
-        // Rebase the editor inputs and land on the editor (not a stale preview
-        // of the note we just left), exactly as `sidebar::select_note` does.
+        // Rebase the editor inputs; the live preview follows `body_sig`, so it
+        // re-renders for the target note, exactly as `sidebar::select_note`.
         self.title_sig.set(new_title);
         self.body_sig.set(new_body);
-        self.preview_sig.set(false);
     }
 
     /// Resolve an embedded-image attachment id to its decoded pixels via the

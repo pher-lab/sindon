@@ -63,7 +63,6 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         Rc::clone(&state),
         title_sig,
         body_sig,
-        preview_sig,
         tag_refresh.clone(),
         sidebar_refresh.clone(),
     );

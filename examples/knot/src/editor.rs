@@ -6,14 +6,16 @@
 //! to rebuild the subtree. `on_change` writes back to the selected note
 //! in `AppState`.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::rc::Rc;
 
 use shroud::platform::FileDialog;
 use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, Image, Input, ScrollView, TextWidget};
+use shroud::widgets::{Button, Container, Image, Input, ReactiveChildren, ScrollView, TextWidget};
 
 use crate::lock_screen;
 use crate::preview;
@@ -122,18 +124,17 @@ pub fn build(
 
     // Insert-image button. Picks a PNG/JPEG, stores it as an encrypted
     // attachment, and appends a `![image](knot-img:<id>)` reference to the
-    // body. Shown only while editing a selected note (not in preview), since
-    // it edits the raw markdown. The bytes are decrypted again only when the
-    // preview renders the reference (see `preview::emit_image_block`).
+    // body. Shown whenever a note is selected — in the split layout the editor
+    // stays present alongside the preview, so inserting raw markdown always
+    // makes sense. The bytes are decrypted again only when the preview renders
+    // the reference (see `preview::emit_image_block`).
     let img_btn_state = Rc::clone(&state);
     let img_vis_state = Rc::clone(&state);
     tree.add_child(
         header,
         Button::new("Image")
             .radius(8.0)
-            .visible(Reactive::derive(move || {
-                note_selected(&img_vis_state) && !preview_sig.get()
-            }))
+            .visible(Reactive::derive(move || note_selected(&img_vis_state)))
             .on_click(move |_ctx| {
                 let Some(path) = FileDialog::new()
                     .title("Insert image")
@@ -146,24 +147,16 @@ pub fn build(
             }),
     );
 
-    // Preview / Edit toggle. The content column it rebuilds is created below
-    // (inside `preview_area`); its index is stashed in this cell because this
-    // closure captures the cell at build time and only learns the real index
-    // once that column is inserted. Hidden when no note is selected so the
-    // header's "No note selected" prompt stands alone.
-    let preview_content_cell: Rc<Cell<usize>> = Rc::new(Cell::new(0));
-    let toggle_cell = Rc::clone(&preview_content_cell);
+    // Preview toggle. Shows / hides the live preview pane (built below in the
+    // content row). The pane renders the body live through `ReactiveChildren`,
+    // so the toggle only flips the flag — no manual rebuild. Hidden when no
+    // note is selected so the header's "No note selected" prompt stands alone.
     let toggle_visible_state = Rc::clone(&state);
-    // Navigation handle for `[[wikilink]]` clicks inside the preview: clicking
-    // one selects the matching note and drops back to the editor (see
-    // `preview::WikiNav`). Cloned per render so each rebuilt preview subtree
-    // carries its own.
-    let nav = preview::WikiNav::new(Rc::clone(&state), title_sig, body_sig, preview_sig);
     tree.add_child(
         header,
         Button::reactive_label(move || {
             if preview_sig.get() {
-                "Edit".to_string()
+                "Hide preview".to_string()
             } else {
                 "Preview".to_string()
             }
@@ -172,23 +165,8 @@ pub fn build(
         .visible(Reactive::derive(move || {
             note_selected(&toggle_visible_state)
         }))
-        .on_click(move |ctx| {
-            if preview_sig.get() {
-                // Preview → edit: just flip back; the inputs hold the live body.
-                preview_sig.set(false);
-            } else {
-                // Edit → preview: re-render the current body into the preview
-                // column, *then* show it. Rebuilding on every entry keeps the
-                // preview in sync with edits made since it was last shown
-                // (there is no reactive markdown widget — see `preview.rs`).
-                let body = body_sig.get_clone();
-                let parent_idx = toggle_cell.get();
-                let nav = nav.clone();
-                ctx.rebuild_children(parent_idx, move |tree, parent| {
-                    preview::render(tree, parent, &body, Some(&nav));
-                });
-                preview_sig.set(true);
-            }
+        .on_click(move |_ctx| {
+            preview_sig.set(!preview_sig.get());
         }),
     );
 
@@ -205,21 +183,43 @@ pub fn build(
         }),
     );
 
-    // Editor area: title + body inputs. Hidden via `display: none` when no
-    // note is selected (so the header's "No note selected" prompt stands alone
-    // instead of showing inputs that look editable but silently drop typing —
-    // `write_selected` no-ops without a selection) *and* while previewing, so
-    // the rendered preview replaces the raw-markdown inputs in place.
-    let area_state = Rc::clone(&state);
-    let editor_area = tree.add_child(
+    // Content row: editor pane on the left, live preview pane on the right.
+    // The preview collapses (`display: none`) when toggled off, letting the
+    // editor take the full width; when on, the two share the row.
+    //
+    // `overflow_hidden` is essential, not cosmetic: this row grows to fill the
+    // pane's leftover height, but a flex item's automatic minimum size is its
+    // content — so the row would otherwise balloon to the (tall) preview's
+    // content height, every child would stretch to that, and the preview's
+    // ScrollView would have nothing to scroll. `overflow_hidden` pins the row's
+    // automatic minimum to 0 so it clamps to the allocated height instead, the
+    // same trick the ScrollView uses on itself.
+    let content_row = tree.add_child(
         pane,
-        Container::column()
+        Container::row()
             .width_full()
             .grow(1.0)
+            .gap(16.0)
+            .overflow_hidden(),
+    );
+
+    // Editor area: title + body inputs. Hidden via `display: none` when no
+    // note is selected, so the header's "No note selected" prompt stands alone
+    // instead of showing inputs that look editable but silently drop typing
+    // (`write_selected` no-ops without a selection). Unlike before, it stays
+    // visible while previewing — the preview now sits beside it, not over it.
+    //
+    // `flex_basis(0)` (CSS `flex: 1 1 0`) pins each pane to the row's leftover
+    // width split rather than its content's natural width, so a long preview
+    // heading can't squeeze the editor (mirrors the pane's own basis above).
+    let area_state = Rc::clone(&state);
+    let editor_area = tree.add_child(
+        content_row,
+        Container::column()
+            .grow(1.0)
+            .flex_basis(0.0)
             .gap(12.0)
-            .visible(Reactive::derive(move || {
-                note_selected(&area_state) && !preview_sig.get()
-            })),
+            .visible(Reactive::derive(move || note_selected(&area_state))),
     );
 
     // Title input (single-line, full width).
@@ -275,16 +275,17 @@ pub fn build(
             }),
     );
 
-    // Preview area: a scrollable rendered-markdown view, shown in place of the
-    // inputs while previewing. Mirrors `editor_area`'s visibility, inverted on
-    // the preview flag. Its content column starts empty and is (re)populated by
-    // the header toggle's `rebuild_children` each time we enter preview.
+    // Preview area: a scrollable, live-rendered markdown view beside the
+    // editor. Visible only while a note is selected *and* the preview is
+    // toggled on. The `ReactiveChildren` inside re-renders the body whenever it
+    // changes (keyed on `body_token`), so edits in the left pane appear here on
+    // the next frame without any manual rebuild.
     let preview_state = Rc::clone(&state);
     let preview_area = tree.add_child(
-        pane,
+        content_row,
         Container::column()
-            .width_full()
             .grow(1.0)
+            .flex_basis(0.0)
             // The ScrollView fills this wrapper's height via `grow`, but a flex
             // item defaults to a content-sized minimum — so without this the
             // wrapper would balloon to the (overflowing) preview content's
@@ -298,9 +299,44 @@ pub fn build(
             })),
     );
     let preview_scroll = tree.add_child(preview_area, ScrollView::new().width_full().grow(1.0));
-    let preview_content =
-        tree.add_child(preview_scroll, Container::column().width_full().gap(12.0));
-    preview_content_cell.set(preview_content);
+
+    // Navigation handle for `[[wikilink]]` clicks inside the preview: clicking
+    // one selects the matching note (the live preview then re-renders for the
+    // new body). Owned by the builder below, which re-uses it on every rebuild.
+    let nav = preview::WikiNav::new(Rc::clone(&state), title_sig, body_sig);
+    tree.add_child(
+        preview_scroll,
+        ReactiveChildren::column().width_full().gap(12.0).source(
+            move || preview_token(preview_sig.get(), &body_sig.get_clone()),
+            move |tree, parent| {
+                let body = body_sig.get_clone();
+                preview::render(tree, parent, &body, Some(&nav));
+            },
+        ),
+    );
+}
+
+/// Change token for the live preview. Combines the toggle state with a hash of
+/// the body, so `ReactiveChildren` rebuilds the preview exactly when it needs
+/// to:
+///
+/// * **Hidden** (`preview_on == false`): the body is *not* hashed, so the token
+///   is constant no matter what the user types. This matters because the
+///   default state is preview-off — without it, every keystroke would reparse
+///   the markdown and rebuild an off-screen subtree.
+/// * **Shown**: the token tracks the body, so each edit rebuilds the preview and
+///   an unchanged body leaves it alone. Toggling on flips the token once,
+///   rebuilding with the current body.
+///
+/// Hashing keeps it always correct with nothing to keep in sync (no separate
+/// revision signal a new body-mutating path could forget to bump).
+pub(crate) fn preview_token(preview_on: bool, body: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    preview_on.hash(&mut hasher);
+    if preview_on {
+        body.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// True when `path` looks like a supported image by extension (PNG / JPEG,
@@ -401,5 +437,33 @@ mod tests {
         assert!(!is_image_path(Path::new("archive.zip")));
         assert!(!is_image_path(Path::new("image.gif"))); // not a supported decode
         assert!(!is_image_path(Path::new("README")));
+    }
+
+    #[test]
+    fn preview_token_freezes_while_hidden_and_tracks_body_when_shown() {
+        // Hidden: the body is ignored, so the token is constant no matter what
+        // the user types — no off-screen rebuilds while preview is off.
+        assert_eq!(
+            preview_token(false, "a"),
+            preview_token(false, "b"),
+            "while hidden the token must ignore body edits"
+        );
+        // Toggling on flips the token (rebuild once to show the current body).
+        assert_ne!(
+            preview_token(false, "a"),
+            preview_token(true, "a"),
+            "showing the preview must change the token"
+        );
+        // Shown: identical bodies are stable; an edit changes the token.
+        assert_eq!(
+            preview_token(true, "x\ny"),
+            preview_token(true, "x\ny"),
+            "same body while shown → same token"
+        );
+        assert_ne!(
+            preview_token(true, "x\ny"),
+            preview_token(true, "x\nz"),
+            "an edit while shown changes the token"
+        );
     }
 }

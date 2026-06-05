@@ -85,7 +85,6 @@ struct SidebarWiring {
     state: Rc<RefCell<AppState>>,
     title: Signal<String>,
     body: Signal<String>,
-    preview: Signal<bool>,
     list: Rc<Cell<usize>>,
     filter: Rc<Cell<usize>>,
     tag_refresh: TagRefresh,
@@ -101,7 +100,6 @@ pub fn build(
     state: Rc<RefCell<AppState>>,
     title_sig: Signal<String>,
     body_sig: Signal<String>,
-    preview_sig: Signal<bool>,
     tag_refresh: TagRefresh,
     sidebar_refresh: SidebarRefresh,
 ) {
@@ -109,7 +107,6 @@ pub fn build(
         state,
         title: title_sig,
         body: body_sig,
-        preview: preview_sig,
         list: Rc::new(Cell::new(0)),
         filter: Rc::new(Cell::new(0)),
         tag_refresh,
@@ -134,7 +131,7 @@ pub fn build(
         tree.add_child(
             header,
             Button::new("+ New").radius(6.0).on_click(move |ctx| {
-                if create_note(&w.state, &w.title, &w.body, w.preview).is_some() {
+                if create_note(&w.state, &w.title, &w.body).is_some() {
                     // A new note has no tags, so an active filter would hide it
                     // the instant it's created — clear the filter so the note
                     // the user just asked for is actually visible in the list.
@@ -400,7 +397,7 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
             // suggests the whole row is the affordance.
             .grow(1.0)
             .on_click(move |ctx| {
-                select_note(&w.state, note_id, &w.title, &w.body, w.preview);
+                select_note(&w.state, note_id, &w.title, &w.body);
                 // Re-render the editor's chips for the newly selected note.
                 w.tag_refresh.fire(ctx);
             }),
@@ -416,7 +413,7 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
             .radius(4.0)
             .background(settings::error())
             .on_click(move |ctx| {
-                delete_note(&w.state, note_id, &w.title, &w.body, w.preview);
+                delete_note(&w.state, note_id, &w.title, &w.body);
                 // The row set changed, and the deleted note's tags may have
                 // been the last of their kind — rebuild the list + filter row
                 // (the latter prunes any now-orphaned filter tags).
@@ -433,7 +430,6 @@ fn select_note(
     note_id: NoteId,
     title_sig: &Signal<String>,
     body_sig: &Signal<String>,
-    preview_sig: Signal<bool>,
 ) {
     let snapshot = {
         let s = state.borrow();
@@ -457,18 +453,14 @@ fn select_note(
     }
     title_sig.set(new_title);
     body_sig.set(new_body);
-    // Land on the editor for the newly-selected note rather than carrying the
-    // previous note's rendered preview over (the preview subtree is only
-    // rebuilt on an explicit edit→preview toggle, so without this it would
-    // show stale content).
-    preview_sig.set(false);
+    // No preview reset needed: the live preview pane keys off the body, so
+    // setting `body_sig` above already re-renders it for the new note.
 }
 
 fn create_note(
     state: &Rc<RefCell<AppState>>,
     title_sig: &Signal<String>,
     body_sig: &Signal<String>,
-    preview_sig: Signal<bool>,
 ) -> Option<NoteId> {
     let new_id = {
         let mut s = state.borrow_mut();
@@ -491,8 +483,8 @@ fn create_note(
     };
     title_sig.set(String::new());
     body_sig.set(String::new());
-    // A fresh note opens in the editor, not in a preview of an empty body.
-    preview_sig.set(false);
+    // The live preview tracks the body signal, so clearing it above already
+    // shows the new note's (empty) preview — nothing to reset.
     // Mark the new (empty) note dirty so the next auto-save tick writes
     // its row to SQLCipher — without this, a brand-new note that the
     // user never edits would silently disappear at lock time (no row
@@ -509,7 +501,6 @@ fn delete_note(
     note_id: NoteId,
     title_sig: &Signal<String>,
     body_sig: &Signal<String>,
-    preview_sig: Signal<bool>,
 ) {
     // `delete_note_persisted` updates the in-memory vec, drops the
     // row from SQLCipher, and re-selects a sibling if the deleted
@@ -541,9 +532,8 @@ fn delete_note(
             title_sig.set(t);
             body_sig.set(b);
         }
-        // The active note changed (deleted note was selected → a sibling, or
-        // none, is now current): drop back to the editor so we don't show a
-        // stale preview of the note that's gone.
-        preview_sig.set(false);
+        // Setting `body_sig` above re-renders the live preview for whatever
+        // note is current now, so the stale preview of the deleted note can't
+        // linger — no explicit reset required.
     }
 }
