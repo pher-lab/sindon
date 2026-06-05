@@ -1047,6 +1047,12 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     return;
                 }
 
+                // Clear last frame's animation votes. Any in-flight
+                // `Animated` value read during this frame's layout/paint
+                // re-votes; we check the tally after rendering and schedule
+                // one more redraw if anything is still moving.
+                shroud_reactive::animation::reset_frame_request();
+
                 let size = self.renderer.as_ref().unwrap().surface_size();
                 let tree = self.tree.as_mut().unwrap();
                 let paint_ctx = self.paint_ctx.as_mut().unwrap();
@@ -1127,6 +1133,15 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                         window.set_ime_allowed(target_allowed);
                     }
                     self.last_ime_allowed = Some(target_allowed);
+                }
+
+                // Pump the next frame while any animation is mid-flight. An
+                // in-flight `Animated::get` voted during paint above; if so,
+                // request another redraw. Once every animation settles no
+                // vote is cast, so the loop returns to idle with no
+                // busy-looping at rest.
+                if shroud_reactive::animation::frame_requested() {
+                    self.request_redraw();
                 }
             }
 

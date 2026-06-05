@@ -11,6 +11,7 @@ members = [
     "crates/shroud_widgets",
     "crates/shroud_platform",
     "crates/shroud_app",
+    "examples/animation_demo",
     "examples/clock",
     "examples/counter",
     "examples/dialog_settings_demo",

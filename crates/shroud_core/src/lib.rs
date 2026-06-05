@@ -2,15 +2,18 @@
 //!
 //! - [`geometry`]: `Color`, `Point`, `Rect`, `Size`
 //! - [`id`]: typed id handles (`NodeId`, `ScopeId`, `WidgetId`)
+//! - [`lerp`]: `Lerp` — component-wise interpolation for animatable values
 //! - [`security_level`]: per-widget sensitivity marker
 //! - [`theme`]: `Theme`, `Colors`, `Typography`, `Spacing`
 
 pub mod geometry;
 pub mod id;
+pub mod lerp;
 pub mod security_level;
 pub mod theme;
 
 pub use geometry::{Color, Point, Rect, Size};
 pub use id::{NodeId, ScopeId, WidgetId};
+pub use lerp::Lerp;
 pub use security_level::SecurityLevel;
 pub use theme::{Colors, FocusStyle, HoverStyle, Spacing, TextStyle, Theme, Typography};

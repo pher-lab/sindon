@@ -6,6 +6,7 @@
 //! For sensitive data, `SecureSignal<T>` and `SecureMemo<T>` store values
 //! in a mlock'd arena with automatic zeroization.
 
+pub mod animation;
 pub mod batch;
 pub mod effect;
 pub mod memo;
@@ -17,6 +18,7 @@ pub mod secure_memo;
 pub mod secure_signal;
 pub mod signal;
 
+pub use animation::{Animated, Easing};
 pub use batch::batch;
 pub use effect::Effect;
 pub use memo::Memo;
