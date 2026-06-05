@@ -76,6 +76,23 @@ impl SecureClipboard {
         board.get_text().map_err(|_| ClipboardError::ReadFailed)
     }
 
+    /// Read an image from the clipboard as tightly-packed RGBA8 pixels.
+    ///
+    /// Returns [`ClipboardError::ReadFailed`] when the clipboard holds no
+    /// image (the usual case when text was copied). Pixels are plaintext on
+    /// the heap until dropped — the same exposure the text path carries — so
+    /// this is for ordinary (non-secret) image content such as a screenshot
+    /// pasted into a note, not for secret pixel data.
+    pub fn read_image(&self) -> Result<ClipboardImage, ClipboardError> {
+        let mut board = arboard::Clipboard::new().map_err(|_| ClipboardError::Unavailable)?;
+        let img = board.get_image().map_err(|_| ClipboardError::ReadFailed)?;
+        Ok(ClipboardImage {
+            width: img.width as u32,
+            height: img.height as u32,
+            rgba: img.bytes.into_owned(),
+        })
+    }
+
     /// Check if auto-clear timer has expired and clear if needed.
     ///
     /// Call this periodically (e.g., once per frame or per second).
@@ -117,6 +134,22 @@ impl Default for SecureClipboard {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// An image read from the system clipboard.
+///
+/// Holds tightly-packed RGBA8 pixels (`rgba.len() == width * height * 4`)
+/// in the order arboard delivers them — the same raw form a screenshot or
+/// an image copied from a browser arrives in. Encode it (e.g. via
+/// `shroud_render::encode_png`) before persisting; it is not a
+/// self-describing image file on its own.
+pub struct ClipboardImage {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Tightly-packed RGBA8 pixels, row-major, top-left origin.
+    pub rgba: Vec<u8>,
 }
 
 /// Clipboard errors.

@@ -11,6 +11,6 @@ pub mod renderer;
 pub mod secure_atlas;
 
 pub use atlas::{AtlasRegion, TextureAtlas};
-pub use image::{DecodedImage, ImageError, ImageId};
+pub use image::{DecodedImage, ImageError, ImageId, encode_png};
 pub use renderer::{DrawGlyph, DrawImage, DrawRect, LayerSnapshot, RenderError, Renderer};
 pub use secure_atlas::SecureTextureAtlas;

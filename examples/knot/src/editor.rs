@@ -86,6 +86,20 @@ pub fn build(
         insert_image_from_path(&drop_state, body_sig, path);
     });
 
+    // Accept an image pasted from the clipboard (Ctrl/Cmd+V with image
+    // content — e.g. a screenshot, or an image copied from a browser). The
+    // framework hands over already-encoded PNG bytes, so this shares the
+    // same store-and-append tail as the drop handler and the Image button.
+    // Pastes while no note is selected are ignored. Like the drop handler,
+    // it's registered per vault screen and cleared when the vault locks.
+    let paste_state = Rc::clone(&state);
+    tree.on_image_paste(move |png, _ctx| {
+        if !note_selected(&paste_state) {
+            return;
+        }
+        insert_image_from_bytes(&paste_state, body_sig, png);
+    });
+
     // Header: status text on the left, then a spacer, then the Preview/Edit
     // toggle and the Lock button on the right. Status reads selection from
     // state so it nudges the user when nothing is selected ("No note selected
@@ -354,12 +368,10 @@ fn is_image_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Read an image file, store it as an encrypted attachment, and append a
-/// `![image](knot-img:<id>)` reference to the body. The shared core of both
-/// the "Image" button (file dialog) and the drag-and-drop handler. No-op
-/// (with a stderr note) when the file can't be read, doesn't decode as a
-/// supported image, or can't be stored. The caller is responsible for only
-/// invoking this while a note is selected (`write_selected` no-ops otherwise).
+/// Read an image file and insert it into the selected note via
+/// [`insert_image_from_bytes`]. Used by the "Image" button (file dialog)
+/// and the drag-and-drop handler, both of which carry a path. No-op (with a
+/// stderr note) when the file can't be read.
 fn insert_image_from_path(state: &Rc<RefCell<AppState>>, body_sig: Signal<String>, path: &Path) {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -368,13 +380,25 @@ fn insert_image_from_path(state: &Rc<RefCell<AppState>>, body_sig: Signal<String
             return;
         }
     };
-    // Reject anything that doesn't decode *before* storing it, so a bad file
+    insert_image_from_bytes(state, body_sig, &bytes);
+}
+
+/// Store encoded image bytes as an encrypted attachment and append a
+/// `![image](knot-img:<id>)` reference to the body. The shared core of the
+/// "Image" button, the drag-and-drop handler (both via
+/// [`insert_image_from_path`]), and the clipboard-paste handler (which gets
+/// PNG bytes from the framework directly). No-op (with a stderr note) when
+/// the bytes don't decode as a supported image or can't be stored. The
+/// caller is responsible for only invoking this while a note is selected
+/// (`write_selected` no-ops otherwise).
+fn insert_image_from_bytes(state: &Rc<RefCell<AppState>>, body_sig: Signal<String>, bytes: &[u8]) {
+    // Reject anything that doesn't decode *before* storing it, so a bad blob
     // never becomes a dead `knot-img:` reference.
-    if Image::from_bytes(&bytes).is_err() {
+    if Image::from_bytes(bytes).is_err() {
         eprintln!("knot: unsupported image (only PNG/JPEG)");
         return;
     }
-    let Some(id) = state.borrow_mut().add_attachment(&bytes) else {
+    let Some(id) = state.borrow_mut().add_attachment(bytes) else {
         eprintln!("knot: could not store attachment");
         return;
     };

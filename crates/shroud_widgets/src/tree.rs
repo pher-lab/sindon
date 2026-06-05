@@ -92,6 +92,15 @@ pub struct WidgetTree {
     /// so there is no reliable way to hit-test the drop against the widget
     /// under the cursor (notably on Windows).
     file_drop_handler: Option<FileDropHandler>,
+    /// Screen-scoped handler for an image pasted from the system clipboard
+    /// (Ctrl/Cmd+V whose content is an image, not text). Registered via
+    /// [`Self::on_image_paste`] and invoked by [`Self::dispatch_image_paste`]
+    /// when the event loop finds image bytes on the clipboard. Like
+    /// [`Self::file_drop_handler`] it is a window-level hook (not routed to
+    /// the widget under the cursor) and cleared on every `replace_screen`
+    /// transition, matching the per-screen lifetime of the signals such a
+    /// handler captures.
+    image_paste_handler: Option<ImagePasteHandler>,
 }
 
 /// Handler for an OS file drop onto the window — receives the dropped
@@ -100,6 +109,13 @@ pub struct WidgetTree {
 /// the [`WidgetTree`] field and [`WidgetTree::on_file_drop`] signature
 /// clear of `clippy::type_complexity`. See [`WidgetTree::on_file_drop`].
 type FileDropHandler = Box<dyn FnMut(&Path, &mut EventContext)>;
+
+/// Handler for a clipboard image paste — receives the pasted image as
+/// encoded PNG bytes and the event context (so it can enqueue tree
+/// commands, like any widget event handler). Boxed as a type alias to keep
+/// the [`WidgetTree`] field and [`WidgetTree::on_image_paste`] signature
+/// clear of `clippy::type_complexity`. See [`WidgetTree::on_image_paste`].
+type ImagePasteHandler = Box<dyn FnMut(&[u8], &mut EventContext)>;
 
 /// Find the deepest node that appears in both ancestor chains (each
 /// leaf-first, root-last). Returns `None` when the chains share no
@@ -180,6 +196,7 @@ impl WidgetTree {
             viewport: (0.0, 0.0),
             shortcuts: ShortcutRouter::new(),
             file_drop_handler: None,
+            image_paste_handler: None,
         }
     }
 
@@ -589,11 +606,12 @@ impl WidgetTree {
                         self.remove(old);
                     }
                     // A screen swap tears down the screen that registered
-                    // any file-drop handler; clear it so a stale handler
-                    // (capturing the old screen's signals) never fires on
-                    // the new screen. The replacement re-registers in its
-                    // build closure if it accepts drops.
+                    // any file-drop or image-paste handler; clear them so a
+                    // stale handler (capturing the old screen's signals)
+                    // never fires on the new screen. The replacement
+                    // re-registers in its build closure if it wants them.
                     self.file_drop_handler = None;
+                    self.image_paste_handler = None;
                     build(self);
                 }
                 TreeCommand::RebuildChildren { parent, build } => {
@@ -1152,6 +1170,37 @@ impl WidgetTree {
     pub fn dispatch_file_drop(&mut self, path: &Path, event_ctx: &mut EventContext) {
         if let Some(handler) = self.file_drop_handler.as_mut() {
             handler(path, event_ctx);
+        }
+        self.drain_commands(event_ctx);
+    }
+
+    /// Register a handler for an image pasted from the system clipboard.
+    ///
+    /// Fired when the user presses Ctrl/Cmd+V while the clipboard holds an
+    /// image rather than text (the event loop tries text first). The handler
+    /// receives the image as encoded PNG bytes — the same self-describing
+    /// shape the file-drop path hands over — so an app can store or insert it
+    /// without knowing the clipboard's raw pixel format.
+    ///
+    /// Like [`Self::on_file_drop`] this is a window-level hook (clipboard
+    /// content carries no drop position) and is screen-scoped: it is cleared
+    /// on `replace_screen`, so register it in each screen's build closure.
+    pub fn on_image_paste(&mut self, handler: impl FnMut(&[u8], &mut EventContext) + 'static) {
+        self.image_paste_handler = Some(Box::new(handler));
+    }
+
+    /// Deliver a clipboard image paste to the registered
+    /// [`Self::on_image_paste`] handler, if any, then drain whatever tree
+    /// commands it enqueued.
+    ///
+    /// Called by the event loop when a paste combo finds image bytes on the
+    /// clipboard. A no-op when no handler is registered (e.g. a screen that
+    /// doesn't accept pasted images). Mirrors [`Self::dispatch_file_drop`]'s
+    /// borrow split: the handler borrows `&mut self.image_paste_handler`
+    /// while `event_ctx` carries the deferred command queue.
+    pub fn dispatch_image_paste(&mut self, png: &[u8], event_ctx: &mut EventContext) {
+        if let Some(handler) = self.image_paste_handler.as_mut() {
+            handler(png, event_ctx);
         }
         self.drain_commands(event_ctx);
     }

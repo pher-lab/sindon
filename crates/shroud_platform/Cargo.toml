@@ -10,7 +10,7 @@ shroud_core = { workspace = true }
 shroud_security = { workspace = true }
 winit = { workspace = true }
 raw-window-handle = { workspace = true }
-arboard = { workspace = true }
+arboard = { workspace = true, features = ["image-data"] }
 log = { workspace = true }
 zeroize = { workspace = true }
 sys-locale = { workspace = true }

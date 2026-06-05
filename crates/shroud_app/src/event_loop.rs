@@ -680,25 +680,43 @@ impl ShroudEventLoop {
         }
     }
 
-    /// Read clipboard text and replay it as a burst of `CharInput` events
-    /// against the current focus. Used by the Ctrl+V interceptor above.
-    /// A read failure (clipboard unavailable, non-text content) is silently
-    /// ignored — paste is a best-effort UX, not a critical path.
+    /// Handle a paste combo. Text is preferred: clipboard text is replayed
+    /// as a burst of `CharInput` events against the current focus. When the
+    /// clipboard has no text but holds an image, the image is encoded to PNG
+    /// and delivered to the screen's [`WidgetTree::on_image_paste`] handler
+    /// (e.g. to insert it into the open document). Used by the Ctrl+V
+    /// interceptor above.
+    ///
+    /// Every failure (clipboard unavailable, no text and no image, encode
+    /// error) is silently ignored — paste is a best-effort UX, not a
+    /// critical path.
     fn dispatch_paste(&mut self) {
         let Some(tree) = self.tree.as_mut() else {
             return;
         };
         let clipboard = SecureClipboard::new();
-        let Ok(text) = clipboard.read() else {
-            return;
-        };
-        if text.is_empty() {
-            return;
+
+        // Text first: the common case, and an image copy carries no text, so
+        // a non-empty text read short-circuits the image path below.
+        if let Ok(text) = clipboard.read() {
+            if !text.is_empty() {
+                for ch in text.chars() {
+                    tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut self.event_ctx);
+                }
+                self.request_redraw();
+                return;
+            }
         }
-        for ch in text.chars() {
-            tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut self.event_ctx);
+
+        // No text — try an image. Encode the raw clipboard pixels to PNG so
+        // the handler receives a self-describing blob (the same shape the
+        // file-drop path hands over) rather than format-specific raw RGBA.
+        if let Ok(img) = clipboard.read_image() {
+            if let Ok(png) = shroud_render::encode_png(img.width, img.height, &img.rgba) {
+                tree.dispatch_image_paste(&png, &mut self.event_ctx);
+                self.request_redraw();
+            }
         }
-        self.request_redraw();
     }
 }
 

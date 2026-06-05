@@ -18,7 +18,7 @@ pub mod system_locale;
 pub mod system_theme;
 pub mod window;
 
-pub use clipboard::SecureClipboard;
+pub use clipboard::{ClipboardImage, SecureClipboard};
 pub use dialog::FileDialog;
 pub use display_protection::{DisplayProtection, DisplayProtectionLevel, DisplayProtectionResult};
 pub use storage::{config_dir, read_json, write_json_atomic};

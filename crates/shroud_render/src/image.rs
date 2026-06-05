@@ -30,6 +30,10 @@ pub enum ImageError {
     /// header, truncated data, …). The wrapped string is the upstream
     /// `Display` for diagnostics.
     Decode(String),
+    /// Encoding raw pixels to a container format failed — either the RGBA
+    /// buffer length didn't match `width * height * 4`, or the `image`
+    /// crate's encoder errored. The wrapped string is for diagnostics.
+    Encode(String),
 }
 
 impl std::fmt::Display for ImageError {
@@ -37,6 +41,7 @@ impl std::fmt::Display for ImageError {
         match self {
             ImageError::Empty => write!(f, "image bytes are empty"),
             ImageError::Decode(s) => write!(f, "image decode error: {s}"),
+            ImageError::Encode(s) => write!(f, "image encode error: {s}"),
         }
     }
 }
@@ -94,6 +99,30 @@ impl DecodedImage {
     pub fn rgba(&self) -> &[u8] {
         &self.rgba
     }
+}
+
+/// Encode tightly-packed RGBA8 pixels into PNG bytes.
+///
+/// The inverse of [`DecodedImage::from_bytes`]'s decode step: it turns the
+/// raw RGBA a clipboard image or screenshot arrives as into a
+/// self-describing PNG that can be stored or fed back through
+/// `from_bytes`. `rgba` must be exactly `width * height * 4` bytes.
+///
+/// Co-located with the decoder so the framework owns one image codec; the
+/// platform clipboard stays free of the `image` dependency and hands over
+/// raw pixels for callers to encode here.
+pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, ImageError> {
+    let buf = image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or_else(|| {
+        ImageError::Encode(format!(
+            "rgba buffer is {} bytes, expected {} for {width}x{height}",
+            rgba.len(),
+            (width as usize) * (height as usize) * 4,
+        ))
+    })?;
+    let mut out = Vec::new();
+    buf.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| ImageError::Encode(e.to_string()))?;
+    Ok(out)
 }
 
 /// FNV-1a 64-bit. Fixed seed → deterministic across processes (unlike
@@ -155,6 +184,30 @@ mod tests {
         let a = DecodedImage::from_bytes(&bytes).unwrap();
         let b = DecodedImage::from_bytes(&bytes).unwrap();
         assert_eq!(a.id(), b.id(), "content hash must be deterministic");
+    }
+
+    #[test]
+    fn encode_png_round_trips_through_decode() {
+        // A 2x1 image: one red pixel, one green pixel. Encoding to PNG and
+        // decoding back must recover the exact pixels and dimensions — the
+        // clipboard-paste path relies on this round-trip.
+        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        let png = encode_png(2, 1, &rgba).unwrap();
+        let img = DecodedImage::from_bytes(&png).unwrap();
+        assert_eq!(img.width(), 2);
+        assert_eq!(img.height(), 1);
+        assert_eq!(img.rgba(), rgba.as_slice());
+    }
+
+    #[test]
+    fn encode_png_rejects_mismatched_buffer() {
+        // 3 bytes can't be a 1x1 RGBA pixel (needs 4) — caught before the
+        // encoder runs so a malformed clipboard payload is a clean error,
+        // not a panic.
+        assert!(matches!(
+            encode_png(1, 1, &[0, 0, 0]),
+            Err(ImageError::Encode(_))
+        ));
     }
 
     #[test]
