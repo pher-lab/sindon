@@ -25,16 +25,22 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use shroud::core::Color;
+use shroud::platform::FileDialog;
 use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::layer::LayerOptions;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, EventContext, Input, ScrollView, TextWidget};
 
 use crate::settings;
-use crate::state::{AppState, Note, NoteId, Phase};
+use crate::state::{AppState, NoteId, Phase};
 use crate::tag_editor::TagRefresh;
 
 const SIDEBAR_WIDTH: f32 = 260.0;
+
+/// Upper bound on a file the Import button will read into a note. Guards
+/// against accidentally slurping a multi-hundred-MB file into a text buffer;
+/// ordinary markdown notes sit far below this.
+const MAX_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The rebuild closure [`SidebarRefresh`] stores.
 type RefreshFn = Rc<dyn Fn(&mut EventContext)>;
@@ -127,10 +133,27 @@ pub fn build(
             .background(settings::surface()),
     );
 
-    // Header: title on the left, "+ New" pushed to the right edge.
+    // Header: title on the left, then the Import + "+ New" buttons pushed to
+    // the right edge.
     let header = tree.add_child(pane, Container::row().gap(8.0).align_center());
     tree.add_child(header, TextWidget::new("Knot").font_size(20.0));
     tree.add_child(header, Container::row().grow(1.0));
+
+    // Import (secondary): read a .md/.txt file into a new note. Sits left of
+    // the primary "+ New" and is styled muted so "+ New" stays the focal action.
+    {
+        let w = w.clone();
+        tree.add_child(
+            header,
+            Button::new("Import")
+                .radius(6.0)
+                .background(Color::TRANSPARENT)
+                .hover_background(settings::hover())
+                .text_color(settings::on_surface_variant())
+                .on_click(move |ctx| import_note(&w, ctx)),
+        );
+    }
+
     {
         let w = w.clone();
         tree.add_child(
@@ -502,38 +525,80 @@ fn create_note(
     title_sig: &Signal<String>,
     body_sig: &Signal<String>,
 ) -> Option<NoteId> {
-    let new_id = {
-        let mut s = state.borrow_mut();
-        let id = s.next_id;
-        s.next_id += 1;
-        let Phase::Unlocked {
-            notes, selected, ..
-        } = &mut s.phase
-        else {
-            return None;
-        };
-        notes.push(Note {
-            id,
-            title: String::new(),
-            body: String::new(),
-            tags: Vec::new(),
-        });
-        *selected = Some(id);
-        Some(id)
-    };
-    title_sig.set(String::new());
-    body_sig.set(String::new());
-    // The live preview tracks the body signal, so clearing it above already
-    // shows the new note's (empty) preview — nothing to reset.
-    // Mark the new (empty) note dirty so the next auto-save tick writes
-    // its row to SQLCipher — without this, a brand-new note that the
-    // user never edits would silently disappear at lock time (no row
-    // ever inserted, lock_and_seal's rewrite would catch it but only
-    // for *that* lock cycle).
-    if let Some(id) = new_id {
-        state.borrow_mut().mark_dirty(id);
+    // `add_note` allocates the id, selects the note, and marks it dirty so the
+    // next auto-save tick writes its row to SQLCipher — without that, a
+    // brand-new note the user never edits would never get a row inserted.
+    let new_id = state.borrow_mut().add_note(String::new(), String::new());
+    if new_id.is_some() {
+        // Rebase the editor inputs onto the new (empty) note. The live preview
+        // tracks the body signal, so clearing it already shows the empty note.
+        title_sig.set(String::new());
+        body_sig.set(String::new());
     }
     new_id
+}
+
+/// Import a single `.md`/`.txt` file as a new note: the file contents become
+/// the body and the file name (stem) becomes the title — the inverse of
+/// Export (`editor::export_selected`), which writes the body verbatim to
+/// `<title>.md`. Tags don't round-trip (Export never writes them, so there's
+/// nothing to read back). Clears any active filter/search so the freshly
+/// imported, tagless note is visible, mirroring `+ New`.
+fn import_note(w: &SidebarWiring, ctx: &mut EventContext) {
+    let Some(path) = FileDialog::new()
+        .title("Import note")
+        .filter("Markdown / text", &["md", "markdown", "txt"])
+        .open_file()
+    else {
+        return;
+    };
+
+    // Refuse a pathologically large file before reading it into memory.
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > MAX_IMPORT_BYTES {
+            eprintln!(
+                "knot: refusing to import {} — larger than {} bytes",
+                path.display(),
+                MAX_IMPORT_BYTES
+            );
+            return;
+        }
+    }
+
+    let body = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("knot: failed to read {}: {}", path.display(), e);
+            return;
+        }
+    };
+    let title = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Imported")
+        .to_string();
+
+    if w.state
+        .borrow_mut()
+        .add_note(title.clone(), body.clone())
+        .is_none()
+    {
+        return;
+    }
+    // Rebase the editor onto the imported note.
+    w.title.set(title);
+    w.body.set(body);
+    // A tagless new note would be hidden by an active filter/search — clear
+    // both (and the search box) so the import is actually visible.
+    {
+        let mut s = w.state.borrow_mut();
+        s.clear_filter();
+        s.clear_search();
+    }
+    w.search.set(String::new());
+    rebuild_sidebar(w, ctx);
+    // The newly selected note is tagless — refresh the editor's chip row.
+    w.tag_refresh.fire(ctx);
 }
 
 fn delete_note(

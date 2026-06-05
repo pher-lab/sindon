@@ -161,6 +161,20 @@ pub fn build(
             }),
     );
 
+    // Export button. Writes the selected note's body verbatim to a chosen
+    // `<title>.md`. Tags are never written, so an export can't leak the
+    // vault's encrypted tag metadata to a plaintext file. Visible only when a
+    // note is selected, like the Image button.
+    let export_state = Rc::clone(&state);
+    let export_vis_state = Rc::clone(&state);
+    tree.add_child(
+        header,
+        Button::new("Export")
+            .radius(8.0)
+            .visible(Reactive::derive(move || note_selected(&export_vis_state)))
+            .on_click(move |_ctx| export_selected(&export_state)),
+    );
+
     // Preview toggle. Shows / hides the live preview pane (built below in the
     // content row). The pane renders the body live through `ReactiveChildren`,
     // so the toggle only flips the flag — no manual rebuild. Hidden when no
@@ -440,6 +454,68 @@ where
     state.borrow_mut().mark_selected_dirty();
 }
 
+/// Export the selected note's body verbatim to a user-chosen `<title>.md`.
+/// The title is carried only by the file name; tags and other metadata are
+/// never written, so a plaintext export can't leak the vault's encrypted tag
+/// metadata. No-op when locked, when nothing is selected, or when the user
+/// cancels the save dialog. (Any embedded `knot-img:<id>` references are
+/// written as-is — they round-trip back into Knot via Import but won't resolve
+/// in other markdown viewers.) This is the inverse of `sidebar::import_note`.
+fn export_selected(state: &Rc<RefCell<AppState>>) {
+    let note = {
+        let s = state.borrow();
+        match &s.phase {
+            Phase::Unlocked {
+                notes,
+                selected: Some(sel),
+                ..
+            } => notes
+                .iter()
+                .find(|n| n.id == *sel)
+                .map(|n| (n.title.clone(), n.body.clone())),
+            _ => None,
+        }
+    };
+    let Some((title, body)) = note else {
+        return;
+    };
+
+    let Some(path) = FileDialog::new()
+        .title("Export note")
+        .filter("Markdown", &["md"])
+        .file_name(format!("{}.md", sanitize_filename(&title)))
+        .save_file()
+    else {
+        return;
+    };
+    if let Err(e) = std::fs::write(&path, body) {
+        eprintln!("knot: failed to export note to {}: {}", path.display(), e);
+    }
+}
+
+/// Turn a note title into a safe file-name stem: replace characters illegal in
+/// file names on common OSes (and any control chars) with `_`, trim
+/// surrounding whitespace and dots (Windows rejects trailing dots), and fall
+/// back to `untitled` when nothing usable remains (e.g. an empty title).
+fn sanitize_filename(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    if trimmed.is_empty() {
+        "untitled".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +537,25 @@ mod tests {
         assert!(!is_image_path(Path::new("archive.zip")));
         assert!(!is_image_path(Path::new("image.gif"))); // not a supported decode
         assert!(!is_image_path(Path::new("README")));
+    }
+
+    #[test]
+    fn sanitize_filename_strips_illegal_chars_and_falls_back() {
+        // Ordinary titles pass through untouched.
+        assert_eq!(sanitize_filename("Shopping List"), "Shopping List");
+        // Path separators and other reserved chars become underscores
+        // (/ : * ? " < > | \ between c and d = seven illegal chars).
+        assert_eq!(sanitize_filename("a/b:c*?\"<>|\\d"), "a_b_c_______d");
+        // Surrounding whitespace and trailing dots (illegal on Windows) go.
+        assert_eq!(sanitize_filename("  notes...  "), "notes");
+        // Empty / whitespace-only → a stable fallback so the dialog still opens.
+        assert_eq!(sanitize_filename(""), "untitled");
+        assert_eq!(sanitize_filename("   "), "untitled");
+        // An all-illegal title sanitizes to underscores — non-empty and a
+        // perfectly valid file name, so it's kept as-is rather than masked.
+        assert_eq!(sanitize_filename("/:*?"), "____");
+        // Non-ASCII titles are preserved (CJK file names are fine on modern OSes).
+        assert_eq!(sanitize_filename("買い物リスト"), "買い物リスト");
     }
 
     #[test]

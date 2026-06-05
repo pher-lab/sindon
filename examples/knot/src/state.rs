@@ -219,6 +219,37 @@ impl AppState {
         }
     }
 
+    /// Append a new note with the given content, select it, and mark it dirty
+    /// so the next auto-save tick persists it. Allocates the next id from
+    /// `next_id`. Returns the new id, or `None` when locked. Shared by `+ New`
+    /// (empty content) and Import (a note read from a `.md` file). The new note
+    /// carries no tags — imports intentionally don't round-trip tags, which are
+    /// encrypted metadata that must not leak into a plaintext export.
+    pub fn add_note(&mut self, title: String, body: String) -> Option<NoteId> {
+        // Read the id before borrowing `self.phase`; the counter is bumped
+        // (and the note marked dirty) after the borrow ends — NLL releases it
+        // past the last field use.
+        let id = self.next_id;
+        let Phase::Unlocked {
+            notes, selected, ..
+        } = &mut self.phase
+        else {
+            return None;
+        };
+        notes.push(Note {
+            id,
+            title,
+            body,
+            tags: Vec::new(),
+        });
+        *selected = Some(id);
+        self.next_id = self.next_id.saturating_add(1);
+        // The note now exists, so `mark_dirty` records it for the next
+        // auto-save flush (reusing its in-vec membership guard).
+        self.mark_dirty(id);
+        Some(id)
+    }
+
     /// Tags of the currently selected note, in insertion order. Empty when
     /// nothing is selected or the app is locked. Used by the tag editor to
     /// (re)render the chip row.
@@ -1186,6 +1217,38 @@ mod tests {
         // A query that misses the tag-matching note empties the intersection.
         s.set_search_query("expense");
         assert!(s.filtered_note_ids().is_empty());
+    }
+
+    // ── Import (add_note) ───────────────────────────────────────────────
+
+    #[test]
+    fn add_note_appends_selects_and_marks_dirty() {
+        let mut s = unlocked_state_with_one_note();
+        let next_before = s.next_id;
+        let id = s
+            .add_note("Imported".into(), "from a file".into())
+            .expect("added");
+        assert_eq!(id, next_before, "uses the current next_id");
+        assert_eq!(s.next_id, next_before + 1, "bumps next_id");
+
+        if let Phase::Unlocked {
+            notes,
+            selected,
+            dirty,
+            ..
+        } = &s.phase
+        {
+            let note = notes.iter().find(|n| n.id == id).expect("note present");
+            assert_eq!(
+                (note.title.as_str(), note.body.as_str()),
+                ("Imported", "from a file")
+            );
+            assert!(note.tags.is_empty(), "imported notes carry no tags");
+            assert_eq!(*selected, Some(id), "the new note is selected");
+            assert!(dirty.contains(&id), "the new note is dirty for persistence");
+        } else {
+            panic!("expected Unlocked");
+        }
     }
 
     // ── Attachments ─────────────────────────────────────────────────────
