@@ -28,7 +28,7 @@ use shroud::core::Color;
 use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::layer::LayerOptions;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, EventContext, ScrollView, TextWidget};
+use shroud::widgets::{Button, Container, EventContext, Input, ScrollView, TextWidget};
 
 use crate::settings;
 use crate::state::{AppState, Note, NoteId, Phase};
@@ -87,6 +87,10 @@ struct SidebarWiring {
     body: Signal<String>,
     list: Rc<Cell<usize>>,
     filter: Rc<Cell<usize>>,
+    /// Bound value of the search box. Kept so `+ New` can clear the field
+    /// (and the underlying query) when it drops the filter, so a freshly
+    /// created note isn't hidden by a stale search.
+    search: Signal<String>,
     tag_refresh: TagRefresh,
 }
 
@@ -109,6 +113,7 @@ pub fn build(
         body: body_sig,
         list: Rc::new(Cell::new(0)),
         filter: Rc::new(Cell::new(0)),
+        search: Signal::new(String::new()),
         tag_refresh,
     };
 
@@ -136,6 +141,11 @@ pub fn build(
                     // the instant it's created — clear the filter so the note
                     // the user just asked for is actually visible in the list.
                     w.state.borrow_mut().clear_filter();
+                    // An active search would likewise hide the new empty note
+                    // (empty title + body match no non-empty query) — clear the
+                    // query and the search box along with the filter.
+                    w.state.borrow_mut().clear_search();
+                    w.search.set(String::new());
                     rebuild_sidebar(&w, ctx);
                     // The new note is selected and tagless — refresh the
                     // editor's chip row to match.
@@ -145,7 +155,28 @@ pub fn build(
         );
     }
 
-    // Tag-filter chip row, between the header and the list. Hidden entirely
+    // Search box, between the header and the tag filter. Always visible while
+    // unlocked; typing narrows the list (title + body substring, intersected
+    // with the tag filter — see `state::note_matches_search`). Its tree index
+    // is recorded on the app state so the global Ctrl+F shortcut (wired in
+    // `main`) can focus it from anywhere, including mid-edit.
+    {
+        let w_change = w.clone();
+        let search_input = tree.add_child(
+            pane,
+            Input::new()
+                .placeholder("Search\u{2026}")
+                .value(w.search)
+                .font_size(13.0)
+                .on_change(move |val, ctx| {
+                    w_change.state.borrow_mut().set_search_query(val);
+                    rebuild_list(&w_change, ctx);
+                }),
+        );
+        w.state.borrow_mut().search_input_idx = Some(search_input);
+    }
+
+    // Tag-filter chip row, between the search box and the list. Hidden entirely
     // until the vault has at least one tag, so an untagged vault shows no
     // empty strip; it wraps once a vault accumulates many tags.
     let filter_visible_state = Rc::clone(&w.state);
@@ -306,9 +337,14 @@ fn populate_filter(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
 /// active tag filter. Called at initial build and from `rebuild_children`
 /// after add / delete / filter changes.
 fn populate_list(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
-    let (ids, total) = {
+    let (ids, total, searching, filtering) = {
         let s = w.state.borrow();
-        (s.filtered_note_ids(), s.note_count())
+        (
+            s.filtered_note_ids(),
+            s.note_count(),
+            s.is_searching(),
+            s.is_filtering(),
+        )
     };
 
     if total == 0 {
@@ -319,13 +355,17 @@ fn populate_list(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
         return;
     }
     if ids.is_empty() {
-        // Notes exist but the active filter hid them all — distinct from the
-        // empty-vault message so the user knows it's the filter, not an empty
-        // vault.
+        // Notes exist but the active search and/or tag filter hid them all —
+        // name whichever is active so the user knows it's a narrowing, not an
+        // empty vault.
+        let msg = match (searching, filtering) {
+            (true, true) => "No notes match your search and the selected tags.",
+            (true, false) => "No notes match your search.",
+            _ => "No notes match the selected tags.",
+        };
         tree.add_child(
             parent,
-            TextWidget::new("No notes match the selected tags.")
-                .color(settings::on_surface_variant()),
+            TextWidget::new(msg).color(settings::on_surface_variant()),
         );
         return;
     }

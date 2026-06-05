@@ -38,6 +38,7 @@ use std::rc::Rc;
 use shroud::app::App;
 use shroud::reactive::Reactive;
 use shroud::widgets::tree::WidgetTree;
+use shroud::widgets::{Key, Modifiers, Shortcut};
 
 use crate::state::{AppState, Phase};
 use crate::storage::VaultPaths;
@@ -91,6 +92,29 @@ fn main() {
                     }
                 }
             });
+
+            // Ctrl+F focuses the sidebar search box. Global scope so it fires
+            // even while the editor (an `Input`) has focus — the usual
+            // "find from anywhere" feel. The box's tree index is recorded on
+            // the app state by `sidebar::build`; we only act while unlocked,
+            // and `focus` drops silently if the recorded index is stale after
+            // a screen rebuild.
+            let search_state = Rc::clone(&state);
+            scope.on_shortcut(
+                Shortcut::global(Modifiers::CTRL, Key::Character('f')),
+                move |ctx| {
+                    let target = {
+                        let s = search_state.borrow();
+                        match s.phase {
+                            Phase::Unlocked { .. } => s.search_input_idx,
+                            _ => None,
+                        }
+                    };
+                    if let Some(idx) = target {
+                        ctx.event_ctx.focus(idx);
+                    }
+                },
+            );
 
             let mut tree = WidgetTree::new();
             build_initial_screen(&mut tree, state);

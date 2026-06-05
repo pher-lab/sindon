@@ -99,6 +99,11 @@ pub enum Phase {
         /// empty = show all). Pure session UI state that lives and dies with
         /// the unlocked vault, exactly like `selected`; it is never persisted.
         filter_tags: Vec<String>,
+        /// Free-text query the sidebar is narrowing the note list by
+        /// (case-insensitive substring over title + body). Combines with
+        /// `filter_tags` by intersection — a note shows only if it matches
+        /// *both*. Same session-only lifetime as `filter_tags`; never persisted.
+        search_query: String,
         /// Decoded preview images, keyed by attachment id. Populated lazily by
         /// [`AppState::resolve_attachment`] the first time a `knot-img:<id>`
         /// reference is rendered, so only images actually viewed this session
@@ -113,6 +118,12 @@ pub struct AppState {
     pub salt: [u8; SALT_SIZE],
     pub next_id: NoteId,
     pub phase: Phase,
+    /// Tree index of the sidebar's search `Input`, recorded by `sidebar::build`
+    /// so the global Ctrl+F shortcut — registered in `main` before any tree
+    /// exists — can focus it. `None` until the vault screen is built. A stale
+    /// index after a screen rebuild is harmless: `EventContext::focus` drops
+    /// silently if the target is gone, and the handler only acts while unlocked.
+    pub search_input_idx: Option<usize>,
 }
 
 impl AppState {
@@ -124,6 +135,7 @@ impl AppState {
             salt,
             next_id,
             phase: Phase::Locked { error: None },
+            search_input_idx: None,
         }
     }
 
@@ -136,6 +148,7 @@ impl AppState {
             salt: [0u8; SALT_SIZE],
             next_id: 1,
             phase: Phase::Setup { error: None },
+            search_input_idx: None,
         }
     }
 
@@ -156,6 +169,7 @@ impl AppState {
             storage,
             dirty: HashSet::new(),
             filter_tags: Vec::new(),
+            search_query: String::new(),
             image_cache: HashMap::new(),
         };
     }
@@ -364,20 +378,26 @@ impl AppState {
         }
     }
 
-    /// Note ids to show in the sidebar given the active filter, in stored
-    /// order. With no filter this is every note; otherwise only notes that
-    /// carry *all* the active filter tags (see `note_matches_filter`). Empty
-    /// when locked.
+    /// Note ids to show in the sidebar given the active tag filter *and*
+    /// search query, in stored order. A note shows only if it carries all the
+    /// active filter tags (see `note_matches_filter`) *and* its title or body
+    /// contains the search query (see `note_matches_search`). With neither
+    /// active this is every note. Empty when locked.
     pub fn filtered_note_ids(&self) -> Vec<NoteId> {
         let Phase::Unlocked {
-            notes, filter_tags, ..
+            notes,
+            filter_tags,
+            search_query,
+            ..
         } = &self.phase
         else {
             return Vec::new();
         };
+        let query = search_query.trim().to_lowercase();
         notes
             .iter()
             .filter(|n| note_matches_filter(&n.tags, filter_tags))
+            .filter(|n| note_matches_search(&n.title, &n.body, &query))
             .map(|n| n.id)
             .collect()
     }
@@ -388,6 +408,37 @@ impl AppState {
         match &self.phase {
             Phase::Unlocked { notes, .. } => notes.len(),
             _ => 0,
+        }
+    }
+
+    // ── Sidebar full-text search ────────────────────────────────────────
+    //
+    // Session-only UI state paralleling the tag filter: a free-text query the
+    // note list is narrowed by (case-insensitive substring over title + body).
+    // Intersects with the tag filter — a note shows only when it matches both.
+    // Lives in `Unlocked`, drops on lock, and is never persisted.
+
+    /// Replace the active search query. Stored verbatim (the match lowercases
+    /// at compare time, see `note_matches_search`); an all-whitespace query
+    /// reads as "not searching". No-op when locked.
+    pub fn set_search_query(&mut self, raw: &str) {
+        if let Phase::Unlocked { search_query, .. } = &mut self.phase {
+            raw.clone_into(search_query);
+        }
+    }
+
+    /// Whether a non-empty search query is currently narrowing the note list.
+    /// Lets the sidebar phrase its empty-list message ("no notes match your
+    /// search") and clears alongside the filter on `+ New`.
+    pub fn is_searching(&self) -> bool {
+        matches!(&self.phase, Phase::Unlocked { search_query, .. } if !search_query.trim().is_empty())
+    }
+
+    /// Clear the search query so every note shows again (subject to any tag
+    /// filter still active).
+    pub fn clear_search(&mut self) {
+        if let Phase::Unlocked { search_query, .. } = &mut self.phase {
+            search_query.clear();
         }
     }
 
@@ -644,6 +695,18 @@ pub fn note_matches_filter(tags: &[String], filter: &[String]) -> bool {
     filter.iter().all(|f| tags.iter().any(|t| t == f))
 }
 
+/// True when `title` or `body` contains `query` (case-insensitive substring).
+/// `query` is expected already trimmed + lowercased by the caller
+/// ([`AppState::filtered_note_ids`]); an empty query matches everything, so an
+/// inactive search never hides a note. Searches plaintext content only — tags
+/// are handled by the separate tag filter.
+pub fn note_matches_search(title: &str, body: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    title.to_lowercase().contains(query) || body.to_lowercase().contains(query)
+}
+
 /// Upper bound on a single stored attachment. Guards the DB and memory
 /// against a pathological multi-hundred-MB blob; ordinary screenshots and
 /// photos sit comfortably under this.
@@ -890,6 +953,7 @@ mod tests {
         AppState {
             salt: [0u8; SALT_SIZE],
             next_id: 2,
+            search_input_idx: None,
             phase: Phase::Unlocked {
                 dek: derive_key(b"x", &[0u8; SALT_SIZE]),
                 notes,
@@ -897,6 +961,7 @@ mod tests {
                 storage: open_tmp_storage(),
                 dirty: HashSet::new(),
                 filter_tags: Vec::new(),
+                search_query: String::new(),
                 image_cache: HashMap::new(),
             },
         }
@@ -920,6 +985,7 @@ mod tests {
         AppState {
             salt: [0u8; SALT_SIZE],
             next_id: 3,
+            search_input_idx: None,
             phase: Phase::Unlocked {
                 dek: derive_key(b"x", &[0u8; SALT_SIZE]),
                 notes,
@@ -927,6 +993,7 @@ mod tests {
                 storage: open_tmp_storage(),
                 dirty: HashSet::new(),
                 filter_tags: Vec::new(),
+                search_query: String::new(),
                 image_cache: HashMap::new(),
             },
         }
@@ -1043,6 +1110,82 @@ mod tests {
         s.prune_filter();
         assert!(!s.is_filter_active("work"));
         assert!(!s.is_filtering());
+    }
+
+    // ── Search ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn note_matches_search_is_case_insensitive_over_title_and_body() {
+        // Empty query matches everything (search inactive never hides a note).
+        assert!(note_matches_search("Title", "Body", ""));
+        // Title hit, case-insensitive (caller pre-lowercases the query).
+        assert!(note_matches_search("Shopping List", "", "shopping"));
+        // Body hit.
+        assert!(note_matches_search("", "buy milk and eggs", "milk"));
+        // No hit in either field.
+        assert!(!note_matches_search(
+            "Shopping List",
+            "buy milk",
+            "passport"
+        ));
+    }
+
+    #[test]
+    fn set_and_clear_search_toggle_is_searching() {
+        let mut s = unlocked_state_with_one_note();
+        assert!(!s.is_searching());
+        s.set_search_query("milk");
+        assert!(s.is_searching());
+        // All-whitespace reads as not searching even though it's stored.
+        s.set_search_query("   ");
+        assert!(!s.is_searching());
+        s.set_search_query("milk");
+        s.clear_search();
+        assert!(!s.is_searching());
+    }
+
+    #[test]
+    fn search_narrows_filtered_ids_over_title_and_body() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        // Give the two notes distinct, searchable content.
+        if let Phase::Unlocked { notes, .. } = &mut s.phase {
+            notes[0].title = "Groceries".into();
+            notes[0].body = "buy milk".into();
+            notes[1].title = "Meeting".into();
+            notes[1].body = "agenda".into();
+        }
+        // No query → both, in stored order.
+        assert_eq!(s.filtered_note_ids(), vec![1, 2]);
+        // Title match, case-insensitive.
+        s.set_search_query("GROCER");
+        assert_eq!(s.filtered_note_ids(), vec![1]);
+        // Body match on the other note.
+        s.set_search_query("agenda");
+        assert_eq!(s.filtered_note_ids(), vec![2]);
+        // No match → empty, but note_count still ignores the query.
+        s.set_search_query("passport");
+        assert!(s.filtered_note_ids().is_empty());
+        assert_eq!(s.note_count(), 2);
+    }
+
+    #[test]
+    fn search_and_tag_filter_intersect() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        // Note 1 = tag "work"; note 2 = tag "personal". Both bodies mention
+        // "report" so the search alone wouldn't disambiguate them.
+        if let Phase::Unlocked { notes, .. } = &mut s.phase {
+            notes[0].body = "quarterly report".into();
+            notes[1].body = "expense report".into();
+        }
+        s.set_search_query("report");
+        // Search alone → both.
+        assert_eq!(s.filtered_note_ids(), vec![1, 2]);
+        // Add a tag filter → intersection with the search.
+        s.toggle_filter_tag("work");
+        assert_eq!(s.filtered_note_ids(), vec![1]);
+        // A query that misses the tag-matching note empties the intersection.
+        s.set_search_query("expense");
+        assert!(s.filtered_note_ids().is_empty());
     }
 
     // ── Attachments ─────────────────────────────────────────────────────
