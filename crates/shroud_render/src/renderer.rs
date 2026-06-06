@@ -96,6 +96,27 @@ impl TextVertex {
     };
 }
 
+/// A rigid rotation applied to a glyph quad about a screen-space pivot.
+///
+/// `angle` is in radians and **clockwise-positive in screen coordinates**
+/// (Y points down), matching the on-screen sense of a CSS `rotate()`: a
+/// `▸` chevron rotated by `+PI/2` points down (`▾`).
+///
+/// The rotation is applied per-vertex on the CPU in [`build_text_geometry`]
+/// — there is no shader or uniform plumbing, and rects/images are
+/// unaffected (they stay axis-aligned). All glyphs that make up one rotated
+/// element share the same `pivot` (the element's visual center) so they spin
+/// as a rigid group.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct GlyphRotation {
+    /// Rotation angle in radians, clockwise-positive (screen Y-down).
+    pub angle: f32,
+    /// Pivot X in screen pixels (top-left origin).
+    pub pivot_x: f32,
+    /// Pivot Y in screen pixels (top-left origin).
+    pub pivot_y: f32,
+}
+
 /// A positioned glyph to draw. Produced by the text engine, consumed by the renderer.
 pub struct DrawGlyph {
     /// Screen X position (pixels, top-left origin).
@@ -110,6 +131,10 @@ pub struct DrawGlyph {
     pub cache_key: shroud_text::CacheKey,
     /// Scissor region in screen pixels; `None` means no clipping.
     pub clip_rect: Option<Rect>,
+    /// Optional rigid rotation about a screen-space pivot. `None` (the
+    /// default) leaves the glyph axis-aligned. Rotation does not change
+    /// scissor batching — clipping stays axis-aligned.
+    pub rotation: Option<GlyphRotation>,
 }
 
 /// A colored rectangle to draw.
@@ -980,11 +1005,19 @@ impl Renderer {
             let pw = glyph.image.width as f32;
             let ph = glyph.image.height as f32;
 
-            // Pixel → NDC
-            let x0 = (px / sw) * 2.0 - 1.0;
-            let y0 = 1.0 - (py / sh) * 2.0;
-            let x1 = ((px + pw) / sw) * 2.0 - 1.0;
-            let y1 = 1.0 - ((py + ph) / sh) * 2.0;
+            // Four corners in screen pixels (TL, TR, BR, BL), optionally
+            // rotated rigidly about the glyph's pivot. Rotation happens in
+            // pixel space *before* the NDC map so the aspect ratio is honored
+            // (NDC is anisotropic when the surface isn't square).
+            let mut corners = [(px, py), (px + pw, py), (px + pw, py + ph), (px, py + ph)];
+            if let Some(rot) = glyph.rotation {
+                let (sin, cos) = rot.angle.sin_cos();
+                for (cx, cy) in &mut corners {
+                    let (rx, ry) = rotate_about(*cx, *cy, rot.pivot_x, rot.pivot_y, sin, cos);
+                    *cx = rx;
+                    *cy = ry;
+                }
+            }
 
             // Atlas UV
             let uv = region.uv(aw, ah);
@@ -995,23 +1028,24 @@ impl Renderer {
 
             let c = glyph.color.to_array();
 
+            let ndc = |(x, y): (f32, f32)| [(x / sw) * 2.0 - 1.0, 1.0 - (y / sh) * 2.0];
             vertices.push(TextVertex {
-                position: [x0, y0],
+                position: ndc(corners[0]),
                 uv: [u0, v0],
                 color: c,
             });
             vertices.push(TextVertex {
-                position: [x1, y0],
+                position: ndc(corners[1]),
                 uv: [u1, v0],
                 color: c,
             });
             vertices.push(TextVertex {
-                position: [x1, y1],
+                position: ndc(corners[2]),
                 uv: [u1, v1],
                 color: c,
             });
             vertices.push(TextVertex {
-                position: [x0, y1],
+                position: ndc(corners[3]),
                 uv: [u0, v1],
                 color: c,
             });
@@ -1115,6 +1149,16 @@ impl Renderer {
 
         (vertices, indices, batches)
     }
+}
+
+/// Rotate the point `(x, y)` about `(cx, cy)` by the angle whose sine/cosine
+/// are `sin`/`cos`. With screen Y pointing down, a positive angle (positive
+/// `sin`) rotates clockwise on screen. Caller precomputes `sin_cos` once per
+/// glyph group so all four corners share the trig.
+fn rotate_about(x: f32, y: f32, cx: f32, cy: f32, sin: f32, cos: f32) -> (f32, f32) {
+    let dx = x - cx;
+    let dy = y - cy;
+    (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
 }
 
 /// Apply a scissor rectangle to the render pass, clamped to the surface bounds.
@@ -1249,3 +1293,44 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return texel * in.color;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::rotate_about;
+
+    fn approx(a: (f32, f32), b: (f32, f32)) {
+        assert!(
+            (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4,
+            "expected {b:?}, got {a:?}"
+        );
+    }
+
+    #[test]
+    fn zero_angle_is_identity() {
+        // sin 0 / cos 1 — every point maps to itself regardless of pivot.
+        approx(rotate_about(7.0, 3.0, 2.0, 9.0, 0.0, 1.0), (7.0, 3.0));
+    }
+
+    #[test]
+    fn pivot_is_a_fixed_point() {
+        // The pivot never moves, whatever the angle.
+        let (sin, cos) = std::f32::consts::FRAC_PI_2.sin_cos();
+        approx(rotate_about(5.0, 5.0, 5.0, 5.0, sin, cos), (5.0, 5.0));
+    }
+
+    #[test]
+    fn quarter_turn_is_clockwise_on_screen() {
+        // Screen Y points down. A point one unit to the right of the pivot,
+        // rotated +90°, must land one unit *below* the pivot — i.e. the shape
+        // turns clockwise (a `▸` chevron becomes `▾`).
+        let (sin, cos) = std::f32::consts::FRAC_PI_2.sin_cos();
+        approx(rotate_about(11.0, 10.0, 10.0, 10.0, sin, cos), (10.0, 11.0));
+    }
+
+    #[test]
+    fn half_turn_flips_through_the_pivot() {
+        // +180° sends a corner to the diametrically opposite side.
+        let (sin, cos) = std::f32::consts::PI.sin_cos();
+        approx(rotate_about(12.0, 14.0, 10.0, 10.0, sin, cos), (8.0, 6.0));
+    }
+}

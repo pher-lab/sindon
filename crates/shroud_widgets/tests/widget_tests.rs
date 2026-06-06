@@ -100,6 +100,70 @@ fn text_widget_produces_glyphs() {
 }
 
 #[test]
+fn text_widget_rotation_tags_glyphs_with_a_shared_pivot() {
+    // A rotated chevron must stamp every glyph with the same rotation so the
+    // renderer spins them as a rigid group. The angle is the requested degrees
+    // in radians; the pivot is the widget's layout center.
+    use shroud_text::TextEngine;
+    let theme = Theme::default();
+    let mut engine = TextEngine::new();
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    // Use an ASCII glyph the test font is guaranteed to cover — the rotation
+    // path is glyph-agnostic, and a real chevron char may be absent here.
+    let _chevron = tree.add_child(root, TextWidget::new(">").font_size(24.0).rotation(90.0));
+
+    // Use the measure-based layout so the text node gets a real height (the
+    // pivot is its layout center, so a zero-height box would put pivot.y at 0).
+    tree.compute_layout_with_measure(800.0, 600.0, &mut engine, &theme);
+    let mut ctx = PaintContext::new(theme.clone());
+    tree.paint(&mut ctx);
+
+    assert!(
+        !ctx.glyphs.is_empty(),
+        "chevron should paint at least one glyph"
+    );
+    let first = ctx.glyphs[0]
+        .rotation
+        .expect("rotated text widget should tag glyphs with a rotation");
+    assert!(
+        (first.angle - 90.0_f32.to_radians()).abs() < 1e-4,
+        "angle should be 90° in radians, got {}",
+        first.angle
+    );
+    assert!(
+        first.pivot_x > 0.0 && first.pivot_y > 0.0,
+        "pivot should land inside the laid-out container, got ({}, {})",
+        first.pivot_x,
+        first.pivot_y
+    );
+    // Every glyph shares one pivot so the group rotates rigidly.
+    for g in &ctx.glyphs {
+        assert_eq!(g.rotation, Some(first));
+    }
+}
+
+#[test]
+fn text_widget_without_rotation_leaves_glyphs_upright() {
+    // The default (and an explicit 0°) must take the upright fast path so the
+    // renderer skips the per-vertex rotation entirely.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let _a = tree.add_child(root, TextWidget::new("Hi").font_size(24.0));
+    let _b = tree.add_child(root, TextWidget::new("Yo").font_size(24.0).rotation(0.0));
+
+    tree.compute_layout(800.0, 600.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    assert!(!ctx.glyphs.is_empty());
+    assert!(
+        ctx.glyphs.iter().all(|g| g.rotation.is_none()),
+        "no rotation (or 0°) should leave glyphs axis-aligned"
+    );
+}
+
+#[test]
 fn text_widget_skips_paint_when_layout_width_is_zero() {
     // Defense-in-depth: when an enclosing flex container squeezes the text
     // widget's layout main-axis to zero (e.g. an inner column inside a row

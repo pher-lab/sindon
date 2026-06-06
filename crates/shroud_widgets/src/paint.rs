@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use shroud_core::{Color, Rect, Theme};
-use shroud_render::{DecodedImage, DrawGlyph, DrawImage, DrawRect, LayerSnapshot};
+use shroud_core::{Color, Point, Rect, Theme};
+use shroud_render::{DecodedImage, DrawGlyph, DrawImage, DrawRect, GlyphRotation, LayerSnapshot};
 use shroud_text::{GlyphImage, TextEngine};
 
 /// Accumulates draw commands produced by widget `paint()` calls.
@@ -29,6 +29,12 @@ pub struct PaintContext {
     clip_stack: Vec<Rect>,
     /// Stack of accumulated translation offsets.
     offset_stack: Vec<(f32, f32)>,
+    /// Stack of active glyph rotations (each with an *absolute* pivot —
+    /// the active offset is folded in at `push_rotation` time). Only glyph
+    /// draws consult this; rects and images stay axis-aligned. The
+    /// innermost entry wins — rotations are not composed, since the sole
+    /// use case (icon glyphs / disclosure chevrons) never nests them.
+    rotation_stack: Vec<GlyphRotation>,
     /// Boundaries between paint *layers* — each entry snapshots the
     /// command-vec lengths at the moment the corresponding overlay
     /// layer started painting.
@@ -77,6 +83,7 @@ impl PaintContext {
             theme,
             clip_stack: Vec::new(),
             offset_stack: Vec::new(),
+            rotation_stack: Vec::new(),
             layer_starts: Vec::new(),
             ime_cursor_area: None,
             suppress_ime: false,
@@ -137,6 +144,36 @@ impl PaintContext {
         self.offset_stack.last().copied().unwrap_or((0.0, 0.0))
     }
 
+    /// Push a glyph rotation. Subsequent [`draw_glyph`](Self::draw_glyph) /
+    /// [`draw_secure_glyph`](Self::draw_secure_glyph) calls spin their quads
+    /// rigidly about `pivot` by `angle` radians (clockwise-positive in screen
+    /// space, Y-down — a `▸` chevron at `+PI/2` points down).
+    ///
+    /// `pivot` is in the same widget-local coordinate space as draw positions;
+    /// the active offset is folded in here so the pivot and the glyphs it
+    /// turns end up in the same absolute space. Only glyphs are affected —
+    /// rects (backgrounds, focus rings, decoration lines) stay axis-aligned.
+    ///
+    /// Pair every call with [`pop_rotation`](Self::pop_rotation).
+    pub fn push_rotation(&mut self, angle: f32, pivot: Point) {
+        let (ox, oy) = self.current_offset();
+        self.rotation_stack.push(GlyphRotation {
+            angle,
+            pivot_x: pivot.x + ox,
+            pivot_y: pivot.y + oy,
+        });
+    }
+
+    /// Pop the most recent glyph rotation.
+    pub fn pop_rotation(&mut self) {
+        self.rotation_stack.pop();
+    }
+
+    /// The currently active glyph rotation (innermost), if any.
+    pub fn current_rotation(&self) -> Option<GlyphRotation> {
+        self.rotation_stack.last().copied()
+    }
+
     /// Current effective clip rectangle, if any.
     pub fn current_clip(&self) -> Option<Rect> {
         self.clip_stack.last().copied()
@@ -183,6 +220,7 @@ impl PaintContext {
             color,
             cache_key,
             clip_rect: self.current_clip(),
+            rotation: self.current_rotation(),
         });
     }
 
@@ -221,6 +259,7 @@ impl PaintContext {
             color,
             cache_key,
             clip_rect: self.current_clip(),
+            rotation: self.current_rotation(),
         });
     }
 
@@ -312,6 +351,7 @@ impl PaintContext {
         self.secure_glyphs.clear();
         self.images.clear();
         self.layer_starts.clear();
+        self.rotation_stack.clear();
         self.ime_cursor_area = None;
         self.suppress_ime = false;
     }
@@ -404,6 +444,53 @@ mod tests {
         ctx.suppress_ime();
         ctx.suppress_ime();
         assert!(ctx.ime_suppressed());
+    }
+
+    #[test]
+    fn rotation_defaults_to_none() {
+        // A fresh context has no active rotation — glyph draws stay
+        // axis-aligned, which the renderer short-circuits.
+        let ctx = PaintContext::default();
+        assert_eq!(ctx.current_rotation(), None);
+    }
+
+    #[test]
+    fn push_rotation_folds_in_the_active_offset() {
+        // The pivot is given in widget-local coords; push_rotation adds the
+        // active offset so the pivot lives in the same absolute space as the
+        // glyph positions draw_glyph emits (which also add the offset).
+        let mut ctx = PaintContext::default();
+        ctx.push_offset(100.0, 50.0);
+        ctx.push_rotation(std::f32::consts::FRAC_PI_2, Point::new(10.0, 20.0));
+        let rot = ctx.current_rotation().expect("rotation active");
+        assert!((rot.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        assert_eq!((rot.pivot_x, rot.pivot_y), (110.0, 70.0));
+        ctx.pop_rotation();
+        assert_eq!(ctx.current_rotation(), None);
+        ctx.pop_offset();
+    }
+
+    #[test]
+    fn innermost_rotation_wins() {
+        // Rotations don't compose; the most recent push is the active one,
+        // and popping it restores the previous.
+        let mut ctx = PaintContext::default();
+        ctx.push_rotation(0.5, Point::new(0.0, 0.0));
+        ctx.push_rotation(1.5, Point::new(0.0, 0.0));
+        assert!((ctx.current_rotation().unwrap().angle - 1.5).abs() < 1e-6);
+        ctx.pop_rotation();
+        assert!((ctx.current_rotation().unwrap().angle - 0.5).abs() < 1e-6);
+        ctx.pop_rotation();
+    }
+
+    #[test]
+    fn clear_resets_rotation_stack() {
+        // Every frame starts unrotated even if a widget left a rotation on
+        // the stack (it never should, but clear is the safety net).
+        let mut ctx = PaintContext::default();
+        ctx.push_rotation(1.0, Point::new(5.0, 5.0));
+        ctx.clear();
+        assert_eq!(ctx.current_rotation(), None);
     }
 
     #[test]

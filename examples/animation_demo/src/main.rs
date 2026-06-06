@@ -15,10 +15,14 @@
 //! 3. **Hover fade** — hoverable containers and buttons ease between their
 //!    resting and hover colors by default (the B-8 wiring); one row opts out
 //!    with `hover_transition(Duration::ZERO)` to contrast the instant flip.
+//! 4. **Transform rotate** — a disclosure header whose `▸` chevron eases
+//!    0° → 90° as the section opens, driven by `TextWidget::rotation` reading
+//!    an `Animated<f32>`. This is the third and final B-8 wiring path.
 //!
 //! Visual check: click Toggle and watch the swatches cross-fade at different
 //! rates and the box fade out/in; hover the bottom rows / button and watch
-//! the highlight ease in and out. When motion stops, CPU goes idle (no
+//! the highlight ease in and out; click the Details header and watch the
+//! chevron rotate as the body appears. When motion stops, CPU goes idle (no
 //! continuous repaint at rest).
 
 use std::time::Duration;
@@ -35,7 +39,7 @@ const DURATION: Duration = Duration::from_millis(450);
 fn main() {
     App::new()
         .title("shroud — animation / transition demo")
-        .size(680, 560)
+        .size(680, 720)
         .run(|_scope| {
             // The two endpoints every swatch tweens between.
             let color_a = Color::rgb(0.20, 0.45, 0.85);
@@ -181,6 +185,62 @@ fn main() {
                     .background(Color::rgb(0.20, 0.45, 0.85))
                     .hover_background(Color::rgb(0.35, 0.60, 0.95))
                     .on_click(|_| {}),
+            );
+
+            // Transform rotate (B-8 wiring 3/3): a disclosure header whose
+            // chevron eases 0° → 90° as the section opens. The chevron is just
+            // a `TextWidget` glyph with `.rotation(Animated<f32>)`; the
+            // renderer spins the glyph quad about its center (rects stay
+            // axis-aligned), and `.visible` cascades the body in / out.
+            tree.add_child(
+                root,
+                TextWidget::new("Transform rotate (B-8 wiring 3/3) — click the header")
+                    .color(Color::rgb(0.70, 0.70, 0.76)),
+            );
+            let open = Signal::new(false);
+            let chevron = Animated::new(0.0_f32, DURATION, Easing::EaseInOut);
+            let chevron_toggle = chevron.clone();
+            let header = tree.add_child(
+                root,
+                Container::row()
+                    .gap(10.0)
+                    .align_center()
+                    .padding(10.0)
+                    .radius(8.0)
+                    .hoverable()
+                    .on_press(move |_pos, _ctx| {
+                        let next = !open.get();
+                        open.set(next);
+                        chevron_toggle.set(if next { 90.0 } else { 0.0 });
+                    }),
+            );
+            tree.add_child(
+                header,
+                TextWidget::new("\u{25B8}")
+                    .font_size(20.0)
+                    .color(Color::WHITE)
+                    .rotation(chevron),
+            );
+            tree.add_child(header, TextWidget::new("Details").color(Color::WHITE));
+
+            let body = tree.add_child(
+                root,
+                Container::column()
+                    .visible(open)
+                    .gap(6.0)
+                    .padding(12.0)
+                    .radius(8.0)
+                    .background(Color::rgb(0.16, 0.17, 0.21)),
+            );
+            tree.add_child(
+                body,
+                TextWidget::new("The chevron eases 0° → 90° as this section opens.")
+                    .color(Color::rgb(0.70, 0.70, 0.76)),
+            );
+            tree.add_child(
+                body,
+                TextWidget::new("Rotation is per-glyph in the renderer; backgrounds stay square.")
+                    .color(Color::rgb(0.70, 0.70, 0.76)),
             );
 
             tree

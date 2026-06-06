@@ -80,6 +80,13 @@ pub struct TextWidget {
     /// only fires the handler when press and release land on the same link
     /// (mirrors `Button`'s pressed-state click semantics).
     pressed_link: Option<String>,
+    /// Optional rotation in **degrees**, clockwise-positive on screen. Read on
+    /// every paint (so a `Signal<f32>` or `Animated<f32>` drives a spinning
+    /// disclosure chevron with zero per-frame wiring). Glyphs turn rigidly
+    /// about the widget's layout center. `None` / `0.0` paints upright.
+    /// Honored on the plain-text path (the icon-glyph use case); rich-span
+    /// content paints unrotated.
+    rotation: Option<Reactive<f32>>,
 }
 
 impl TextWidget {
@@ -99,6 +106,7 @@ impl TextWidget {
             on_link_click: None,
             link_hits: RefCell::new(Vec::new()),
             pressed_link: None,
+            rotation: None,
         }
     }
 
@@ -118,6 +126,7 @@ impl TextWidget {
             on_link_click: None,
             link_hits: RefCell::new(Vec::new()),
             pressed_link: None,
+            rotation: None,
         }
     }
 
@@ -146,6 +155,7 @@ impl TextWidget {
             on_link_click: None,
             link_hits: RefCell::new(Vec::new()),
             pressed_link: None,
+            rotation: None,
         }
     }
 
@@ -175,6 +185,22 @@ impl TextWidget {
     /// text overflows the laid-out width. Default `false` (wrap on).
     pub fn truncate(mut self, on: bool) -> Self {
         self.truncate = on;
+        self
+    }
+
+    /// Rotate the rendered glyphs by `degrees` clockwise about the widget's
+    /// layout center. Accepts a literal `f32`, a `Signal<f32>`, or an
+    /// `Animated<f32>` (via `Into<Reactive<f32>>`), re-read every paint — so a
+    /// disclosure chevron animates 0° → 90° just by handing this an
+    /// `Animated<f32>`, no per-frame plumbing.
+    ///
+    /// Intended for single icon glyphs (a `▸`/`▾` chevron, a `+`/`×` toggle).
+    /// Only the plain-text path honors it; the background, focus ring, and any
+    /// decoration lines stay axis-aligned, and rich-span content paints
+    /// unrotated. The widget's measured box is unchanged — rotation is purely
+    /// visual, so reserve square-ish space for a glyph that will spin.
+    pub fn rotation(mut self, degrees: impl Into<Reactive<f32>>) -> Self {
+        self.rotation = Some(degrees.into());
         self
     }
 
@@ -520,6 +546,24 @@ fn paint_plain(
     let truncate = widget.truncate;
     let attrs = &widget.attrs;
 
+    // Resolve the (radians, pivot) rotation once. `0.0` collapses to `None`
+    // so the upright fast path skips the push/pop entirely. The pivot is the
+    // layout center, so a single icon glyph spins in place.
+    let rotation = widget
+        .rotation
+        .as_ref()
+        .map(|r| r.get())
+        .filter(|deg| *deg != 0.0)
+        .map(|deg| {
+            (
+                deg.to_radians(),
+                Point::new(
+                    layout.origin.x + layout.size.width / 2.0,
+                    layout.origin.y + layout.size.height / 2.0,
+                ),
+            )
+        });
+
     if truncate {
         // Single-line, may need ellipsis. Clip to layout so any sub-pixel
         // slop on the right edge can't bleed past the row.
@@ -547,6 +591,9 @@ fn paint_plain(
                 .shape_text_attrs(&display, font_size, line_height, None, attrs)
         };
 
+        if let Some((angle, pivot)) = rotation {
+            ctx.push_rotation(angle, pivot);
+        }
         for glyph in &to_paint.glyphs {
             if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                 ctx.draw_glyph(
@@ -557,6 +604,9 @@ fn paint_plain(
                     glyph.cache_key,
                 );
             }
+        }
+        if rotation.is_some() {
+            ctx.pop_rotation();
         }
 
         ctx.pop_clip();
@@ -571,6 +621,9 @@ fn paint_plain(
         attrs,
     );
 
+    if let Some((angle, pivot)) = rotation {
+        ctx.push_rotation(angle, pivot);
+    }
     for glyph in &shaped.glyphs {
         if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
             ctx.draw_glyph(
@@ -581,6 +634,9 @@ fn paint_plain(
                 glyph.cache_key,
             );
         }
+    }
+    if rotation.is_some() {
+        ctx.pop_rotation();
     }
 }
 
