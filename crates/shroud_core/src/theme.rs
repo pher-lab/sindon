@@ -3,7 +3,7 @@
 //! A `Theme` defines colors, typography, and spacing that widgets
 //! use as defaults. Per-widget overrides still work via builder methods.
 
-use crate::Color;
+use crate::{Color, Lerp};
 
 /// A complete visual theme for the UI.
 #[derive(Debug, Clone, PartialEq)]
@@ -302,6 +302,79 @@ impl Default for Theme {
     }
 }
 
+// --- Interpolation (theme cross-fade) --------------------------------------
+//
+// `Lerp for Theme` lets a theme swap animate as a cross-fade rather than a
+// hard cut (drive it with `Animated<Theme>` + `App::theme`). Only *color*
+// tokens interpolate; typography and spacing snap to the target. Animating
+// font sizes would reflow text on every frame of the fade, and a font-size
+// change is meant to read as instant — so the result always carries `to`'s
+// typography/spacing. (That means `lerp(to, 0.0)` is *not* a strict
+// identity when `self` and `to` differ in typography; the only path that
+// hits that case is a font-size change, where the instant snap is exactly
+// the wanted behavior.)
+
+impl Lerp for Colors {
+    fn lerp(&self, to: &Self, t: f32) -> Self {
+        Self {
+            background: self.background.lerp(&to.background, t),
+            surface: self.surface.lerp(&to.surface, t),
+            surface_variant: self.surface_variant.lerp(&to.surface_variant, t),
+            on_background: self.on_background.lerp(&to.on_background, t),
+            on_surface: self.on_surface.lerp(&to.on_surface, t),
+            on_surface_variant: self.on_surface_variant.lerp(&to.on_surface_variant, t),
+            primary: self.primary.lerp(&to.primary, t),
+            on_primary: self.on_primary.lerp(&to.on_primary, t),
+            primary_hover: self.primary_hover.lerp(&to.primary_hover, t),
+            primary_pressed: self.primary_pressed.lerp(&to.primary_pressed, t),
+            input_background: self.input_background.lerp(&to.input_background, t),
+            input_background_focused: self
+                .input_background_focused
+                .lerp(&to.input_background_focused, t),
+            input_border: self.input_border.lerp(&to.input_border, t),
+            input_border_focused: self.input_border_focused.lerp(&to.input_border_focused, t),
+            input_placeholder: self.input_placeholder.lerp(&to.input_placeholder, t),
+            error: self.error.lerp(&to.error, t),
+            warning: self.warning.lerp(&to.warning, t),
+            success: self.success.lerp(&to.success, t),
+        }
+    }
+}
+
+impl Lerp for FocusStyle {
+    fn lerp(&self, to: &Self, t: f32) -> Self {
+        Self {
+            ring_color: self.ring_color.lerp(&to.ring_color, t),
+            // Ring geometry snaps to the target — only the color fades.
+            ring_width: to.ring_width,
+            ring_offset: to.ring_offset,
+        }
+    }
+}
+
+impl Lerp for HoverStyle {
+    fn lerp(&self, to: &Self, t: f32) -> Self {
+        Self {
+            bg: self.bg.lerp(&to.bg, t),
+            fg: self.fg.lerp(&to.fg, t),
+            border: self.border.lerp(&to.border, t),
+        }
+    }
+}
+
+impl Lerp for Theme {
+    fn lerp(&self, to: &Self, t: f32) -> Self {
+        Self {
+            colors: self.colors.lerp(&to.colors, t),
+            focus: self.focus.lerp(&to.focus, t),
+            hover: self.hover.lerp(&to.hover, t),
+            // Snap, don't tween (see the note above this impl block).
+            typography: to.typography.clone(),
+            spacing: to.spacing,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +411,67 @@ mod tests {
         assert_eq!(base.spacing, scaled.spacing);
         assert_eq!(base.focus, scaled.focus);
         assert_eq!(base.hover, scaled.hover);
+    }
+
+    #[test]
+    fn theme_lerp_start_is_self_end_reaches_target() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+
+        // t == 0 is an exact identity — the displayed theme rests at `from`.
+        assert_eq!(dark.lerp(&light, 0.0), dark);
+
+        // t == 1 reaches the target up to float rounding. (The animation
+        // layer snaps to an exact target once settled; a direct
+        // `lerp(_, 1.0)` only needs to *converge*, since `self + (to-self)`
+        // isn't bit-exact for arbitrary floats.)
+        let end = dark.lerp(&light, 1.0);
+        let close = |a: Color, b: Color| {
+            (a.r - b.r).abs() < 1e-6
+                && (a.g - b.g).abs() < 1e-6
+                && (a.b - b.b).abs() < 1e-6
+                && (a.a - b.a).abs() < 1e-6
+        };
+        assert!(close(end.colors.background, light.colors.background));
+        assert!(close(end.colors.surface_variant, light.colors.surface_variant));
+        assert!(close(end.hover.bg, light.hover.bg));
+        assert!(close(end.focus.ring_color, light.focus.ring_color));
+        // Snapped tokens land exactly on the target.
+        assert_eq!(end.typography, light.typography);
+        assert_eq!(end.spacing, light.spacing);
+    }
+
+    #[test]
+    fn theme_lerp_midpoint_blends_every_color_group() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+        let mid = dark.lerp(&light, 0.5);
+
+        assert_eq!(
+            mid.colors.background,
+            dark.colors.background.lerp(&light.colors.background, 0.5)
+        );
+        assert_eq!(
+            mid.colors.primary,
+            dark.colors.primary.lerp(&light.colors.primary, 0.5)
+        );
+        assert_eq!(mid.hover.bg, dark.hover.bg.lerp(&light.hover.bg, 0.5));
+        assert_eq!(
+            mid.focus.ring_color,
+            dark.focus.ring_color.lerp(&light.focus.ring_color, 0.5)
+        );
+    }
+
+    #[test]
+    fn theme_lerp_snaps_typography_and_spacing_to_target() {
+        // Font sizes must not tween: a partially-faded theme already carries
+        // the destination's typography/spacing so text never reflows during
+        // the color cross-fade.
+        let small = Theme::dark().with_font_scale(0.8);
+        let large = Theme::dark().with_font_scale(1.4);
+        let mid = small.lerp(&large, 0.5);
+        assert_eq!(mid.typography, large.typography);
+        assert_eq!(mid.spacing, large.spacing);
+        assert_ne!(mid.typography, small.typography);
     }
 }

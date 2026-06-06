@@ -9,9 +9,11 @@
 //! The live values are exposed as thread-local [`Signal`]s (mirroring
 //! [`shroud::app::system_theme_signal`]). Both the `App::theme(...)`
 //! reactive and the settings modal read the *same* handles via
-//! [`signals`], so a change in the UI flips every theme-token-driven
-//! color on the next paint (no subtree rebuild) and is written back to
-//! disk through [`persist`].
+//! [`signals`], so a change in the UI re-themes every theme-token-driven
+//! color without a subtree rebuild and is written back to disk through
+//! [`persist`]. A theme swap cross-fades rather than snapping: every
+//! paint-time reader goes through [`current_theme`], which eases an
+//! [`Animated`] toward the resolved [`target_theme`].
 //!
 //! Panel colors that don't come from a widget's own theme default (the
 //! sidebar / editor backgrounds, selected-row highlight, …) read tokens
@@ -28,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use shroud::app::system_theme_signal;
 use shroud::core::{Color, Theme};
 use shroud::platform::SystemTheme;
-use shroud::reactive::{Reactive, Signal};
+use shroud::reactive::{Animated, Easing, Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, TextWidget};
 
@@ -200,11 +202,11 @@ pub fn signals() -> SettingsSignals {
     })
 }
 
-/// Resolve the active [`Theme`] from the current signal values plus the
-/// OS theme. Fed to `App::theme(Reactive::derive(current_theme))` *and*
-/// read by every panel-color helper below, so the framework-themed
-/// widgets and the app's explicit panel colors flip together.
-pub fn current_theme() -> Theme {
+/// Resolve the *target* [`Theme`] from the current signal values plus the
+/// OS theme — the destination any in-flight theme fade eases toward. A pure
+/// function of the settings signals; [`current_theme`] wraps it in the
+/// easing layer the rest of the app actually reads.
+fn target_theme() -> Theme {
     let s = signals();
     let base = match s.theme.get() {
         ThemeChoice::Light => Theme::light(),
@@ -217,6 +219,44 @@ pub fn current_theme() -> Theme {
         },
     };
     base.with_font_scale(s.font.get().scale())
+}
+
+/// Duration of the cross-fade between themes. Short enough to feel
+/// responsive, long enough to read as a transition rather than a flicker.
+const THEME_FADE: Duration = Duration::from_millis(180);
+
+thread_local! {
+    /// The currently-*displayed* theme, easing toward [`target_theme`] over
+    /// [`THEME_FADE`] whenever the target changes. Thread-local for the same
+    /// reason as [`signals`] / `system_theme_signal` — the UI runs
+    /// single-threaded on the event-loop thread. Lazily initialized on the
+    /// first [`current_theme`] read, resting at the startup target (so the
+    /// first frame doesn't fade in from nowhere).
+    static DISPLAYED_THEME: OnceCell<Animated<Theme>> = const { OnceCell::new() };
+}
+
+/// The theme as currently *displayed*, easing toward [`target_theme`].
+///
+/// Fed to `App::theme(Reactive::derive(current_theme))` *and* read by every
+/// panel-color helper below, so the framework-themed widgets and the app's
+/// explicit panel colors cross-fade together on a theme swap (Light ⇄ Dark,
+/// or an OS appearance flip under `System`). Font-size changes still apply
+/// instantly — [`Theme`]'s `Lerp` snaps typography to the target.
+///
+/// Called many times per paint; the retarget check is idempotent within a
+/// frame (once the animator's target matches, later calls don't restart the
+/// fade), and a settled animator casts no frame vote, so the app idles at
+/// rest between transitions.
+pub fn current_theme() -> Theme {
+    let target = target_theme();
+    DISPLAYED_THEME.with(|cell| {
+        let anim =
+            cell.get_or_init(|| Animated::new(target.clone(), THEME_FADE, Easing::EaseInOut));
+        if anim.target() != target {
+            anim.set(target.clone());
+        }
+        anim.get()
+    })
 }
 
 /// Current auto-lock preference. Read by the per-frame tick in `main` to
