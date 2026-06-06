@@ -433,7 +433,10 @@ mod tests {
                 && (a.a - b.a).abs() < 1e-6
         };
         assert!(close(end.colors.background, light.colors.background));
-        assert!(close(end.colors.surface_variant, light.colors.surface_variant));
+        assert!(close(
+            end.colors.surface_variant,
+            light.colors.surface_variant
+        ));
         assert!(close(end.hover.bg, light.hover.bg));
         assert!(close(end.focus.ring_color, light.focus.ring_color));
         // Snapped tokens land exactly on the target.
