@@ -4740,7 +4740,10 @@ fn hoverable_container_paints_theme_hover_bg_when_hovered() {
             .width(200.0)
             .height(200.0)
             .padding(10.0)
-            .hoverable(),
+            .hoverable()
+            // Instant transition isolates the color-selection logic under
+            // test from the (time-driven) default hover fade.
+            .hover_transition(std::time::Duration::ZERO),
     );
     tree.compute_layout(200.0, 200.0);
     let root_rect = tree.layout_rect(root);
@@ -4798,7 +4801,8 @@ fn hover_background_overrides_theme_default() {
         Container::column()
             .width(100.0)
             .height(100.0)
-            .hover_background(override_color),
+            .hover_background(override_color)
+            .hover_transition(std::time::Duration::ZERO),
     );
     tree.compute_layout(100.0, 100.0);
     let root_rect = tree.layout_rect(root);
@@ -4815,6 +4819,132 @@ fn hover_background_overrides_theme_default() {
     tree.paint(&mut paint);
     assert_eq!(paint.rects.len(), 1);
     assert_eq!(paint.rects[0].color, override_color);
+}
+
+#[test]
+fn hover_fade_default_animates_and_requests_frames() {
+    // B-8 wiring: with the default (non-zero) transition, the first paint
+    // after entering a hoverable container must not have arrived at the
+    // hover color yet — it must be mid-fade and vote for another frame so
+    // the event loop keeps pumping until the fade settles.
+    use shroud_reactive::animation::{frame_requested, reset_frame_request};
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(100.0).height(100.0).hoverable());
+    tree.compute_layout(100.0, 100.0);
+    let root_rect = tree.layout_rect(root);
+
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(root_rect.origin.x + 5.0, root_rect.origin.y + 5.0),
+        },
+        &mut event_ctx,
+    );
+
+    reset_frame_request();
+    let mut paint = PaintContext::default();
+    tree.paint(&mut paint);
+    assert!(
+        frame_requested(),
+        "an in-flight hover fade must vote for another frame"
+    );
+}
+
+#[test]
+fn hover_fade_zero_duration_flips_both_ways() {
+    // With an instant transition, a hoverable container with a resting
+    // background snaps to the hover color on enter and back to the resting
+    // color on leave — covering the leave path the bubble tests don't paint.
+    let resting = Color::rgb(0.1, 0.1, 0.1);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::column()
+            .width(100.0)
+            .height(100.0)
+            .background(resting)
+            .hoverable()
+            .hover_transition(std::time::Duration::ZERO),
+    );
+    tree.compute_layout(100.0, 100.0);
+    let root_rect = tree.layout_rect(root);
+    let mut event_ctx = EventContext::new();
+    let theme = Theme::default();
+
+    // Enter → hover color.
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(root_rect.origin.x + 5.0, root_rect.origin.y + 5.0),
+        },
+        &mut event_ctx,
+    );
+    let mut p1 = PaintContext::new(theme.clone());
+    tree.paint(&mut p1);
+    assert_eq!(p1.rects[0].color, theme.hover.bg, "enter → hover color");
+
+    // Leave (move far outside) → back to the resting color.
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(999.0, 999.0),
+        },
+        &mut event_ctx,
+    );
+    let mut p2 = PaintContext::new(theme.clone());
+    tree.paint(&mut p2);
+    assert_eq!(p2.rects[0].color, resting, "leave → resting color");
+}
+
+#[test]
+fn button_hover_fade_zero_duration_and_press_is_instant() {
+    // Button mirrors the container fade between normal and hover, but the
+    // pressed state always overrides instantly (a press must read as
+    // immediate). Driven with a zero-duration transition for determinism.
+    let normal = Color::rgb(0.1, 0.1, 0.1);
+    let hover = Color::rgb(0.2, 0.2, 0.2);
+    let press = Color::rgb(0.3, 0.3, 0.3);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(120.0).height(80.0));
+    let btn = tree.add_child(
+        root,
+        Button::new("Go")
+            .background(normal)
+            .hover_background(hover)
+            .press_background(press)
+            .hover_transition(std::time::Duration::ZERO)
+            .on_click(|_| {}),
+    );
+    tree.compute_layout(120.0, 80.0);
+    let r = tree.layout_rect(btn);
+    let mut event_ctx = EventContext::new();
+    let theme = Theme::default();
+
+    let paint_bg = |tree: &mut WidgetTree, theme: &Theme| {
+        let mut p = PaintContext::new(theme.clone());
+        tree.paint(&mut p);
+        p.rects[0].color
+    };
+
+    // Resting → normal.
+    assert_eq!(paint_bg(&mut tree, &theme), normal);
+
+    // Enter → hover.
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(r.origin.x + 5.0, r.origin.y + 5.0),
+        },
+        &mut event_ctx,
+    );
+    assert_eq!(paint_bg(&mut tree, &theme), hover, "enter → hover");
+
+    // Press → press color, instantly (no fade).
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            button: MouseButton::Left,
+            position: Point::new(r.origin.x + 5.0, r.origin.y + 5.0),
+        },
+        &mut event_ctx,
+    );
+    assert_eq!(paint_bg(&mut tree, &theme), press, "press → press color");
 }
 
 #[test]
@@ -5183,7 +5313,8 @@ fn hoverable_container_lights_up_when_cursor_is_in_child_button() {
             .padding(10.0)
             .gap(8.0)
             .align_center()
-            .hoverable(),
+            .hoverable()
+            .hover_transition(std::time::Duration::ZERO),
     );
     let btn = tree.add_child(row, Button::new("Delete").on_click(|_| {}));
     tree.compute_layout(400.0, 200.0);

@@ -6,16 +6,20 @@
 //! paint through the `Animated<T>: Into<Reactive<T>>` conversion, and the
 //! event loop keeps redrawing only while something is still moving.
 //!
-//! Two things are on display:
+//! Three things are on display:
 //! 1. **Easing comparison** — three swatches share one toggle but use
 //!    `Linear` / `EaseOut` / `EaseInOut`, so the same color transition runs
 //!    at visibly different rates.
 //! 2. **Opacity fade** — a box tweens its background *alpha* between opaque
 //!    and near-transparent, the building block for a theme-switch fade.
+//! 3. **Hover fade** — hoverable containers and buttons ease between their
+//!    resting and hover colors by default (the B-8 wiring); one row opts out
+//!    with `hover_transition(Duration::ZERO)` to contrast the instant flip.
 //!
 //! Visual check: click Toggle and watch the swatches cross-fade at different
-//! rates and the bottom box fade out/in. When motion stops, CPU goes idle
-//! (no continuous repaint at rest).
+//! rates and the box fade out/in; hover the bottom rows / button and watch
+//! the highlight ease in and out. When motion stops, CPU goes idle (no
+//! continuous repaint at rest).
 
 use std::time::Duration;
 
@@ -132,6 +136,51 @@ fn main() {
                     .width_full()
                     .radius(12.0)
                     .background(fade),
+            );
+
+            // Hover fade (B-8 wiring): hoverable containers and buttons now
+            // ease between their resting and hover colors by default — move
+            // the cursor over the rows below to see it. The right-hand row
+            // opts out with `hover_transition(Duration::ZERO)` so the default
+            // fade and the old instant flip sit side by side.
+            tree.add_child(
+                root,
+                TextWidget::new("Hover fade (B-8 wiring) — hover the rows / button")
+                    .color(Color::rgb(0.70, 0.70, 0.76)),
+            );
+            let hover_row = tree.add_child(root, Container::row().gap(16.0).height(60.0));
+            let surface = Color::rgb(0.16, 0.17, 0.21);
+            let surface_hover = Color::rgb(0.27, 0.30, 0.38);
+            tree.add_child(
+                hover_row,
+                Container::row()
+                    .grow(1.0)
+                    .height_full()
+                    .align_center()
+                    .padding(16.0)
+                    .radius(10.0)
+                    .background(surface)
+                    .hover_background(surface_hover),
+            );
+            tree.add_child(
+                hover_row,
+                Container::row()
+                    .grow(1.0)
+                    .height_full()
+                    .align_center()
+                    .padding(16.0)
+                    .radius(10.0)
+                    .background(surface)
+                    .hover_background(surface_hover)
+                    .hover_transition(Duration::ZERO),
+            );
+            tree.add_child(
+                root,
+                Button::new("Hover me")
+                    .radius(8.0)
+                    .background(Color::rgb(0.20, 0.45, 0.85))
+                    .hover_background(Color::rgb(0.35, 0.60, 0.95))
+                    .on_click(|_| {}),
             );
 
             tree

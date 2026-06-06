@@ -1,11 +1,19 @@
 //! Button widget — clickable container with text label.
 
+use std::time::Duration;
+
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Color, Rect, Size};
+use shroud_core::{Color, Lerp, Rect, Size};
 use shroud_layout::FlexStyle;
-use shroud_reactive::Reactive;
+use shroud_reactive::{Animated, Easing, Reactive};
+
+/// Default hover color-transition duration — a short fade (120 ms) so the
+/// button eases between its normal and hover backgrounds instead of
+/// snapping. The pressed state is intentionally excluded (a press should
+/// read as instant). Override with [`Button::hover_transition`].
+const DEFAULT_HOVER_TRANSITION: Duration = Duration::from_millis(120);
 
 /// A clickable button with a text label.
 ///
@@ -23,7 +31,12 @@ pub struct Button {
     font_size: Option<f32>,
     on_click: Option<ClickHandler>,
     // Visual state
-    hovered: bool,
+    /// Progress of the normal→hover background fade, lazily created on the
+    /// first MouseEnter/Leave (`None` until then = resting). The pressed
+    /// state overrides this for instant press feedback.
+    hover_anim: Option<Animated<f32>>,
+    /// How long the hover fade takes; `Duration::ZERO` makes it instant.
+    hover_transition: Duration,
     pressed: bool,
     focused: bool,
     // Colors (None = read from theme)
@@ -51,7 +64,8 @@ impl Button {
             label: Reactive::Static(label.into()),
             font_size: None,
             on_click: None,
-            hovered: false,
+            hover_anim: None,
+            hover_transition: DEFAULT_HOVER_TRANSITION,
             pressed: false,
             focused: false,
             normal_bg: None,
@@ -75,7 +89,8 @@ impl Button {
             label: Reactive::derive(f),
             font_size: None,
             on_click: None,
-            hovered: false,
+            hover_anim: None,
+            hover_transition: DEFAULT_HOVER_TRANSITION,
             pressed: false,
             focused: false,
             normal_bg: None,
@@ -119,6 +134,23 @@ impl Button {
     pub fn hover_background(mut self, color: impl Into<Reactive<Color>>) -> Self {
         self.hover_bg = Some(color.into());
         self
+    }
+
+    /// Set how long the normal↔hover background fade takes. Defaults to a
+    /// short fade (120 ms); pass [`Duration::ZERO`] for an instant flip (the
+    /// pre-animation behavior). Does not affect the pressed state, which is
+    /// always instant.
+    pub fn hover_transition(mut self, duration: Duration) -> Self {
+        self.hover_transition = duration;
+        self
+    }
+
+    /// Retarget the hover fade, lazily creating the animator on first use.
+    /// `to` is `1.0` for hovered, `0.0` for resting.
+    fn drive_hover(&mut self, to: f32) {
+        self.hover_anim
+            .get_or_insert_with(|| Animated::new(0.0, self.hover_transition, Easing::EaseInOut))
+            .set(to);
     }
 
     /// Set pressed background color.
@@ -270,12 +302,21 @@ impl Widget for Button {
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);
 
+        // Pressed reads as instant; otherwise fade between normal and hover.
+        // `get()` votes for another frame while the fade is in flight, and
+        // the endpoints short-circuit so a settled state paints its exact
+        // color (float lerp isn't bit-exact at t==1).
         let bg = if self.pressed {
             press
-        } else if self.hovered {
-            hover
         } else {
-            normal
+            let t = self.hover_anim.as_ref().map_or(0.0, |a| a.get());
+            if t >= 1.0 {
+                hover
+            } else if t <= 0.0 {
+                normal
+            } else {
+                normal.lerp(&hover, t)
+            }
         };
 
         // Background
@@ -317,11 +358,11 @@ impl Widget for Button {
     fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
         match event {
             WidgetEvent::MouseEnter => {
-                self.hovered = true;
+                self.drive_hover(1.0);
                 EventResult::Consumed
             }
             WidgetEvent::MouseLeave => {
-                self.hovered = false;
+                self.drive_hover(0.0);
                 self.pressed = false;
                 EventResult::Consumed
             }

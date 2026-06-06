@@ -1,11 +1,19 @@
 //! Container widget — a flexbox layout container.
 
+use std::time::Duration;
+
 use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, Point, Rect};
+use shroud_core::{Color, Lerp, Point, Rect};
 use shroud_layout::FlexStyle;
-use shroud_reactive::Reactive;
+use shroud_reactive::{Animated, Easing, Reactive};
+
+/// Default hover color-transition duration — a short fade (120 ms) so a
+/// hoverable row eases in and out of its highlight instead of snapping,
+/// matching CSS `transition-colors`. Override per-container with
+/// [`Container::hover_transition`] (pass `Duration::ZERO` to disable).
+const DEFAULT_HOVER_TRANSITION: Duration = Duration::from_millis(120);
 
 /// Callback type for [`Container::on_context_menu`]. Kept as a type alias
 /// so the struct field stays inside `clippy::type_complexity`.
@@ -38,7 +46,14 @@ pub struct Container {
     /// work. Flipped on by [`Container::hoverable`] or by setting an
     /// explicit hover bg.
     hoverable: bool,
-    hovered: bool,
+    /// Progress of the hover-bg fade, lazily created on the first
+    /// MouseEnter/Leave (`None` until then = resting / not hovered). `paint`
+    /// lerps the resting background toward the hover background by this
+    /// scalar, so reactive endpoints (e.g. a live theme swap) keep tracking
+    /// underneath the fade.
+    hover_anim: Option<Animated<f32>>,
+    /// How long the hover fade takes; `Duration::ZERO` makes it instant.
+    hover_transition: Duration,
     radius: f32,
     visible: Reactive<bool>,
     /// Optional right-click handler. When set, `MouseDown { button: Right }`
@@ -74,7 +89,8 @@ impl Container {
             background: None,
             hover_bg: None,
             hoverable: false,
-            hovered: false,
+            hover_anim: None,
+            hover_transition: DEFAULT_HOVER_TRANSITION,
             radius: 0.0,
             visible: Reactive::Static(true),
             on_context_menu: None,
@@ -94,7 +110,8 @@ impl Container {
             background: None,
             hover_bg: None,
             hoverable: false,
-            hovered: false,
+            hover_anim: None,
+            hover_transition: DEFAULT_HOVER_TRANSITION,
             radius: 0.0,
             visible: Reactive::Static(true),
             on_context_menu: None,
@@ -143,6 +160,25 @@ impl Container {
         self.hover_bg = Some(color.into());
         self.hoverable = true;
         self
+    }
+
+    /// Set how long the hover background fades when the cursor enters or
+    /// leaves. Defaults to a short fade (120 ms); pass [`Duration::ZERO`]
+    /// for an instant flip (the pre-animation behavior). Only takes effect
+    /// when the container is [`hoverable`](Container::hoverable).
+    pub fn hover_transition(mut self, duration: Duration) -> Self {
+        self.hover_transition = duration;
+        self
+    }
+
+    /// Retarget the hover fade, lazily creating the animator on first use.
+    /// `to` is `1.0` for fully hovered, `0.0` for resting. The tree only
+    /// emits MouseEnter/Leave on an actual hover change, so each call is a
+    /// genuine transition (no redundant restarts to guard against).
+    fn drive_hover(&mut self, to: f32) {
+        self.hover_anim
+            .get_or_insert_with(|| Animated::new(0.0, self.hover_transition, Easing::EaseInOut))
+            .set(to);
     }
 
     /// Round the corners of the background fill by `px`. No effect when no
@@ -350,18 +386,35 @@ impl Widget for Container {
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
-        let hover_bg = if self.hoverable && self.hovered {
-            Some(
-                self.hover_bg
-                    .as_ref()
-                    .map(|c| c.get())
-                    .unwrap_or(ctx.theme.hover.bg),
-            )
-        } else {
-            None
-        };
-        let bg = hover_bg.or_else(|| self.background.as_ref().map(|c| c.get()));
-        if let Some(color) = bg {
+        if self.hoverable {
+            let hover = self
+                .hover_bg
+                .as_ref()
+                .map(|c| c.get())
+                .unwrap_or(ctx.theme.hover.bg);
+            // Resting color: the explicit background, or the hover color at
+            // zero alpha so a bg-less row fades in from transparent.
+            let resting = self
+                .background
+                .as_ref()
+                .map(|c| c.get())
+                .unwrap_or(Color { a: 0.0, ..hover });
+            // `get()` votes for another frame while the fade is in flight.
+            let t = self.hover_anim.as_ref().map_or(0.0, |a| a.get());
+            // Short-circuit the endpoints so a settled state paints its
+            // exact color (float lerp isn't bit-exact at t==1, and we want
+            // pixel-perfect rest states + deterministic instant transitions).
+            let color = if t >= 1.0 {
+                hover
+            } else if t <= 0.0 {
+                resting
+            } else {
+                resting.lerp(&hover, t)
+            };
+            if color.a > 0.0 {
+                ctx.fill_rect_rounded(layout, color, self.radius);
+            }
+        } else if let Some(color) = self.background.as_ref().map(|c| c.get()) {
             ctx.fill_rect_rounded(layout, color, self.radius);
         }
     }
@@ -402,13 +455,13 @@ impl Widget for Container {
         }
         match event {
             WidgetEvent::MouseEnter => {
-                self.hovered = true;
+                self.drive_hover(1.0);
                 // Don't consume — descendants that also care about hover (an
                 // inner Button inside a hoverable row) still get to see it.
                 EventResult::Ignored
             }
             WidgetEvent::MouseLeave => {
-                self.hovered = false;
+                self.drive_hover(0.0);
                 EventResult::Ignored
             }
             _ => EventResult::Ignored,
