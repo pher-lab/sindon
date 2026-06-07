@@ -32,6 +32,7 @@ use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, EventContext, Input, ScrollView, TextWidget};
 
 use crate::settings;
+use crate::settings::SortMode;
 use crate::state::{AppState, NoteId, Phase};
 use crate::tag_editor::TagRefresh;
 
@@ -199,6 +200,63 @@ pub fn build(
         w.state.borrow_mut().search_input_idx = Some(search_input);
     }
 
+    // Sort-order row, between the search box and the tag filter. Picks how the
+    // list below is ordered (pinned notes always lead — see
+    // `state::compare_notes`). Hidden until the vault has at least one note, so
+    // an empty vault shows no orphan control. Each button persists the choice
+    // and rebuilds the list to re-sort it; the active one highlights reactively.
+    let sort_visible_state = Rc::clone(&w.state);
+    let sort_row = tree.add_child(
+        pane,
+        Container::row()
+            .gap(6.0)
+            .align_center()
+            .visible(Reactive::derive(move || {
+                sort_visible_state.borrow().note_count() > 0
+            })),
+    );
+    tree.add_child(
+        sort_row,
+        TextWidget::new("Sort")
+            .font_size(13.0)
+            .color(settings::on_surface_variant()),
+    );
+    for mode in [SortMode::Created, SortMode::TitleAsc, SortMode::TitleDesc] {
+        let bg = Reactive::derive(move || {
+            let t = settings::current_theme();
+            if settings::current_sort() == mode {
+                t.colors.primary
+            } else {
+                t.colors.surface_variant
+            }
+        });
+        let fg = Reactive::derive(move || {
+            let t = settings::current_theme();
+            if settings::current_sort() == mode {
+                t.colors.on_primary
+            } else {
+                t.colors.on_surface
+            }
+        });
+        let w = w.clone();
+        tree.add_child(
+            sort_row,
+            Button::new(mode.label())
+                .font_size(13.0)
+                .radius(10.0)
+                .background(bg)
+                .text_color(fg)
+                .on_click(move |ctx| {
+                    settings::signals().sort.set(mode);
+                    settings::persist();
+                    // Order changed → re-sort the visible rows. The highlight
+                    // tracks `current_sort` reactively, so only the list needs
+                    // an imperative rebuild.
+                    rebuild_list(&w, ctx);
+                }),
+        );
+    }
+
     // Tag-filter chip row, between the search box and the list. Hidden entirely
     // until the vault has at least one tag, so an untagged vault shows no
     // empty strip; it wraps once a vault accumulates many tags.
@@ -363,7 +421,7 @@ fn populate_list(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
     let (ids, total, searching, filtering) = {
         let s = w.state.borrow();
         (
-            s.filtered_note_ids(),
+            s.filtered_note_ids(settings::current_sort()),
             s.note_count(),
             s.is_searching(),
             s.is_filtering(),
@@ -427,6 +485,42 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
             .background(row_bg)
             .radius(4.0),
     );
+
+    // Pin toggle (leftmost). A filled star marks a pinned note, an outline an
+    // unpinned one; clicking flips it and rebuilds the list so the row floats
+    // to (or drops from) the top immediately. Star glyphs (U+2605/2606) render
+    // in the text font, unlike astral-plane pin emoji.
+    let pin_label_state = Rc::clone(&w.state);
+    let pin_color_state = Rc::clone(&w.state);
+    {
+        let w = w.clone();
+        tree.add_child(
+            row,
+            Button::reactive_label(move || {
+                if pin_label_state.borrow().is_pinned(note_id) {
+                    "\u{2605}".to_string()
+                } else {
+                    "\u{2606}".to_string()
+                }
+            })
+            .radius(4.0)
+            .background(Color::TRANSPARENT)
+            .hover_background(settings::hover())
+            .text_color(Reactive::derive(move || {
+                let t = settings::current_theme();
+                if pin_color_state.borrow().is_pinned(note_id) {
+                    t.colors.primary
+                } else {
+                    t.colors.on_surface_variant
+                }
+            }))
+            .on_click(move |ctx| {
+                w.state.borrow_mut().toggle_pin(note_id);
+                // Pin state changed the sort order — re-sort the visible rows.
+                rebuild_list(&w, ctx);
+            }),
+        );
+    }
 
     let label_state = Rc::clone(&w.state);
     {

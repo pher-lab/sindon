@@ -1534,6 +1534,7 @@ fn main() {}
             title: title.to_string(),
             body: String::new(),
             tags: Vec::new(),
+            pinned: false,
         }
     }
 

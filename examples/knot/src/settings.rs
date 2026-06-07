@@ -119,6 +119,36 @@ impl AutoLock {
     }
 }
 
+/// How the sidebar orders the note list. Pinned notes always float to the
+/// top (see `state::compare_notes`); this picks the order *within* the pinned
+/// and unpinned groups. `Created` is the historical default (note id order =
+/// creation order). Discrete + stable on-disk keys for the same reason as the
+/// other settings enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SortMode {
+    /// By creation order (ascending note id). The original behavior.
+    #[default]
+    Created,
+    /// By title, case-insensitive, A→Z.
+    TitleAsc,
+    /// By title, case-insensitive, Z→A.
+    TitleDesc,
+}
+
+impl SortMode {
+    /// Short button label for the sidebar's sort row. Public because — unlike
+    /// the other settings enums, whose toggles live in this module's modal —
+    /// the sort control is rendered over in `sidebar`.
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::Created => "Created",
+            SortMode::TitleAsc => "A\u{2013}Z",
+            SortMode::TitleDesc => "Z\u{2013}A",
+        }
+    }
+}
+
 /// On-disk settings shape. `#[serde(default)]` on each field means a file
 /// written by an older / newer build that's missing a key still loads —
 /// the missing field falls back to its `Default`.
@@ -130,6 +160,8 @@ pub struct Settings {
     pub font_size: FontSize,
     #[serde(default)]
     pub auto_lock: AutoLock,
+    #[serde(default)]
+    pub sort: SortMode,
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -178,6 +210,7 @@ pub struct SettingsSignals {
     pub theme: Signal<ThemeChoice>,
     pub font: Signal<FontSize>,
     pub auto_lock: Signal<AutoLock>,
+    pub sort: Signal<SortMode>,
 }
 
 thread_local! {
@@ -197,6 +230,7 @@ pub fn signals() -> SettingsSignals {
                 theme: Signal::new(loaded.theme),
                 font: Signal::new(loaded.font_size),
                 auto_lock: Signal::new(loaded.auto_lock),
+                sort: Signal::new(loaded.sort),
             }
         })
     })
@@ -265,15 +299,22 @@ pub fn current_auto_lock() -> AutoLock {
     signals().auto_lock.get()
 }
 
+/// Current sidebar sort order. Read by `sidebar::populate_list` when it asks
+/// `AppState::filtered_note_ids` for the ordered note ids.
+pub fn current_sort() -> SortMode {
+    signals().sort.get()
+}
+
 /// Persist the current signal values. Called after a settings change in
-/// the modal — the signals are the source of truth, so we just snapshot
-/// them and write.
+/// the modal (or the sidebar's sort row) — the signals are the source of
+/// truth, so we just snapshot them and write.
 pub fn persist() {
     let s = signals();
     Settings {
         theme: s.theme.get(),
         font_size: s.font.get(),
         auto_lock: s.auto_lock.get(),
+        sort: s.sort.get(),
     }
     .save();
 }
@@ -481,10 +522,13 @@ mod tests {
             theme: ThemeChoice::Light,
             font_size: FontSize::Large,
             auto_lock: AutoLock::FifteenMinutes,
+            sort: SortMode::TitleAsc,
         };
         let json = serde_json::to_string(&original).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(original, back);
+        // The sort key serializes in its stable snake_case form.
+        assert!(json.contains(r#""sort":"title_asc""#));
     }
 
     #[test]
@@ -495,6 +539,7 @@ mod tests {
         assert_eq!(back.theme, ThemeChoice::Dark);
         assert_eq!(back.font_size, FontSize::Medium);
         assert_eq!(back.auto_lock, AutoLock::FiveMinutes);
+        assert_eq!(back.sort, SortMode::Created);
 
         // And an empty object loads to all-defaults.
         let empty: Settings = serde_json::from_str("{}").unwrap();

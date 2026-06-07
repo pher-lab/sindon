@@ -8,6 +8,7 @@
 //! go in one move, which is what makes "lock" actually release plaintext /
 //! re-seal the on-disk DB.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use shroud::render::DecodedImage;
 use zeroize::Zeroizing;
 
 use crate::crypto::{KEY_SIZE, MasterKey, NONCE_SIZE, SALT_SIZE, open, seal};
+use crate::settings::SortMode;
 use crate::storage::{StorageError, VaultStorage};
 
 pub type NoteId = u32;
@@ -53,6 +55,12 @@ pub struct Note {
     /// in insertion order (see [`normalize_tag`]). Persisted inside the
     /// encrypted payload alongside title/body — never as plaintext metadata.
     pub tags: Vec<String>,
+    /// Whether the user pinned this note to the top of the sidebar list.
+    /// Pinned notes float above the rest regardless of the active
+    /// [`SortMode`] (see [`compare_notes`]). Persisted inside the encrypted
+    /// payload (a flags byte in the v2 layout) so the pin state, like tags,
+    /// never leaks as plaintext metadata.
+    pub pinned: bool,
 }
 
 // The `Unlocked` variant is much larger than the others — it carries the
@@ -241,6 +249,7 @@ impl AppState {
             title,
             body,
             tags: Vec::new(),
+            pinned: false,
         });
         *selected = Some(id);
         self.next_id = self.next_id.saturating_add(1);
@@ -345,6 +354,34 @@ impl AppState {
         removed
     }
 
+    // ── Pinning ─────────────────────────────────────────────────────────
+
+    /// Whether note `id` is pinned. Drives the pin toggle's filled/outline
+    /// glyph in the sidebar. False when locked or the id is unknown.
+    pub fn is_pinned(&self, id: NoteId) -> bool {
+        matches!(&self.phase, Phase::Unlocked { notes, .. }
+            if notes.iter().any(|n| n.id == id && n.pinned))
+    }
+
+    /// Flip note `id`'s pinned flag and mark it dirty so the auto-save tick
+    /// persists the change (pinned lives in the encrypted payload). Returns
+    /// the new state, or `false` when locked / the id is unknown. The caller
+    /// rebuilds the list afterwards so the row re-sorts to/from the top.
+    pub fn toggle_pin(&mut self, id: NoteId) -> bool {
+        let now = if let Phase::Unlocked { notes, .. } = &mut self.phase {
+            if let Some(note) = notes.iter_mut().find(|n| n.id == id) {
+                note.pinned = !note.pinned;
+                note.pinned
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        };
+        self.mark_dirty(id);
+        now
+    }
+
     // ── Sidebar tag filter ─────────────────────────────────────────────
     //
     // Session-only UI state: which tags the note list is narrowed by. Lives
@@ -410,11 +447,13 @@ impl AppState {
     }
 
     /// Note ids to show in the sidebar given the active tag filter *and*
-    /// search query, in stored order. A note shows only if it carries all the
-    /// active filter tags (see `note_matches_filter`) *and* its title or body
-    /// contains the search query (see `note_matches_search`). With neither
-    /// active this is every note. Empty when locked.
-    pub fn filtered_note_ids(&self) -> Vec<NoteId> {
+    /// search query, ordered by `sort` with pinned notes floated to the top.
+    /// A note shows only if it carries all the active filter tags (see
+    /// `note_matches_filter`) *and* its title or body contains the search
+    /// query (see `note_matches_search`). With neither active this is every
+    /// note. Empty when locked. Ordering is by [`compare_notes`]: pinned
+    /// first, then `sort`, with note id as a stable tiebreak.
+    pub fn filtered_note_ids(&self, sort: SortMode) -> Vec<NoteId> {
         let Phase::Unlocked {
             notes,
             filter_tags,
@@ -425,12 +464,13 @@ impl AppState {
             return Vec::new();
         };
         let query = search_query.trim().to_lowercase();
-        notes
+        let mut matched: Vec<&Note> = notes
             .iter()
             .filter(|n| note_matches_filter(&n.tags, filter_tags))
             .filter(|n| note_matches_search(&n.title, &n.body, &query))
-            .map(|n| n.id)
-            .collect()
+            .collect();
+        matched.sort_by(|a, b| compare_notes(a, b, sort));
+        matched.iter().map(|n| n.id).collect()
     }
 
     /// Total resident note count, ignoring the filter. Lets the sidebar tell
@@ -581,7 +621,7 @@ impl AppState {
                 dirty.remove(&id);
                 continue;
             };
-            let payload = join_payload(&note.title, &note.body, &note.tags);
+            let payload = join_payload(&note.title, &note.body, &note.tags, note.pinned);
             let (nonce, ciphertext) = seal(dek, &payload);
             let row = EncryptedNote {
                 id: note.id,
@@ -613,7 +653,7 @@ impl AppState {
         let rows: Vec<EncryptedNote> = notes
             .iter()
             .map(|note| {
-                let payload = join_payload(&note.title, &note.body, &note.tags);
+                let payload = join_payload(&note.title, &note.body, &note.tags, note.pinned);
                 let (nonce, ciphertext) = seal(dek, &payload);
                 EncryptedNote {
                     id: note.id,
@@ -697,15 +737,39 @@ pub fn decrypt_all(dek: &MasterKey, vault: &[EncryptedNote]) -> Option<Vec<Note>
     let mut out = Vec::with_capacity(vault.len());
     for enc in vault {
         let pt = open(dek, &enc.nonce, &enc.ciphertext)?;
-        let (title, body, tags) = split_payload(&pt)?;
+        let (title, body, tags, pinned) = split_payload(&pt)?;
         out.push(Note {
             id: enc.id,
             title,
             body,
             tags,
+            pinned,
         });
     }
     Some(out)
+}
+
+/// Ordering for the sidebar note list: pinned notes always sort before
+/// unpinned ones, then ties break by the active [`SortMode`], then by note
+/// id (stable, ascending) so the order is fully deterministic. Pure — takes
+/// no app state — so the sort logic is unit-testable without a vault.
+fn compare_notes(a: &Note, b: &Note, sort: SortMode) -> Ordering {
+    // `true > false`, so reverse to float pinned (true) to the front.
+    b.pinned
+        .cmp(&a.pinned)
+        .then_with(|| match sort {
+            SortMode::Created => Ordering::Equal,
+            SortMode::TitleAsc => title_key(&a.title).cmp(&title_key(&b.title)),
+            SortMode::TitleDesc => title_key(&b.title).cmp(&title_key(&a.title)),
+        })
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+/// Case-insensitive title sort key. An empty (untitled) note sorts as an
+/// empty string — i.e. first under A–Z — which keeps brand-new notes visible
+/// at the top of an alphabetical list until they're named.
+fn title_key(title: &str) -> String {
+    title.to_lowercase()
 }
 
 /// Normalize a raw tag input to its stored form: trimmed and lowercased.
@@ -775,17 +839,29 @@ pub fn extract_attachment_refs(body: &str, out: &mut HashSet<AttachmentId>) {
     }
 }
 
-/// First byte of a v1 payload. The legacy format begins with the
-/// big-endian *high* byte of the title length, which is `0` for any
-/// realistic title (< 16 MiB), so a leading `1` unambiguously flags the
-/// newer tag-carrying layout. Old vaults written before tags existed stay
-/// readable; new writes always use v1.
+/// First byte of a versioned payload. The legacy (pre-tags) format begins
+/// with the big-endian *high* byte of the title length, which is `0` for any
+/// realistic title (< 16 MiB), so a leading `1`/`2` unambiguously flags a
+/// newer layout.
+///
+/// Version history:
+///
+/// - v1 — added tags (a `[2] tag_count` block before the body).
+/// - v2 — added a flags byte (bit 0 = pinned) right after the version.
+///
+/// Old vaults stay readable (v1 → `pinned = false`, legacy → no tags either);
+/// new writes always use v2.
 const PAYLOAD_V1: u8 = 1;
+const PAYLOAD_V2: u8 = 2;
 
-/// Payload encoding (v1):
+/// Per-note flag bits carried in the v2 flags byte.
+const FLAG_PINNED: u8 = 0b0000_0001;
+
+/// Payload encoding (v2):
 ///
 /// ```text
-/// [1]  version = PAYLOAD_V1
+/// [1]  version = PAYLOAD_V2
+/// [1]  flags (bit 0 = pinned; other bits reserved, written 0)
 /// [4]  title length, big-endian
 /// [N]  title bytes
 /// [2]  tag count, big-endian
@@ -793,13 +869,14 @@ const PAYLOAD_V1: u8 = 1;
 /// [..] body bytes (remainder)
 /// ```
 ///
-/// Switch to bincode/postcard if this grows another field — the manual
-/// layout is fine for three.
-fn join_payload(title: &str, body: &str, tags: &[String]) -> Vec<u8> {
+/// Switch to bincode/postcard if this grows much further — the manual layout
+/// is still fine for these few fields plus a flags byte.
+fn join_payload(title: &str, body: &str, tags: &[String], pinned: bool) -> Vec<u8> {
     let tb = title.as_bytes();
     let bb = body.as_bytes();
-    let mut out = Vec::with_capacity(1 + 4 + tb.len() + 2 + bb.len());
-    out.push(PAYLOAD_V1);
+    let mut out = Vec::with_capacity(1 + 1 + 4 + tb.len() + 2 + bb.len());
+    out.push(PAYLOAD_V2);
+    out.push(if pinned { FLAG_PINNED } else { 0 });
     let title_len = u32::try_from(tb.len()).expect("title under 4GB");
     out.extend_from_slice(&title_len.to_be_bytes());
     out.extend_from_slice(tb);
@@ -815,15 +892,39 @@ fn join_payload(title: &str, body: &str, tags: &[String]) -> Vec<u8> {
     out
 }
 
-fn split_payload(bytes: &[u8]) -> Option<(String, String, Vec<String>)> {
+fn split_payload(bytes: &[u8]) -> Option<(String, String, Vec<String>, bool)> {
     match bytes.first() {
-        Some(&PAYLOAD_V1) => split_payload_v1(&bytes[1..]),
-        // Legacy: no version byte, no tags. (A pre-tags vault.)
-        _ => split_payload_legacy(bytes).map(|(t, b)| (t, b, Vec::new())),
+        Some(&PAYLOAD_V2) => split_payload_v2(&bytes[1..]),
+        // v1: tags but no flags byte → never pinned.
+        Some(&PAYLOAD_V1) => split_payload_v1(&bytes[1..]).map(|(t, b, g)| (t, b, g, false)),
+        // Legacy: no version byte, no tags, never pinned. (A pre-tags vault.)
+        _ => split_payload_legacy(bytes).map(|(t, b)| (t, b, Vec::new(), false)),
     }
 }
 
-/// Parse the v1 body (the slice *after* the version byte).
+/// Parse the v2 body (the slice *after* the version byte): a flags byte, then
+/// the same title/tags/body layout as v1.
+fn split_payload_v2(bytes: &[u8]) -> Option<(String, String, Vec<String>, bool)> {
+    let mut pos = 0usize;
+    let flags = *bytes.get(pos)?;
+    pos += 1;
+    let pinned = flags & FLAG_PINNED != 0;
+
+    let title_len = read_u32(bytes, &mut pos)? as usize;
+    let title = read_str(bytes, &mut pos, title_len)?;
+
+    let tag_count = read_u16(bytes, &mut pos)? as usize;
+    let mut tags = Vec::with_capacity(tag_count);
+    for _ in 0..tag_count {
+        let tag_len = read_u16(bytes, &mut pos)? as usize;
+        tags.push(read_str(bytes, &mut pos, tag_len)?);
+    }
+
+    let body = String::from_utf8(bytes[pos..].to_vec()).ok()?;
+    Some((title, body, tags, pinned))
+}
+
+/// Parse the v1 body (the slice *after* the version byte). No flags byte.
 fn split_payload_v1(bytes: &[u8]) -> Option<(String, String, Vec<String>)> {
     let mut pos = 0usize;
     let title_len = read_u32(bytes, &mut pos)? as usize;
@@ -929,23 +1030,44 @@ mod tests {
     }
 
     #[test]
-    fn payload_round_trips_title_body_and_tags() {
+    fn payload_round_trips_title_body_tags_and_pin() {
         let tags = vec!["work".to_string(), "日本語".to_string()];
-        let bytes = join_payload("My Title", "Body\nwith newline", &tags);
-        // v1 always carries the version marker so legacy parsing is skipped.
-        assert_eq!(bytes[0], PAYLOAD_V1);
-        let (title, body, got_tags) = split_payload(&bytes).expect("v1 payload parses");
+        let bytes = join_payload("My Title", "Body\nwith newline", &tags, true);
+        // v2 always carries the version marker so legacy parsing is skipped.
+        assert_eq!(bytes[0], PAYLOAD_V2);
+        let (title, body, got_tags, pinned) = split_payload(&bytes).expect("v2 payload parses");
         assert_eq!(title, "My Title");
         assert_eq!(body, "Body\nwith newline");
         assert_eq!(got_tags, tags);
+        assert!(pinned, "the pinned flag round-trips");
     }
 
     #[test]
-    fn payload_round_trips_with_no_tags() {
-        let bytes = join_payload("t", "b", &[]);
-        let (title, body, tags) = split_payload(&bytes).expect("parses");
+    fn payload_round_trips_with_no_tags_unpinned() {
+        let bytes = join_payload("t", "b", &[], false);
+        let (title, body, tags, pinned) = split_payload(&bytes).expect("parses");
         assert_eq!((title.as_str(), body.as_str()), ("t", "b"));
         assert!(tags.is_empty());
+        assert!(!pinned);
+    }
+
+    #[test]
+    fn legacy_v1_payload_reads_back_unpinned() {
+        // Reproduce the v1 (tags, no flags byte) on-disk format by hand: a
+        // PAYLOAD_V1 marker, then 4-byte BE title length, title, tag count, body.
+        let title = "V1 Note";
+        let body = "from a pre-pin vault";
+        let mut v1 = vec![PAYLOAD_V1];
+        v1.extend_from_slice(&(title.len() as u32).to_be_bytes());
+        v1.extend_from_slice(title.as_bytes());
+        v1.extend_from_slice(&0u16.to_be_bytes()); // zero tags
+        v1.extend_from_slice(body.as_bytes());
+
+        let (got_title, got_body, tags, pinned) = split_payload(&v1).expect("v1 parses");
+        assert_eq!(got_title, title);
+        assert_eq!(got_body, body);
+        assert!(tags.is_empty());
+        assert!(!pinned, "a v1 note (no flags byte) reads back unpinned");
     }
 
     #[test]
@@ -958,13 +1080,14 @@ mod tests {
         legacy.extend_from_slice(&(title.len() as u32).to_be_bytes());
         legacy.extend_from_slice(title.as_bytes());
         legacy.extend_from_slice(body.as_bytes());
-        // High byte of a short title length is 0, never PAYLOAD_V1.
+        // High byte of a short title length is 0, never a version marker.
         assert_eq!(legacy[0], 0);
 
-        let (got_title, got_body, tags) = split_payload(&legacy).expect("legacy parses");
+        let (got_title, got_body, tags, pinned) = split_payload(&legacy).expect("legacy parses");
         assert_eq!(got_title, title);
         assert_eq!(got_body, body);
         assert!(tags.is_empty(), "legacy notes have no tags");
+        assert!(!pinned, "legacy notes are never pinned");
     }
 
     #[test]
@@ -980,6 +1103,7 @@ mod tests {
             title: "n".into(),
             body: "b".into(),
             tags: Vec::new(),
+            pinned: false,
         }];
         AppState {
             salt: [0u8; SALT_SIZE],
@@ -1005,12 +1129,14 @@ mod tests {
                 title: "a".into(),
                 body: String::new(),
                 tags: vec!["work".into()],
+                pinned: false,
             },
             Note {
                 id: 2,
                 title: "b".into(),
                 body: String::new(),
                 tags: vec!["personal".into()],
+                pinned: false,
             },
         ];
         AppState {
@@ -1111,14 +1237,14 @@ mod tests {
     fn filtered_ids_narrow_to_matching_notes() {
         let mut s = unlocked_state_with_two_tagged_notes();
         // No filter → both notes, in stored order.
-        assert_eq!(s.filtered_note_ids(), vec![1, 2]);
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![1, 2]);
         assert!(s.has_any_tags());
         // Filter on "work" → only note 1.
         s.toggle_filter_tag("work");
-        assert_eq!(s.filtered_note_ids(), vec![1]);
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![1]);
         // Add "personal" (note 1 lacks it) → the intersection empties.
         s.toggle_filter_tag("personal");
-        assert!(s.filtered_note_ids().is_empty());
+        assert!(s.filtered_note_ids(SortMode::Created).is_empty());
         // note_count ignores the filter.
         assert_eq!(s.note_count(), 2);
     }
@@ -1141,6 +1267,63 @@ mod tests {
         s.prune_filter();
         assert!(!s.is_filter_active("work"));
         assert!(!s.is_filtering());
+    }
+
+    // ── Pinning + sort ───────────────────────────────────────────────────
+
+    #[test]
+    fn toggle_pin_flips_state_and_marks_dirty() {
+        let mut s = unlocked_state_with_one_note();
+        assert!(!s.is_pinned(1));
+        assert!(s.toggle_pin(1), "first toggle pins");
+        assert!(s.is_pinned(1));
+        if let Phase::Unlocked { dirty, .. } = &s.phase {
+            assert!(
+                dirty.contains(&1),
+                "pinning marks the note dirty for persistence"
+            );
+        } else {
+            panic!("expected Unlocked");
+        }
+        assert!(!s.toggle_pin(1), "second toggle unpins");
+        assert!(!s.is_pinned(1));
+        // An unknown id is a no-op.
+        assert!(!s.toggle_pin(999));
+    }
+
+    #[test]
+    fn pinned_notes_float_to_the_top_regardless_of_sort() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        // Give titles so the alphabetical modes have something to order by.
+        if let Phase::Unlocked { notes, .. } = &mut s.phase {
+            notes[0].title = "Banana".into(); // id 1
+            notes[1].title = "Apple".into(); // id 2
+        }
+        // Created (id order): 1, 2.
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![1, 2]);
+        // A–Z by title: Apple(2) before Banana(1).
+        assert_eq!(s.filtered_note_ids(SortMode::TitleAsc), vec![2, 1]);
+        // Z–A by title: Banana(1) before Apple(2).
+        assert_eq!(s.filtered_note_ids(SortMode::TitleDesc), vec![1, 2]);
+
+        // Pin the note that would otherwise sort last in each mode (Banana/id 1
+        // is last under A–Z) — it now leads regardless of sort.
+        assert!(s.toggle_pin(1));
+        assert_eq!(s.filtered_note_ids(SortMode::TitleAsc), vec![1, 2]);
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![1, 2]);
+    }
+
+    #[test]
+    fn sort_is_stable_by_id_within_equal_keys() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        // Equal titles → the Created/title comparators tie, so id breaks it
+        // deterministically (ascending), never a random order.
+        if let Phase::Unlocked { notes, .. } = &mut s.phase {
+            notes[0].title = "same".into();
+            notes[1].title = "same".into();
+        }
+        assert_eq!(s.filtered_note_ids(SortMode::TitleAsc), vec![1, 2]);
+        assert_eq!(s.filtered_note_ids(SortMode::TitleDesc), vec![1, 2]);
     }
 
     // ── Search ──────────────────────────────────────────────────────────
@@ -1186,16 +1369,16 @@ mod tests {
             notes[1].body = "agenda".into();
         }
         // No query → both, in stored order.
-        assert_eq!(s.filtered_note_ids(), vec![1, 2]);
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![1, 2]);
         // Title match, case-insensitive.
         s.set_search_query("GROCER");
-        assert_eq!(s.filtered_note_ids(), vec![1]);
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![1]);
         // Body match on the other note.
         s.set_search_query("agenda");
-        assert_eq!(s.filtered_note_ids(), vec![2]);
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![2]);
         // No match → empty, but note_count still ignores the query.
         s.set_search_query("passport");
-        assert!(s.filtered_note_ids().is_empty());
+        assert!(s.filtered_note_ids(SortMode::Created).is_empty());
         assert_eq!(s.note_count(), 2);
     }
 
@@ -1210,13 +1393,13 @@ mod tests {
         }
         s.set_search_query("report");
         // Search alone → both.
-        assert_eq!(s.filtered_note_ids(), vec![1, 2]);
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![1, 2]);
         // Add a tag filter → intersection with the search.
         s.toggle_filter_tag("work");
-        assert_eq!(s.filtered_note_ids(), vec![1]);
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![1]);
         // A query that misses the tag-matching note empties the intersection.
         s.set_search_query("expense");
-        assert!(s.filtered_note_ids().is_empty());
+        assert!(s.filtered_note_ids(SortMode::Created).is_empty());
     }
 
     // ── Import (add_note) ───────────────────────────────────────────────
