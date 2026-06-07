@@ -22,6 +22,7 @@ mod crypto;
 mod editor;
 mod highlight;
 mod lock_screen;
+mod notice;
 mod preview;
 mod recovery_screen;
 mod settings;
@@ -77,7 +78,9 @@ fn main() {
             let state_for_tick = Rc::clone(&state);
             scope.on_frame(move |ctx| {
                 if let Err(e) = state_for_tick.borrow_mut().flush_dirty() {
-                    eprintln!("knot: auto-save tick failed: {}", e);
+                    // Surface to the banner (it also logs) so the user knows
+                    // their last edits haven't reached disk — not just stderr.
+                    notice::show(format!("Couldn't save changes: {e}"));
                 }
 
                 let is_unlocked = matches!(state_for_tick.borrow().phase, Phase::Unlocked { .. });

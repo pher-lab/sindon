@@ -31,6 +31,7 @@ use shroud::widgets::layer::LayerOptions;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, EventContext, Input, ScrollView, TextWidget};
 
+use crate::notice;
 use crate::settings;
 use crate::settings::SortMode;
 use crate::state::{AppState, NoteId, Phase};
@@ -650,11 +651,10 @@ fn import_note(w: &SidebarWiring, ctx: &mut EventContext) {
     // Refuse a pathologically large file before reading it into memory.
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() > MAX_IMPORT_BYTES {
-            eprintln!(
-                "knot: refusing to import {} — larger than {} bytes",
-                path.display(),
-                MAX_IMPORT_BYTES
-            );
+            notice::show(format!(
+                "That file is too large to import (max {} MiB).",
+                MAX_IMPORT_BYTES / (1024 * 1024)
+            ));
             return;
         }
     }
@@ -662,7 +662,7 @@ fn import_note(w: &SidebarWiring, ctx: &mut EventContext) {
     let body = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("knot: failed to read {}: {}", path.display(), e);
+            notice::show(format!("Couldn't read that file: {e}"));
             return;
         }
     };
@@ -707,10 +707,7 @@ fn delete_note(
     let was_selected_before = matches!(&state.borrow().phase, Phase::Unlocked { selected, .. } if *selected == Some(note_id));
 
     if let Err(e) = state.borrow_mut().delete_note_persisted(note_id) {
-        eprintln!(
-            "knot: failed to delete note {} from storage: {}",
-            note_id, e
-        );
+        notice::show(format!("Couldn't delete note: {e}"));
         return;
     }
 

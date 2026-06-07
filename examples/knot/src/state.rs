@@ -11,6 +11,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use shroud::render::DecodedImage;
 use zeroize::Zeroizing;
@@ -132,6 +133,19 @@ pub struct AppState {
     /// index after a screen rebuild is harmless: `EventContext::focus` drops
     /// silently if the target is gone, and the handler only acts while unlocked.
     pub search_input_idx: Option<usize>,
+    /// Consecutive failed unlock attempts since the last success. Drives the
+    /// escalating lockout (see [`lockout_for`]); reset to 0 on a successful
+    /// unlock. In-memory only — a process restart clears it, which matches the
+    /// upstream Tauri app. The real cost of a brute-force attempt is Argon2id,
+    /// not this counter; the lockout just blunts rapid online guessing within a
+    /// session.
+    pub failed_attempts: u32,
+    /// When set and in the future, the lock screen refuses unlock attempts and
+    /// shows a countdown until this instant. Set by [`note_failed_unlock`] once
+    /// the attempt count crosses the free-attempt threshold.
+    ///
+    /// [`note_failed_unlock`]: Self::note_failed_unlock
+    pub locked_until: Option<Instant>,
 }
 
 impl AppState {
@@ -144,6 +158,8 @@ impl AppState {
             next_id,
             phase: Phase::Locked { error: None },
             search_input_idx: None,
+            failed_attempts: 0,
+            locked_until: None,
         }
     }
 
@@ -157,6 +173,8 @@ impl AppState {
             next_id: 1,
             phase: Phase::Setup { error: None },
             search_input_idx: None,
+            failed_attempts: 0,
+            locked_until: None,
         }
     }
 
@@ -196,6 +214,43 @@ impl AppState {
     ) {
         self.salt = salt;
         self.become_unlocked(dek, notes, storage);
+    }
+
+    // ── Unlock lockout ───────────────────────────────────────────────────
+    //
+    // Brute-force blunting for the lock screen. A run of wrong passwords past
+    // a free-attempt threshold starts an escalating cooldown during which the
+    // lock screen refuses attempts and counts down. State is in-memory (a
+    // restart clears it); see the field docs for why that's acceptable.
+
+    /// Record a failed unlock attempt and, once past the free-attempt
+    /// threshold, start (or extend) the lockout. Returns the remaining lockout
+    /// duration if one is now in effect, else `None`.
+    pub fn note_failed_unlock(&mut self) -> Option<Duration> {
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
+        match lockout_for(self.failed_attempts) {
+            Some(d) => {
+                self.locked_until = Some(Instant::now() + d);
+                Some(d)
+            }
+            None => None,
+        }
+    }
+
+    /// Clear the failed-attempt counter and any active lockout. Called on a
+    /// successful unlock so a later wrong password starts counting from zero.
+    pub fn reset_unlock_attempts(&mut self) {
+        self.failed_attempts = 0;
+        self.locked_until = None;
+    }
+
+    /// Time left on the current lockout, or `None` if not locked out (never
+    /// triggered, or the cooldown has elapsed). Recomputed against "now" on
+    /// each call, so the lock screen's reactive status counts it down as the
+    /// per-frame tick repaints.
+    pub fn lockout_remaining(&self) -> Option<Duration> {
+        self.locked_until
+            .and_then(|until| until.checked_duration_since(Instant::now()))
     }
 
     /// Mark a note as needing to be written back on the next auto-save
@@ -772,6 +827,27 @@ fn title_key(title: &str) -> String {
     title.to_lowercase()
 }
 
+/// Number of wrong passwords allowed before any cooldown kicks in. A typo or
+/// two shouldn't lock anyone out, but a sustained run should.
+const FREE_UNLOCK_ATTEMPTS: u32 = 5;
+
+/// Lockout duration after `attempts` consecutive failures, or `None` while
+/// still within the free allowance. Escalates from 15 s, doubling each
+/// further failure, capped at 5 minutes — so a persistent guesser hits an
+/// ever-growing wall while a fat-fingered user barely notices. Pure (no
+/// clock), so the policy is unit-testable.
+fn lockout_for(attempts: u32) -> Option<Duration> {
+    if attempts < FREE_UNLOCK_ATTEMPTS {
+        return None;
+    }
+    // 0 at the first over-threshold failure, then 1, 2, … — the doubling power.
+    let over = attempts - FREE_UNLOCK_ATTEMPTS;
+    // 15 << over = 15 * 2^over; `checked_shl` guards a pathological shift width
+    // (≥ 64 → None → saturate to the cap below).
+    let secs = 15u64.checked_shl(over).unwrap_or(u64::MAX).min(300);
+    Some(Duration::from_secs(secs))
+}
+
 /// Normalize a raw tag input to its stored form: trimmed and lowercased.
 /// Tags compare and dedupe in this form so `Work`, ` work ` and `WORK`
 /// collapse to one. An all-whitespace input normalizes to the empty string,
@@ -1109,6 +1185,8 @@ mod tests {
             salt: [0u8; SALT_SIZE],
             next_id: 2,
             search_input_idx: None,
+            failed_attempts: 0,
+            locked_until: None,
             phase: Phase::Unlocked {
                 dek: derive_key(b"x", &[0u8; SALT_SIZE]),
                 notes,
@@ -1143,6 +1221,8 @@ mod tests {
             salt: [0u8; SALT_SIZE],
             next_id: 3,
             search_input_idx: None,
+            failed_attempts: 0,
+            locked_until: None,
             phase: Phase::Unlocked {
                 dek: derive_key(b"x", &[0u8; SALT_SIZE]),
                 notes,
@@ -1324,6 +1404,52 @@ mod tests {
         }
         assert_eq!(s.filtered_note_ids(SortMode::TitleAsc), vec![1, 2]);
         assert_eq!(s.filtered_note_ids(SortMode::TitleDesc), vec![1, 2]);
+    }
+
+    // ── Unlock lockout ───────────────────────────────────────────────────
+
+    #[test]
+    fn lockout_is_none_within_the_free_allowance() {
+        for attempts in 0..FREE_UNLOCK_ATTEMPTS {
+            assert_eq!(
+                lockout_for(attempts),
+                None,
+                "{} attempts must not lock out",
+                attempts
+            );
+        }
+    }
+
+    #[test]
+    fn lockout_escalates_then_caps() {
+        // First over-threshold failure = 15s, doubling each further failure.
+        assert_eq!(lockout_for(5), Some(Duration::from_secs(15)));
+        assert_eq!(lockout_for(6), Some(Duration::from_secs(30)));
+        assert_eq!(lockout_for(7), Some(Duration::from_secs(60)));
+        assert_eq!(lockout_for(8), Some(Duration::from_secs(120)));
+        assert_eq!(lockout_for(9), Some(Duration::from_secs(240)));
+        // Capped at 5 minutes from here on, including absurd attempt counts
+        // (where the doubling would otherwise overflow the shift).
+        assert_eq!(lockout_for(10), Some(Duration::from_secs(300)));
+        assert_eq!(lockout_for(1000), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn note_failed_unlock_arms_lockout_and_reset_clears_it() {
+        let mut s = AppState::new_locked([0u8; SALT_SIZE], 1);
+        // The free attempts don't arm a lockout.
+        for _ in 0..FREE_UNLOCK_ATTEMPTS - 1 {
+            assert!(s.note_failed_unlock().is_none());
+        }
+        assert!(s.lockout_remaining().is_none());
+        // The threshold failure arms it; remaining time is now positive.
+        assert!(s.note_failed_unlock().is_some());
+        assert!(s.lockout_remaining().is_some());
+        assert_eq!(s.failed_attempts, FREE_UNLOCK_ATTEMPTS);
+        // A successful unlock clears the counter and the cooldown.
+        s.reset_unlock_attempts();
+        assert_eq!(s.failed_attempts, 0);
+        assert!(s.lockout_remaining().is_none());
     }
 
     // ── Search ──────────────────────────────────────────────────────────

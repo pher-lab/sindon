@@ -28,7 +28,7 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{derive_key, generate_dek, random_salt, recovery, wrap_dek};
 use crate::settings;
-use crate::state::{AppState, Phase};
+use crate::state::{AppState, Note, Phase};
 use crate::storage::{VaultPaths, VaultStorage};
 use crate::vault_screen;
 
@@ -247,16 +247,59 @@ fn create_vault(
         .map_err(|e| format!("failed to create vault: {}", e))?;
 
     let mut s = state.borrow_mut();
-    s.complete_setup(salt, dek, Vec::new(), storage);
-    // Materialize the (empty) vault now so a crash before the first
-    // auto-save tick still leaves a valid keyed DB — the next launch
-    // then sees an existing vault and goes to the lock screen instead of
+    s.complete_setup(salt, dek, welcome_notes(), storage);
+    // Materialize the vault now (with its seeded welcome note) so a crash
+    // before the first auto-save tick still leaves a valid keyed DB — the next
+    // launch then sees an existing vault and goes to the lock screen instead of
     // re-running setup.
     s.rewrite_vault_to_storage()
         .map_err(|e| format!("failed to initialize vault: {}", e))?;
 
     Ok(mnemonic)
 }
+
+/// The single note a brand-new vault is seeded with, so the first thing the
+/// user sees after setup is a short tour rather than an empty editor. It's an
+/// ordinary note (id 1, no tags, unpinned) — the user can edit or delete it
+/// like any other. Written in Markdown so toggling Preview shows it rendered.
+fn welcome_notes() -> Vec<Note> {
+    vec![Note {
+        id: 1,
+        title: "Welcome to Knot".to_string(),
+        body: WELCOME_BODY.to_string(),
+        tags: Vec::new(),
+        pinned: false,
+    }]
+}
+
+/// Body of the seeded welcome note. Plain Markdown — kept terse so it reads
+/// well both in the editor and in the preview pane.
+const WELCOME_BODY: &str = "\
+# Welcome to Knot 🔒
+
+This is your private vault. Everything in it is encrypted on disk — only your \
+master password (or your recovery key) can open it.
+
+## Getting started
+
+- **New note** — click **+ New** in the sidebar.
+- **Markdown** — write in Markdown, then toggle **Preview** to see it rendered.
+- **Tags** — add tags under the title to organize and filter notes.
+- **Search** — press **Ctrl+F** to search across every note.
+- **Images** — drag one in, paste from the clipboard, or use the **Image** button.
+- **Links** — link between notes with `[[Note title]]`.
+- **Pin & sort** — star a note to keep it on top, or change the sidebar **Sort** order.
+
+## Staying safe
+
+- **Lock** the vault (or press **Ctrl+L**) whenever you step away — it re-encrypts \
+and drops the key.
+- Knot also auto-locks after a period of inactivity. Adjust it in **⚙ Settings**.
+- Keep your **recovery key** somewhere safe — it is the only way back in if you \
+forget your password.
+
+You can delete this note once you've read it. Happy writing!
+";
 
 fn set_error(state: &Rc<RefCell<AppState>>, msg: String) {
     state.borrow_mut().phase = Phase::Setup { error: Some(msg) };

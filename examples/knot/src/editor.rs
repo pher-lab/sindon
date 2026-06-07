@@ -18,6 +18,7 @@ use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, Image, Input, ReactiveChildren, ScrollView, TextWidget};
 
 use crate::lock_screen;
+use crate::notice;
 use crate::preview;
 use crate::settings;
 use crate::sidebar::SidebarRefresh;
@@ -390,7 +391,7 @@ fn insert_image_from_path(state: &Rc<RefCell<AppState>>, body_sig: Signal<String
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("knot: could not read image file: {e}");
+            notice::show(format!("Couldn't read that image: {e}"));
             return;
         }
     };
@@ -409,11 +410,11 @@ fn insert_image_from_bytes(state: &Rc<RefCell<AppState>>, body_sig: Signal<Strin
     // Reject anything that doesn't decode *before* storing it, so a bad blob
     // never becomes a dead `knot-img:` reference.
     if Image::from_bytes(bytes).is_err() {
-        eprintln!("knot: unsupported image (only PNG/JPEG)");
+        notice::show("That image isn't a supported format (only PNG/JPEG).");
         return;
     }
     let Some(id) = state.borrow_mut().add_attachment(bytes) else {
-        eprintln!("knot: could not store attachment");
+        notice::show("Couldn't store that image.");
         return;
     };
     // Append the reference on its own line, keeping the bound signal and the
@@ -489,7 +490,7 @@ fn export_selected(state: &Rc<RefCell<AppState>>) {
         return;
     };
     if let Err(e) = std::fs::write(&path, body) {
-        eprintln!("knot: failed to export note to {}: {}", path.display(), e);
+        notice::show(format!("Export failed: {e}"));
     }
 }
 

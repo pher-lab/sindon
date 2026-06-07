@@ -13,6 +13,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use shroud::reactive::Reactive;
 use shroud::security::SecureString;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, SecureInput, TextWidget};
@@ -73,18 +74,42 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     );
     tree.focus_initially(input_idx);
 
+    // Status line. A live lockout countdown takes priority over the phase
+    // error; both recompute every per-frame tick (which repaints), so the
+    // countdown ticks down on its own without a dedicated timer.
     let status_state = Rc::clone(&state);
+    let color_state = Rc::clone(&state);
     tree.add_child(
         card,
-        TextWidget::reactive(move || match &status_state.borrow().phase {
-            Phase::Locked { error: None } => "Locked.".to_string(),
-            Phase::Locked { error: Some(e) } => format!("Locked \u{2014} {}", e),
-            // Setup / Recovery / Unlocked are unreachable here — on success
-            // the handler queues a replace_screen, so by the next paint
-            // we're already off this screen. Render empty defensively.
-            Phase::Setup { .. } | Phase::Recovery { .. } | Phase::Unlocked { .. } => String::new(),
+        TextWidget::reactive(move || {
+            let s = status_state.borrow();
+            if let Some(rem) = s.lockout_remaining() {
+                // Round up so the final fractional second still reads "1s".
+                let secs = rem.as_secs() + 1;
+                return format!("Too many attempts \u{2014} try again in {}s", secs);
+            }
+            match &s.phase {
+                Phase::Locked { error: None } => "Locked.".to_string(),
+                Phase::Locked { error: Some(e) } => format!("Locked \u{2014} {}", e),
+                // Setup / Recovery / Unlocked are unreachable here — on success
+                // the handler queues a replace_screen, so by the next paint
+                // we're already off this screen. Render empty defensively.
+                Phase::Setup { .. } | Phase::Recovery { .. } | Phase::Unlocked { .. } => {
+                    String::new()
+                }
+            }
         })
-        .color(settings::on_surface_variant()),
+        .color(Reactive::derive(move || {
+            let theme = settings::current_theme();
+            let s = color_state.borrow();
+            if s.lockout_remaining().is_some()
+                || matches!(&s.phase, Phase::Locked { error: Some(_) })
+            {
+                theme.colors.error
+            } else {
+                theme.colors.on_surface_variant
+            }
+        })),
     );
 
     // Offer recovery only when a recovery wrapping was created at setup.
@@ -112,6 +137,13 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
 /// `Phase::Locked.error` so the status text updates on the next paint
 /// and the user knows what to try next.
 fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
+    // Refuse attempts while a lockout is in effect. The status line's reactive
+    // already shows the countdown, so there's nothing to set here — just don't
+    // burn an (expensive) Argon2 derivation on a guess we won't honor.
+    if state.borrow().lockout_remaining().is_some() {
+        return false;
+    }
+
     let Some(paths) = VaultPaths::default_for_app() else {
         set_error(state, "config directory unavailable".into());
         return false;
@@ -131,7 +163,12 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
         }
     };
     let Some(dek) = unwrap_dek(&pw_kek, &wrapped) else {
-        set_error(state, "wrong master password".into());
+        // A failed unwrap is the canonical wrong-password signal. Count it; if
+        // that crosses the lockout threshold the status reactive switches to a
+        // countdown, otherwise echo the plain wrong-password message.
+        if state.borrow_mut().note_failed_unlock().is_none() {
+            set_error(state, "wrong master password".into());
+        }
         return false;
     };
 
@@ -169,6 +206,9 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
         return false;
     };
 
+    // Success clears the failed-attempt streak so a later wrong password
+    // starts counting from zero again.
+    state.borrow_mut().reset_unlock_attempts();
     state.borrow_mut().become_unlocked(dek, notes, storage);
     true
 }

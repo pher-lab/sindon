@@ -1,9 +1,11 @@
 //! Vault screen — the post-unlock app shell.
 //!
-//! Layout is a single row at the root: sidebar pane (fixed width) on the
-//! left, editor pane (flex-grow) on the right. The Lock button lives in
-//! the editor's header so it's adjacent to the content the user just
-//! decrypted, matching the Knot v0.7.0 layout.
+//! Layout is a column at the root: a dismissable error banner across the top
+//! (collapsed to nothing when idle — see [`crate::notice`]), then a content
+//! row with the sidebar pane (fixed width) on the left and the editor pane
+//! (flex-grow) on the right. The Lock button lives in the editor's header so
+//! it's adjacent to the content the user just decrypted, matching the Knot
+//! v0.7.0 layout.
 //!
 //! The two `Signal<String>` (title + body) live for the lifetime of this
 //! screen tree; switching notes calls `signal.set(...)` to rebase the
@@ -12,11 +14,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use shroud::reactive::Signal;
-use shroud::widgets::Container;
+use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
+use shroud::widgets::{Button, Container, TextWidget};
 
 use crate::editor;
+use crate::notice;
+use crate::settings;
 use crate::sidebar;
 use crate::sidebar::SidebarRefresh;
 use crate::state::{AppState, Phase};
@@ -44,7 +48,16 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     // body on screen.
     let preview_sig = Signal::new(false);
 
-    let root = tree.set_root(Container::row().width_full().height_full());
+    // Clear any banner left over from a previous unlocked session so a stale
+    // error doesn't greet the user on re-entry.
+    notice::dismiss();
+
+    // Root is a column: a dismissable error banner across the top (collapsed to
+    // zero height when there's nothing to show), then the main content row
+    // (sidebar | editor) that fills the rest.
+    let shell = tree.set_root(Container::column().width_full().height_full());
+    build_error_banner(tree, shell);
+    let root = tree.add_child(shell, Container::row().width_full().grow(1.0));
 
     // Bridges the sidebar (which switches the active note) to the editor's
     // tag chips (which must re-render for the newly selected note). The
@@ -76,5 +89,47 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         preview_sig,
         tag_refresh,
         sidebar_refresh,
+    );
+}
+
+/// Top-of-window banner for user-facing failures (see [`crate::notice`]).
+/// Visible only while a message is set, so it collapses to nothing the rest of
+/// the time; the message text reads live from the notice signal and the ✕
+/// dismisses it. Styled on the theme error color so it reads as a warning on
+/// both light and dark.
+fn build_error_banner(tree: &mut WidgetTree, parent: usize) {
+    let banner = tree.add_child(
+        parent,
+        Container::row()
+            .width_full()
+            .padding(10.0)
+            .gap(12.0)
+            .align_center()
+            .background(settings::error())
+            .visible(Reactive::derive(|| notice::signal().get_clone().is_some())),
+    );
+
+    tree.add_child(
+        banner,
+        TextWidget::reactive(|| notice::signal().get_clone().unwrap_or_default())
+            // on_primary is the theme's high-contrast text color; it reads
+            // cleanly on the saturated error fill on both light and dark.
+            .color(Reactive::derive(|| {
+                settings::current_theme().colors.on_primary
+            })),
+    );
+
+    // Spacer pushes the dismiss button to the right edge.
+    tree.add_child(banner, Container::row().grow(1.0));
+
+    tree.add_child(
+        banner,
+        Button::new("\u{2715}")
+            .radius(4.0)
+            .background(shroud::core::Color::TRANSPARENT)
+            .text_color(Reactive::derive(|| {
+                settings::current_theme().colors.on_primary
+            }))
+            .on_click(|_ctx| notice::dismiss()),
     );
 }
