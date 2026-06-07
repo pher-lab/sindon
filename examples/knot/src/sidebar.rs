@@ -457,6 +457,30 @@ fn populate_list(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
     }
 }
 
+/// Hover background for a row's transparent buttons (pin + title), aware of
+/// the row's selection state. The generic `hover.bg` token is an opaque
+/// "raised row" grey tuned for the unselected (grey) rows; painted over a
+/// *selected* row it would bury the primary fill under grey — reads like a
+/// dark hole punched in the selection. So a selected row hovers to
+/// `primary_hover` (a brighter shade of its own blue) instead, which lifts the
+/// selection rather than covering it. Re-derived each paint, so it tracks both
+/// selection changes and a live theme swap.
+fn row_hover_bg(state: &Rc<RefCell<AppState>>, note_id: NoteId) -> Reactive<Color> {
+    let state = Rc::clone(state);
+    Reactive::derive(move || {
+        let theme = settings::current_theme();
+        let selected = matches!(
+            &state.borrow().phase,
+            Phase::Unlocked { selected, .. } if *selected == Some(note_id)
+        );
+        if selected {
+            theme.colors.primary_hover
+        } else {
+            theme.hover.bg
+        }
+    })
+}
+
 // Tree-builder for one note row. The row container holds the click-target
 // button and a "✕" delete button side by side and reads selection state to
 // flip its background, so hover and selection coexist without per-button
@@ -506,7 +530,7 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
             })
             .radius(4.0)
             .background(Color::TRANSPARENT)
-            .hover_background(settings::hover())
+            .hover_background(row_hover_bg(&w.state, note_id))
             .text_color(Reactive::derive(move || {
                 let t = settings::current_theme();
                 if pin_color_state.borrow().is_pinned(note_id) {
@@ -546,7 +570,7 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
                 }
             })
             .background(Color::TRANSPARENT)
-            .hover_background(settings::hover())
+            .hover_background(row_hover_bg(&w.state, note_id))
             .radius(4.0)
             // Take the entire remaining row width so the click target spans
             // the full row, not just the label glyphs. Without this the user
