@@ -26,6 +26,7 @@ use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, EventContext, Input, TextWidget};
 
+use crate::i18n::{self, Key};
 use crate::settings;
 use crate::sidebar::SidebarRefresh;
 use crate::state::{AppState, normalize_tag};
@@ -135,7 +136,7 @@ pub fn build(
     tree.add_child(
         section,
         Input::new()
-            .placeholder("Add tags\u{2026}")
+            .placeholder(i18n::tr(Key::TagsAddPlaceholder))
             .value(input_sig)
             .font_size(13.0)
             // Enter commits the input (preferring the top autocomplete match,

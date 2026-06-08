@@ -72,6 +72,7 @@ use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Container, Image, TextWidget};
 
 use crate::highlight::{self, TokenClass};
+use crate::i18n::{self, Key};
 use crate::settings;
 use crate::state::{self, AppState, AttachmentId, Note, NoteId, Phase};
 
@@ -379,7 +380,7 @@ pub fn render(tree: &mut WidgetTree, parent: usize, source: &str, nav: Option<&W
     if source.trim().is_empty() {
         tree.add_child(
             parent,
-            TextWidget::new("Nothing to preview yet.").color(muted_color()),
+            TextWidget::reactive(|| i18n::tr(Key::PreviewEmpty).to_string()).color(muted_color()),
         );
         return;
     }
@@ -890,17 +891,21 @@ fn emit_image_block(
         } else {
             tree.add_child(
                 parent,
-                TextWidget::new("[image unavailable]").color(muted_color()),
+                TextWidget::reactive(|| i18n::tr(Key::PreviewImageUnavailable).to_string())
+                    .color(muted_color()),
             );
         }
         return;
     }
     // External / unknown src: surface the alt (or raw src) so the reader knows
     // an image was intended, but never touch the network or disk.
-    let label = if alt.trim().is_empty() { dest } else { alt };
+    let label = (if alt.trim().is_empty() { dest } else { alt }).to_string();
     tree.add_child(
         parent,
-        TextWidget::new(format!("[external image: {label}]")).color(muted_color()),
+        TextWidget::reactive(move || {
+            i18n::tr(Key::PreviewExternalImage).replace("{label}", &label)
+        })
+        .color(muted_color()),
     );
 }
 

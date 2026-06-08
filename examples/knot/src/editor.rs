@@ -17,6 +17,7 @@ use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, Image, Input, ReactiveChildren, ScrollView, TextWidget};
 
+use crate::i18n::{self, Key};
 use crate::lock_screen;
 use crate::notice;
 use crate::preview;
@@ -117,16 +118,16 @@ pub fn build(
                 if let Some(sel) = selected {
                     if let Some(note) = notes.iter().find(|n| n.id == *sel) {
                         let title = if note.title.is_empty() {
-                            "(untitled)"
+                            i18n::tr(Key::Untitled)
                         } else {
                             note.title.as_str()
                         };
-                        format!("Editing: {}", title)
+                        i18n::tr(Key::EditorEditing).replace("{title}", title)
                     } else {
-                        String::from("No note selected.")
+                        i18n::tr(Key::EditorNoNoteSelected).to_string()
                     }
                 } else {
-                    String::from("No note selected \u{2014} click + New to start.")
+                    i18n::tr(Key::EditorNoNoteSelectedHint).to_string()
                 }
             }
             _ => String::new(),
@@ -147,12 +148,12 @@ pub fn build(
     let img_vis_state = Rc::clone(&state);
     tree.add_child(
         header,
-        Button::new("Image")
+        Button::reactive_label(|| i18n::tr(Key::EditorImageBtn).to_string())
             .radius(8.0)
             .visible(Reactive::derive(move || note_selected(&img_vis_state)))
             .on_click(move |_ctx| {
                 let Some(path) = FileDialog::new()
-                    .title("Insert image")
+                    .title(i18n::tr(Key::DialogInsertImage))
                     .filter("Images", &["png", "jpg", "jpeg"])
                     .open_file()
                 else {
@@ -170,7 +171,7 @@ pub fn build(
     let export_vis_state = Rc::clone(&state);
     tree.add_child(
         header,
-        Button::new("Export")
+        Button::reactive_label(|| i18n::tr(Key::EditorExportBtn).to_string())
             .radius(8.0)
             .visible(Reactive::derive(move || note_selected(&export_vis_state)))
             .on_click(move |_ctx| export_selected(&export_state)),
@@ -185,9 +186,9 @@ pub fn build(
         header,
         Button::reactive_label(move || {
             if preview_sig.get() {
-                "Hide preview".to_string()
+                i18n::tr(Key::EditorPreviewHide).to_string()
             } else {
-                "Preview".to_string()
+                i18n::tr(Key::EditorPreviewShow).to_string()
             }
         })
         .radius(8.0)
@@ -202,14 +203,16 @@ pub fn build(
     let lock_state = Rc::clone(&state);
     tree.add_child(
         header,
-        Button::new("Lock").radius(8.0).on_click(move |ctx| {
-            // Re-encrypt the current notes into the vault, then transition
-            // to the lock screen. `lock_and_seal` drops the key + plaintext
-            // notes; Zeroizing ensures the key is wiped.
-            lock_state.borrow_mut().lock_and_seal();
-            let next = Rc::clone(&lock_state);
-            ctx.replace_screen(move |tree| lock_screen::build(tree, next));
-        }),
+        Button::reactive_label(|| i18n::tr(Key::EditorLockBtn).to_string())
+            .radius(8.0)
+            .on_click(move |ctx| {
+                // Re-encrypt the current notes into the vault, then transition
+                // to the lock screen. `lock_and_seal` drops the key + plaintext
+                // notes; Zeroizing ensures the key is wiped.
+                lock_state.borrow_mut().lock_and_seal();
+                let next = Rc::clone(&lock_state);
+                ctx.replace_screen(move |tree| lock_screen::build(tree, next));
+            }),
     );
 
     // Content row: editor pane on the left, live preview pane on the right.
@@ -256,7 +259,7 @@ pub fn build(
     tree.add_child(
         editor_area,
         Input::new()
-            .placeholder("Title")
+            .placeholder(i18n::tr(Key::EditorTitlePlaceholder))
             .value(title_sig)
             .font_size(20.0)
             .on_change(move |new_title, _ctx| {
@@ -293,7 +296,7 @@ pub fn build(
     tree.add_child(
         body_wrap,
         Input::new()
-            .placeholder("Start writing…")
+            .placeholder(i18n::tr(Key::EditorBodyPlaceholder))
             .multiline()
             .lines(16)
             .value(body_sig)
@@ -391,7 +394,7 @@ fn insert_image_from_path(state: &Rc<RefCell<AppState>>, body_sig: Signal<String
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
-            notice::show(format!("Couldn't read that image: {e}"));
+            notice::show(format!("{}{e}", i18n::tr(Key::ErrReadImagePrefix)));
             return;
         }
     };
@@ -410,11 +413,11 @@ fn insert_image_from_bytes(state: &Rc<RefCell<AppState>>, body_sig: Signal<Strin
     // Reject anything that doesn't decode *before* storing it, so a bad blob
     // never becomes a dead `knot-img:` reference.
     if Image::from_bytes(bytes).is_err() {
-        notice::show("That image isn't a supported format (only PNG/JPEG).");
+        notice::show(i18n::tr(Key::ErrImageUnsupported));
         return;
     }
     let Some(id) = state.borrow_mut().add_attachment(bytes) else {
-        notice::show("Couldn't store that image.");
+        notice::show(i18n::tr(Key::ErrImageStore));
         return;
     };
     // Append the reference on its own line, keeping the bound signal and the
@@ -482,7 +485,7 @@ fn export_selected(state: &Rc<RefCell<AppState>>) {
     };
 
     let Some(path) = FileDialog::new()
-        .title("Export note")
+        .title(i18n::tr(Key::DialogExportNote))
         .filter("Markdown", &["md"])
         .file_name(format!("{}.md", sanitize_filename(&title)))
         .save_file()
@@ -490,7 +493,7 @@ fn export_selected(state: &Rc<RefCell<AppState>>) {
         return;
     };
     if let Err(e) = std::fs::write(&path, body) {
-        notice::show(format!("Export failed: {e}"));
+        notice::show(format!("{}{e}", i18n::tr(Key::ErrExportPrefix)));
     }
 }
 

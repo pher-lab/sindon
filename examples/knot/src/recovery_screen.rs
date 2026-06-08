@@ -26,6 +26,7 @@ use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, ClearTrigger, Container, Input, SecureInput, TextWidget};
 
 use crate::crypto::{derive_key, random_salt, recovery, unwrap_dek, wrap_dek};
+use crate::i18n::{self, Key};
 use crate::lock_screen;
 use crate::settings;
 use crate::state::{AppState, Phase, decrypt_all};
@@ -72,10 +73,13 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             .radius(16.0),
     );
 
-    tree.add_child(card, TextWidget::new("Recover your vault").font_size(28.0));
     tree.add_child(
         card,
-        TextWidget::new("Enter your 12-word recovery key and choose a new password.")
+        TextWidget::reactive(|| i18n::tr(Key::RecoveryTitle).to_string()).font_size(28.0),
+    );
+    tree.add_child(
+        card,
+        TextWidget::reactive(|| i18n::tr(Key::RecoveryDescription).to_string())
             .color(settings::on_surface_variant()),
     );
 
@@ -83,7 +87,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     tree.add_child(
         card,
         Input::new()
-            .placeholder("word1 word2 word3 … (12 words, separated by spaces)")
+            .placeholder(i18n::tr(Key::RecoveryKeyPlaceholder))
             .multiline()
             .lines(3)
             .value(mnemonic_sig),
@@ -96,13 +100,14 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let pw_idx = tree.add_child(
         card,
         SecureInput::new()
-            .placeholder("New master password")
+            .placeholder(i18n::tr(Key::NewPasswordPlaceholder))
             .clear_on(clear_pw)
             .on_submit(move |pw, ctx| {
                 if pw.char_count() < MIN_PASSWORD_LEN {
                     set_error(
                         &pw_state,
-                        format!("password must be at least {} characters", MIN_PASSWORD_LEN),
+                        i18n::tr(Key::ValidationMinLength)
+                            .replace("{n}", &MIN_PASSWORD_LEN.to_string()),
                     );
                     return;
                 }
@@ -118,19 +123,19 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let confirm = tree.add_child(
         card,
         SecureInput::new()
-            .placeholder("Confirm new password")
+            .placeholder(i18n::tr(Key::RecoveryConfirmPlaceholder))
             .clear_on(clear_cf)
             .on_submit(move |confirm_pw, ctx| {
                 let matched = match cf_stash.borrow().as_ref() {
                     Some(first) => first == confirm_pw,
                     None => {
-                        set_error(&cf_state, "enter your new password above first".into());
+                        set_error(&cf_state, i18n::tr(Key::ConfirmFirstRecovery).to_string());
                         ctx.focus(pw_idx);
                         return;
                     }
                 };
                 if !matched {
-                    set_error(&cf_state, "passwords don't match \u{2014} try again".into());
+                    set_error(&cf_state, i18n::tr(Key::PasswordsMismatch).to_string());
                     cf_stash.borrow_mut().take();
                     clear_pw.bump();
                     clear_cf.bump();
@@ -165,9 +170,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         card,
         TextWidget::reactive(move || match &status_state.borrow().phase {
             Phase::Recovery { error: Some(e) } => e.clone(),
-            Phase::Recovery { error: None } => {
-                "Type your recovery key and a new password, then press Enter.".to_string()
-            }
+            Phase::Recovery { error: None } => i18n::tr(Key::RecoveryPrompt).to_string(),
             _ => String::new(),
         })
         .color(Reactive::derive(move || {
@@ -183,7 +186,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let back_state = Rc::clone(&state);
     tree.add_child(
         card,
-        Button::new("Back to unlock")
+        Button::reactive_label(|| i18n::tr(Key::RecoveryBack).to_string())
             .radius(8.0)
             .on_click(move |ctx| {
                 let next = Rc::clone(&back_state);
@@ -204,23 +207,24 @@ fn attempt_recovery(
     new_password: &SecureString,
 ) -> Result<(), String> {
     if phrase.split_whitespace().count() != recovery::WORD_COUNT {
-        return Err(format!(
-            "recovery key must be {} words",
-            recovery::WORD_COUNT
-        ));
+        return Err(
+            i18n::tr(Key::RecoveryWordCount).replace("{n}", &recovery::WORD_COUNT.to_string())
+        );
     }
 
     let Some(paths) = VaultPaths::default_for_app() else {
-        return Err("config directory unavailable".into());
+        return Err(i18n::tr(Key::ConfigUnavailable).to_string());
     };
 
-    let rec_kek = recovery::key_to_kek(phrase).ok_or_else(|| "invalid recovery key".to_string())?;
+    let rec_kek = recovery::key_to_kek(phrase)
+        .ok_or_else(|| i18n::tr(Key::RecoveryKeyInvalid).to_string())?;
 
     let wrapped = paths
         .read_wrapped_recovery()
-        .map_err(|_| "no recovery key set up for this vault".to_string())?;
+        .map_err(|_| i18n::tr(Key::RecoveryNotSetUp).to_string())?;
 
-    let dek = unwrap_dek(&rec_kek, &wrapped).ok_or_else(|| "invalid recovery key".to_string())?;
+    let dek = unwrap_dek(&rec_kek, &wrapped)
+        .ok_or_else(|| i18n::tr(Key::RecoveryKeyInvalid).to_string())?;
 
     // Re-wrap the recovered DEK under the new password and install it.
     let new_salt = random_salt();
@@ -228,19 +232,19 @@ fn attempt_recovery(
     let new_wrapped = wrap_dek(&new_pw_kek, &dek);
     paths
         .write_salt(&new_salt)
-        .map_err(|e| format!("failed to write salt: {}", e))?;
+        .map_err(|e| format!("{}{}", i18n::tr(Key::ErrWriteSaltPrefix), e))?;
     paths
         .write_wrapped_dek(&new_wrapped)
-        .map_err(|e| format!("failed to write key file: {}", e))?;
+        .map_err(|e| format!("{}{}", i18n::tr(Key::ErrWriteKeyFilePrefix), e))?;
 
     // Open the DB with the recovered DEK and load the notes.
-    let storage =
-        VaultStorage::open(&paths.db, &dek).map_err(|e| format!("failed to open vault: {}", e))?;
+    let storage = VaultStorage::open(&paths.db, &dek)
+        .map_err(|e| format!("{}{}", i18n::tr(Key::ErrOpenVaultPrefix), e))?;
     let encrypted = storage
         .load_notes()
-        .map_err(|e| format!("failed to read notes: {}", e))?;
+        .map_err(|e| format!("{}{}", i18n::tr(Key::ErrReadNotesPrefix), e))?;
     let notes = decrypt_all(&dek, &encrypted)
-        .ok_or_else(|| "vault data corrupted (auth failed)".to_string())?;
+        .ok_or_else(|| i18n::tr(Key::VaultDataCorrupted).to_string())?;
 
     let mut s = state.borrow_mut();
     s.salt = new_salt;

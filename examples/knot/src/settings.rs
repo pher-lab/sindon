@@ -34,6 +34,8 @@ use shroud::reactive::{Animated, Easing, Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, TextWidget};
 
+use crate::i18n::{self, Key, Language};
+
 const APP_NAME: &str = "knot";
 const SETTINGS_FILENAME: &str = "settings.json";
 
@@ -70,11 +72,12 @@ impl FontSize {
         }
     }
 
-    fn label(self) -> &'static str {
+    /// Translation key for this size's settings-modal button label.
+    fn key(self) -> Key {
         match self {
-            FontSize::Small => "Small",
-            FontSize::Medium => "Medium",
-            FontSize::Large => "Large",
+            FontSize::Small => Key::SettingsFontSmall,
+            FontSize::Medium => Key::SettingsFontMedium,
+            FontSize::Large => Key::SettingsFontLarge,
         }
     }
 }
@@ -109,12 +112,13 @@ impl AutoLock {
         }
     }
 
-    fn label(self) -> &'static str {
+    /// Translation key for this choice's settings-modal button label.
+    fn key(self) -> Key {
         match self {
-            AutoLock::Off => "Off",
-            AutoLock::OneMinute => "1 min",
-            AutoLock::FiveMinutes => "5 min",
-            AutoLock::FifteenMinutes => "15 min",
+            AutoLock::Off => Key::AutoLockOff,
+            AutoLock::OneMinute => Key::AutoLockOneMinute,
+            AutoLock::FiveMinutes => Key::AutoLockFiveMinutes,
+            AutoLock::FifteenMinutes => Key::AutoLockFifteenMinutes,
         }
     }
 }
@@ -137,14 +141,14 @@ pub enum SortMode {
 }
 
 impl SortMode {
-    /// Short button label for the sidebar's sort row. Public because — unlike
-    /// the other settings enums, whose toggles live in this module's modal —
-    /// the sort control is rendered over in `sidebar`.
-    pub fn label(self) -> &'static str {
+    /// Translation key for the sidebar's sort-row button label. Public
+    /// because — unlike the other settings enums, whose toggles live in this
+    /// module's modal — the sort control is rendered over in `sidebar`.
+    pub fn key(self) -> Key {
         match self {
-            SortMode::Created => "Created",
-            SortMode::TitleAsc => "A\u{2013}Z",
-            SortMode::TitleDesc => "Z\u{2013}A",
+            SortMode::Created => Key::SortCreated,
+            SortMode::TitleAsc => Key::SortTitleAsc,
+            SortMode::TitleDesc => Key::SortTitleDesc,
         }
     }
 }
@@ -162,6 +166,8 @@ pub struct Settings {
     pub auto_lock: AutoLock,
     #[serde(default)]
     pub sort: SortMode,
+    #[serde(default)]
+    pub language: Language,
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -211,6 +217,7 @@ pub struct SettingsSignals {
     pub font: Signal<FontSize>,
     pub auto_lock: Signal<AutoLock>,
     pub sort: Signal<SortMode>,
+    pub language: Signal<Language>,
 }
 
 thread_local! {
@@ -231,6 +238,7 @@ pub fn signals() -> SettingsSignals {
                 font: Signal::new(loaded.font_size),
                 auto_lock: Signal::new(loaded.auto_lock),
                 sort: Signal::new(loaded.sort),
+                language: Signal::new(loaded.language),
             }
         })
     })
@@ -315,6 +323,7 @@ pub fn persist() {
         font_size: s.font.get(),
         auto_lock: s.auto_lock.get(),
         sort: s.sort.get(),
+        language: s.language.get(),
     }
     .save();
 }
@@ -373,18 +382,22 @@ pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
 
     tree.add_child(
         dialog,
-        TextWidget::new("Settings")
+        TextWidget::reactive(|| i18n::tr(Key::SettingsTitle).to_string())
             .font_size(22.0)
             .color(on_surface()),
     );
 
     // --- Theme ---
-    tree.add_child(dialog, TextWidget::new("Theme").color(on_surface_variant()));
+    tree.add_child(
+        dialog,
+        TextWidget::reactive(|| i18n::tr(Key::SettingsTheme).to_string())
+            .color(on_surface_variant()),
+    );
     let theme_row = tree.add_child(dialog, Container::row().gap(8.0));
     for (label, choice) in [
-        ("Light", ThemeChoice::Light),
-        ("Dark", ThemeChoice::Dark),
-        ("System", ThemeChoice::System),
+        (Key::SettingsThemeLight, ThemeChoice::Light),
+        (Key::SettingsThemeDark, ThemeChoice::Dark),
+        (Key::SettingsThemeSystem, ThemeChoice::System),
     ] {
         let sig = s.theme;
         let bg = Reactive::derive(move || {
@@ -405,7 +418,7 @@ pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
         });
         tree.add_child(
             theme_row,
-            Button::new(label)
+            Button::reactive_label(move || i18n::tr(label).to_string())
                 .radius(6.0)
                 .background(bg)
                 .text_color(fg)
@@ -419,7 +432,8 @@ pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
     // --- Font size ---
     tree.add_child(
         dialog,
-        TextWidget::new("Font size").color(on_surface_variant()),
+        TextWidget::reactive(|| i18n::tr(Key::SettingsFontSize).to_string())
+            .color(on_surface_variant()),
     );
     let font_row = tree.add_child(dialog, Container::row().gap(8.0));
     for size in [FontSize::Small, FontSize::Medium, FontSize::Large] {
@@ -442,7 +456,7 @@ pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
         });
         tree.add_child(
             font_row,
-            Button::new(size.label())
+            Button::reactive_label(move || i18n::tr(size.key()).to_string())
                 .radius(6.0)
                 .background(bg)
                 .text_color(fg)
@@ -456,7 +470,8 @@ pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
     // --- Auto-lock ---
     tree.add_child(
         dialog,
-        TextWidget::new("Auto-lock").color(on_surface_variant()),
+        TextWidget::reactive(|| i18n::tr(Key::SettingsAutoLock).to_string())
+            .color(on_surface_variant()),
     );
     let lock_row = tree.add_child(dialog, Container::row().gap(8.0));
     for choice in [
@@ -484,7 +499,52 @@ pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
         });
         tree.add_child(
             lock_row,
-            Button::new(choice.label())
+            Button::reactive_label(move || i18n::tr(choice.key()).to_string())
+                .radius(6.0)
+                .background(bg)
+                .text_color(fg)
+                .on_click(move |_ctx| {
+                    sig.set(choice);
+                    persist();
+                }),
+        );
+    }
+
+    // --- Language ---
+    // Switching this re-renders every reactive string on the next paint
+    // (see `crate::i18n`), so the whole UI — including this modal's own
+    // labels — flips language live without a tree rebuild.
+    tree.add_child(
+        dialog,
+        TextWidget::reactive(|| i18n::tr(Key::SettingsLanguage).to_string())
+            .color(on_surface_variant()),
+    );
+    let lang_row = tree.add_child(dialog, Container::row().gap(8.0));
+    for (label, choice) in [
+        (Key::LanguageJa, Language::Ja),
+        (Key::LanguageEn, Language::En),
+        (Key::LanguageSystem, Language::System),
+    ] {
+        let sig = s.language;
+        let bg = Reactive::derive(move || {
+            let t = current_theme();
+            if sig.get() == choice {
+                t.colors.primary
+            } else {
+                t.colors.surface_variant
+            }
+        });
+        let fg = Reactive::derive(move || {
+            let t = current_theme();
+            if sig.get() == choice {
+                t.colors.on_primary
+            } else {
+                t.colors.on_surface
+            }
+        });
+        tree.add_child(
+            lang_row,
+            Button::reactive_label(move || i18n::tr(label).to_string())
                 .radius(6.0)
                 .background(bg)
                 .text_color(fg)
@@ -499,7 +559,7 @@ pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
     let done_row = tree.add_child(dialog, Container::row().gap(8.0).justify_center());
     tree.add_child(
         done_row,
-        Button::new("Done")
+        Button::reactive_label(|| i18n::tr(Key::SettingsDone).to_string())
             .radius(6.0)
             .on_click(|ctx| ctx.pop_top_layer()),
     );
@@ -523,12 +583,15 @@ mod tests {
             font_size: FontSize::Large,
             auto_lock: AutoLock::FifteenMinutes,
             sort: SortMode::TitleAsc,
+            language: Language::Ja,
         };
         let json = serde_json::to_string(&original).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(original, back);
         // The sort key serializes in its stable snake_case form.
         assert!(json.contains(r#""sort":"title_asc""#));
+        // Language serializes in its stable lowercase form.
+        assert!(json.contains(r#""language":"ja""#));
     }
 
     #[test]
@@ -540,6 +603,7 @@ mod tests {
         assert_eq!(back.font_size, FontSize::Medium);
         assert_eq!(back.auto_lock, AutoLock::FiveMinutes);
         assert_eq!(back.sort, SortMode::Created);
+        assert_eq!(back.language, Language::System);
 
         // And an empty object loads to all-defaults.
         let empty: Settings = serde_json::from_str("{}").unwrap();

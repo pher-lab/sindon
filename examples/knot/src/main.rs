@@ -21,6 +21,7 @@
 mod crypto;
 mod editor;
 mod highlight;
+mod i18n;
 mod lock_screen;
 mod notice;
 mod preview;
@@ -80,7 +81,10 @@ fn main() {
                 if let Err(e) = state_for_tick.borrow_mut().flush_dirty() {
                     // Surface to the banner (it also logs) so the user knows
                     // their last edits haven't reached disk — not just stderr.
-                    notice::show(format!("Couldn't save changes: {e}"));
+                    notice::show(format!(
+                        "{}{e}",
+                        crate::i18n::tr(crate::i18n::Key::ErrSaveChangesPrefix)
+                    ));
                 }
 
                 let is_unlocked = matches!(state_for_tick.borrow().phase, Phase::Unlocked { .. });

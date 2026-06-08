@@ -31,6 +31,7 @@ use shroud::widgets::layer::LayerOptions;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, EventContext, Input, ScrollView, TextWidget};
 
+use crate::i18n::{self, Key};
 use crate::notice;
 use crate::settings;
 use crate::settings::SortMode;
@@ -147,7 +148,7 @@ pub fn build(
         let w = w.clone();
         tree.add_child(
             header,
-            Button::new("Import")
+            Button::reactive_label(|| i18n::tr(Key::SidebarImport).to_string())
                 .radius(6.0)
                 .background(Color::TRANSPARENT)
                 .hover_background(settings::hover())
@@ -160,23 +161,25 @@ pub fn build(
         let w = w.clone();
         tree.add_child(
             header,
-            Button::new("+ New").radius(6.0).on_click(move |ctx| {
-                if create_note(&w.state, &w.title, &w.body).is_some() {
-                    // A new note has no tags, so an active filter would hide it
-                    // the instant it's created — clear the filter so the note
-                    // the user just asked for is actually visible in the list.
-                    w.state.borrow_mut().clear_filter();
-                    // An active search would likewise hide the new empty note
-                    // (empty title + body match no non-empty query) — clear the
-                    // query and the search box along with the filter.
-                    w.state.borrow_mut().clear_search();
-                    w.search.set(String::new());
-                    rebuild_sidebar(&w, ctx);
-                    // The new note is selected and tagless — refresh the
-                    // editor's chip row to match.
-                    w.tag_refresh.fire(ctx);
-                }
-            }),
+            Button::reactive_label(|| i18n::tr(Key::SidebarNewNote).to_string())
+                .radius(6.0)
+                .on_click(move |ctx| {
+                    if create_note(&w.state, &w.title, &w.body).is_some() {
+                        // A new note has no tags, so an active filter would hide it
+                        // the instant it's created — clear the filter so the note
+                        // the user just asked for is actually visible in the list.
+                        w.state.borrow_mut().clear_filter();
+                        // An active search would likewise hide the new empty note
+                        // (empty title + body match no non-empty query) — clear the
+                        // query and the search box along with the filter.
+                        w.state.borrow_mut().clear_search();
+                        w.search.set(String::new());
+                        rebuild_sidebar(&w, ctx);
+                        // The new note is selected and tagless — refresh the
+                        // editor's chip row to match.
+                        w.tag_refresh.fire(ctx);
+                    }
+                }),
         );
     }
 
@@ -190,7 +193,7 @@ pub fn build(
         let search_input = tree.add_child(
             pane,
             Input::new()
-                .placeholder("Search\u{2026}")
+                .placeholder(i18n::tr(Key::SidebarSearchPlaceholder))
                 .value(w.search)
                 .font_size(13.0)
                 .on_change(move |val, ctx| {
@@ -218,7 +221,7 @@ pub fn build(
     );
     tree.add_child(
         sort_row,
-        TextWidget::new("Sort")
+        TextWidget::reactive(|| i18n::tr(Key::SidebarSort).to_string())
             .font_size(13.0)
             .color(settings::on_surface_variant()),
     );
@@ -242,7 +245,7 @@ pub fn build(
         let w = w.clone();
         tree.add_child(
             sort_row,
-            Button::new(mode.label())
+            Button::reactive_label(move || i18n::tr(mode.key()).to_string())
                 .font_size(13.0)
                 .radius(10.0)
                 .background(bg)
@@ -297,7 +300,7 @@ pub fn build(
     // and persisted on every change.
     tree.add_child(
         pane,
-        Button::new("\u{2699} Settings")
+        Button::reactive_label(|| i18n::tr(Key::SidebarSettings).to_string())
             .radius(6.0)
             .on_click(|ctx| {
                 ctx.push_layer(
@@ -399,7 +402,7 @@ fn populate_filter(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
     let w = w.clone();
     tree.add_child(
         parent,
-        Button::new("Clear")
+        Button::reactive_label(|| i18n::tr(Key::SidebarClear).to_string())
             .font_size(13.0)
             .radius(10.0)
             .background(Color::TRANSPARENT)
@@ -432,7 +435,8 @@ fn populate_list(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
     if total == 0 {
         tree.add_child(
             parent,
-            TextWidget::new("No notes yet. Click + New.").color(settings::on_surface_variant()),
+            TextWidget::reactive(|| i18n::tr(Key::SidebarNoNotesYet).to_string())
+                .color(settings::on_surface_variant()),
         );
         return;
     }
@@ -440,14 +444,15 @@ fn populate_list(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
         // Notes exist but the active search and/or tag filter hid them all —
         // name whichever is active so the user knows it's a narrowing, not an
         // empty vault.
-        let msg = match (searching, filtering) {
-            (true, true) => "No notes match your search and the selected tags.",
-            (true, false) => "No notes match your search.",
-            _ => "No notes match the selected tags.",
+        let key = match (searching, filtering) {
+            (true, true) => Key::SidebarNoMatchSearchTags,
+            (true, false) => Key::SidebarNoMatchSearch,
+            _ => Key::SidebarNoMatchTags,
         };
         tree.add_child(
             parent,
-            TextWidget::new(msg).color(settings::on_surface_variant()),
+            TextWidget::reactive(move || i18n::tr(key).to_string())
+                .color(settings::on_surface_variant()),
         );
         return;
     }
@@ -560,7 +565,7 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
                         .find(|n| n.id == note_id)
                         .map(|n| {
                             if n.title.is_empty() {
-                                "(untitled)".to_string()
+                                i18n::tr(Key::Untitled).to_string()
                             } else {
                                 n.title.clone()
                             }
@@ -665,7 +670,7 @@ fn create_note(
 /// imported, tagless note is visible, mirroring `+ New`.
 fn import_note(w: &SidebarWiring, ctx: &mut EventContext) {
     let Some(path) = FileDialog::new()
-        .title("Import note")
+        .title(i18n::tr(Key::DialogImportNote))
         .filter("Markdown / text", &["md", "markdown", "txt"])
         .open_file()
     else {
@@ -675,10 +680,10 @@ fn import_note(w: &SidebarWiring, ctx: &mut EventContext) {
     // Refuse a pathologically large file before reading it into memory.
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() > MAX_IMPORT_BYTES {
-            notice::show(format!(
-                "That file is too large to import (max {} MiB).",
-                MAX_IMPORT_BYTES / (1024 * 1024)
-            ));
+            notice::show(
+                i18n::tr(Key::ErrImportTooLarge)
+                    .replace("{n}", &(MAX_IMPORT_BYTES / (1024 * 1024)).to_string()),
+            );
             return;
         }
     }
@@ -686,7 +691,7 @@ fn import_note(w: &SidebarWiring, ctx: &mut EventContext) {
     let body = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
-            notice::show(format!("Couldn't read that file: {e}"));
+            notice::show(format!("{}{e}", i18n::tr(Key::ErrReadFilePrefix)));
             return;
         }
     };
@@ -731,7 +736,7 @@ fn delete_note(
     let was_selected_before = matches!(&state.borrow().phase, Phase::Unlocked { selected, .. } if *selected == Some(note_id));
 
     if let Err(e) = state.borrow_mut().delete_note_persisted(note_id) {
-        notice::show(format!("Couldn't delete note: {e}"));
+        notice::show(format!("{}{e}", i18n::tr(Key::ErrDeleteNotePrefix)));
         return;
     }
 

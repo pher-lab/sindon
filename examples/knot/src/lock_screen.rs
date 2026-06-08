@@ -19,6 +19,7 @@ use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, SecureInput, TextWidget};
 
 use crate::crypto::{derive_key, unwrap_dek};
+use crate::i18n::{self, Key};
 use crate::recovery_screen;
 use crate::settings;
 use crate::state::{AppState, Phase, decrypt_all};
@@ -56,15 +57,21 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     );
 
     tree.add_child(card, TextWidget::new("Knot").font_size(40.0));
-    tree.add_child(card, TextWidget::new("A knot only you can untie."));
+    tree.add_child(
+        card,
+        TextWidget::reactive(|| i18n::tr(Key::Tagline).to_string()),
+    );
 
-    tree.add_child(card, TextWidget::new("Master password:"));
+    tree.add_child(
+        card,
+        TextWidget::reactive(|| i18n::tr(Key::LockMasterPasswordLabel).to_string()),
+    );
 
     let unlock_state = Rc::clone(&state);
     let input_idx = tree.add_child(
         card,
         SecureInput::new()
-            .placeholder("Enter master password, press Enter to unlock")
+            .placeholder(i18n::tr(Key::LockPasswordPlaceholder))
             .on_submit(move |master, ctx| {
                 if try_unlock(&unlock_state, master) {
                     let next = Rc::clone(&unlock_state);
@@ -86,11 +93,13 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             if let Some(rem) = s.lockout_remaining() {
                 // Round up so the final fractional second still reads "1s".
                 let secs = rem.as_secs() + 1;
-                return format!("Too many attempts \u{2014} try again in {}s", secs);
+                return i18n::tr(Key::TooManyAttempts).replace("{n}", &secs.to_string());
             }
             match &s.phase {
-                Phase::Locked { error: None } => "Locked.".to_string(),
-                Phase::Locked { error: Some(e) } => format!("Locked \u{2014} {}", e),
+                Phase::Locked { error: None } => i18n::tr(Key::Locked).to_string(),
+                Phase::Locked { error: Some(e) } => {
+                    format!("{}{}", i18n::tr(Key::LockedErrorPrefix), e)
+                }
                 // Setup / Recovery / Unlocked are unreachable here — on success
                 // the handler queues a replace_screen, so by the next paint
                 // we're already off this screen. Render empty defensively.
@@ -122,7 +131,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
         let recover_state = Rc::clone(&state);
         tree.add_child(
             card,
-            Button::new("Forgot password? Use your recovery key")
+            Button::reactive_label(|| i18n::tr(Key::ForgotPassword).to_string())
                 .radius(8.0)
                 .on_click(move |ctx| {
                     let next = Rc::clone(&recover_state);
@@ -145,7 +154,7 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
     }
 
     let Some(paths) = VaultPaths::default_for_app() else {
-        set_error(state, "config directory unavailable".into());
+        set_error(state, i18n::tr(Key::ConfigUnavailable).to_string());
         return false;
     };
 
@@ -158,7 +167,10 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
     let wrapped = match paths.read_wrapped_dek() {
         Ok(w) => w,
         Err(e) => {
-            set_error(state, format!("failed to read key file: {}", e));
+            set_error(
+                state,
+                format!("{}{}", i18n::tr(Key::ErrReadKeyFilePrefix), e),
+            );
             return false;
         }
     };
@@ -167,7 +179,7 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
         // that crosses the lockout threshold the status reactive switches to a
         // countdown, otherwise echo the plain wrong-password message.
         if state.borrow_mut().note_failed_unlock().is_none() {
-            set_error(state, "wrong master password".into());
+            set_error(state, i18n::tr(Key::LockWrongPassword).to_string());
         }
         return false;
     };
@@ -178,14 +190,11 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
     let storage = match VaultStorage::open(&paths.db, &dek) {
         Ok(s) => s,
         Err(StorageError::BadKey) => {
-            set_error(
-                state,
-                "vault key mismatch (corrupted or partial restore)".into(),
-            );
+            set_error(state, i18n::tr(Key::LockKeyMismatch).to_string());
             return false;
         }
         Err(e) => {
-            set_error(state, format!("vault error: {}", e));
+            set_error(state, format!("{}{}", i18n::tr(Key::ErrVaultPrefix), e));
             return false;
         }
     };
@@ -193,7 +202,7 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
     let encrypted = match storage.load_notes() {
         Ok(n) => n,
         Err(e) => {
-            set_error(state, format!("failed to read notes: {}", e));
+            set_error(state, format!("{}{}", i18n::tr(Key::ErrReadNotesPrefix), e));
             return false;
         }
     };
@@ -202,7 +211,7 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
     // accepted the DEK (same key on both layers). A failure here means
     // the DB was tampered with outside our control.
     let Some(notes) = decrypt_all(&dek, &encrypted) else {
-        set_error(state, "vault data corrupted (auth failed)".into());
+        set_error(state, i18n::tr(Key::VaultDataCorrupted).to_string());
         return false;
     };
 

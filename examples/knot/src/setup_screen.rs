@@ -27,6 +27,7 @@ use shroud::widgets::{Button, ClearTrigger, Container, SecureInput, TextWidget};
 use zeroize::Zeroizing;
 
 use crate::crypto::{derive_key, generate_dek, random_salt, recovery, wrap_dek};
+use crate::i18n::{self, Key};
 use crate::settings;
 use crate::state::{AppState, Note, Phase};
 use crate::storage::{VaultPaths, VaultStorage};
@@ -81,15 +82,14 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     tree.add_child(card, TextWidget::new("Knot").font_size(40.0));
     tree.add_child(
         card,
-        TextWidget::new("Create a master password for your vault."),
+        TextWidget::reactive(|| i18n::tr(Key::SetupDescription).to_string()),
     );
 
     tree.add_child(
         card,
-        TextWidget::new(format!(
-            "At least {} characters. You'll get a recovery key next in case you forget it.",
-            MIN_PASSWORD_LEN
-        ))
+        TextWidget::reactive(|| {
+            i18n::tr(Key::SetupHint).replace("{n}", &MIN_PASSWORD_LEN.to_string())
+        })
         .color(settings::on_surface_variant()),
     );
 
@@ -100,13 +100,14 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let pw_idx = tree.add_child(
         card,
         SecureInput::new()
-            .placeholder("New master password")
+            .placeholder(i18n::tr(Key::NewPasswordPlaceholder))
             .clear_on(clear_pw)
             .on_submit(move |pw, ctx| {
                 if pw.char_count() < MIN_PASSWORD_LEN {
                     set_error(
                         &pw_state,
-                        format!("password must be at least {} characters", MIN_PASSWORD_LEN),
+                        i18n::tr(Key::ValidationMinLength)
+                            .replace("{n}", &MIN_PASSWORD_LEN.to_string()),
                     );
                     return;
                 }
@@ -125,7 +126,7 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let confirm = tree.add_child(
         card,
         SecureInput::new()
-            .placeholder("Confirm password")
+            .placeholder(i18n::tr(Key::ConfirmPasswordPlaceholder))
             .clear_on(clear_cf)
             .on_submit(move |confirm_pw, ctx| {
                 let matched = match cf_stash.borrow().as_ref() {
@@ -134,13 +135,13 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
                         // Confirm submitted before the password field —
                         // nudge the user back up rather than comparing
                         // against an empty stash.
-                        set_error(&cf_state, "enter your password above first".into());
+                        set_error(&cf_state, i18n::tr(Key::ConfirmFirstSetup).to_string());
                         ctx.focus(pw_idx);
                         return;
                     }
                 };
                 if !matched {
-                    set_error(&cf_state, "passwords don't match \u{2014} try again".into());
+                    set_error(&cf_state, i18n::tr(Key::PasswordsMismatch).to_string());
                     cf_stash.borrow_mut().take(); // zeroize the stale copy
                     clear_pw.bump();
                     clear_cf.bump();
@@ -181,9 +182,9 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             Phase::Setup { error: Some(e) } => e.clone(),
             Phase::Setup { error: None } => {
                 if status_stash.borrow().is_some() {
-                    "Re-enter the same password to confirm.".to_string()
+                    i18n::tr(Key::SetupConfirmPrompt).to_string()
                 } else {
-                    "Choose a master password and press Enter.".to_string()
+                    i18n::tr(Key::SetupChoosePrompt).to_string()
                 }
             }
             _ => String::new(),
@@ -228,23 +229,23 @@ fn create_vault(
     // Wrap the same DEK under a fresh recovery KEK.
     let mnemonic = recovery::generate_mnemonic();
     let rec_kek = recovery::key_to_kek(&mnemonic)
-        .ok_or_else(|| "failed to derive recovery key".to_string())?;
+        .ok_or_else(|| i18n::tr(Key::ErrDeriveRecovery).to_string())?;
     let rec_wrapped = wrap_dek(&rec_kek, &dek);
 
     paths
         .write_salt(&salt)
-        .map_err(|e| format!("failed to write salt: {}", e))?;
+        .map_err(|e| format!("{}{}", i18n::tr(Key::ErrWriteSaltPrefix), e))?;
     paths
         .write_wrapped_dek(&pw_wrapped)
-        .map_err(|e| format!("failed to write key file: {}", e))?;
+        .map_err(|e| format!("{}{}", i18n::tr(Key::ErrWriteKeyFilePrefix), e))?;
     paths
         .write_wrapped_recovery(&rec_wrapped)
-        .map_err(|e| format!("failed to write recovery file: {}", e))?;
+        .map_err(|e| format!("{}{}", i18n::tr(Key::ErrWriteRecoveryPrefix), e))?;
 
     // Open (create) the DB keyed with the DEK — done last so it's the
     // final file to appear; see the order rationale above.
     let storage = VaultStorage::open(&paths.db, &dek)
-        .map_err(|e| format!("failed to create vault: {}", e))?;
+        .map_err(|e| format!("{}{}", i18n::tr(Key::ErrCreateVaultPrefix), e))?;
 
     let mut s = state.borrow_mut();
     s.complete_setup(salt, dek, welcome_notes(), storage);
@@ -253,7 +254,7 @@ fn create_vault(
     // launch then sees an existing vault and goes to the lock screen instead of
     // re-running setup.
     s.rewrite_vault_to_storage()
-        .map_err(|e| format!("failed to initialize vault: {}", e))?;
+        .map_err(|e| format!("{}{}", i18n::tr(Key::ErrInitVaultPrefix), e))?;
 
     Ok(mnemonic)
 }
@@ -339,15 +340,14 @@ fn build_recovery_reveal(
             .radius(16.0),
     );
 
-    tree.add_child(card, TextWidget::new("Your recovery key").font_size(28.0));
     tree.add_child(
         card,
-        TextWidget::new(
-            "If you forget your password, these 12 words are the only way back into \
-             your vault. Write them down and store them somewhere safe \u{2014} they're \
-             shown only once.",
-        )
-        .color(settings::on_surface_variant()),
+        TextWidget::reactive(|| i18n::tr(Key::RecoveryRevealTitle).to_string()).font_size(28.0),
+    );
+    tree.add_child(
+        card,
+        TextWidget::reactive(|| i18n::tr(Key::RecoveryRevealDescription).to_string())
+            .color(settings::on_surface_variant()),
     );
 
     // 12 words in a 3-row x 4-column grid of fixed-width cells so the
@@ -379,17 +379,14 @@ fn build_recovery_reveal(
 
     tree.add_child(
         card,
-        TextWidget::new(
-            "Anyone who has these words can open your vault. Never share them or store \
-             them with your password.",
-        )
-        .color(settings::warning()),
+        TextWidget::reactive(|| i18n::tr(Key::RecoveryRevealWarning).to_string())
+            .color(settings::warning()),
     );
 
     let next = Rc::clone(&state);
     tree.add_child(
         card,
-        Button::new("I've saved it \u{2014} open my vault")
+        Button::reactive_label(|| i18n::tr(Key::RecoveryRevealDone).to_string())
             .radius(8.0)
             .on_click(move |ctx| {
                 let next = Rc::clone(&next);
