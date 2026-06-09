@@ -303,6 +303,16 @@ impl Container {
         self
     }
 
+    /// Set the `flex-shrink` factor. Defaults to `1` (the flex default), so a
+    /// row's items shrink below their content to fit. Pass `0.0` to pin an
+    /// item at its content size — e.g. a brand title or icon that must never
+    /// be compressed (and so wrap or ellipsize) when wider siblings crowd the
+    /// row. See [`FlexStyle::shrink`].
+    pub fn shrink(mut self, factor: f32) -> Self {
+        self.style = self.style.shrink(factor);
+        self
+    }
+
     /// Set the initial main-axis size (`flex-basis`) in pixels. See
     /// [`FlexStyle::flex_basis`] for the CSS `flex: 1 1 0` use case — pair
     /// with [`Self::grow`] to express "this column takes whatever space is

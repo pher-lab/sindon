@@ -464,7 +464,7 @@ impl Key {
 
             // Sidebar
             SidebarImport => "インポート",
-            SidebarNewNote => "＋ 新規",
+            SidebarNewNote => "＋新規",
             SidebarSearchPlaceholder => "検索\u{2026}",
             SidebarSort => "並び替え",
             SidebarSettings => "\u{2699} 設定",

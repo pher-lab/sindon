@@ -139,7 +139,14 @@ pub fn build(
     // Header: title on the left, then the Import + "+ New" buttons pushed to
     // the right edge.
     let header = tree.add_child(pane, Container::row().gap(8.0).align_center());
-    tree.add_child(header, TextWidget::new("Knot").font_size(20.0));
+    // Pin the brand title with `shrink(0)` so it keeps its natural width. The
+    // header is a fixed-width row (the 260 px sidebar); without this, wider
+    // trailing buttons — notably the longer Japanese labels — crowd the row
+    // and flex-shrink compresses the title until "Knot" breaks mid-word
+    // ("kno⏎t"). A text widget can't carry flex props itself, so it rides in a
+    // non-shrinking wrapper (same pattern as the body Input's grow wrapper).
+    let title_box = tree.add_child(header, Container::row().shrink(0.0));
+    tree.add_child(title_box, TextWidget::new("Knot").font_size(20.0));
     tree.add_child(header, Container::row().grow(1.0));
 
     // Import (secondary): read a .md/.txt file into a new note. Sits left of
