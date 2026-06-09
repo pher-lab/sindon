@@ -121,6 +121,17 @@ impl VaultPaths {
         self.write_file(&self.dek, wrapped)
     }
 
+    /// Atomically overwrite `dek.enc` (write to a `.tmp` sibling, then
+    /// `rename`). Used by the change-password flow, which rewraps the DEK
+    /// *in place* on an existing vault: a torn write here would otherwise
+    /// leave a truncated `dek.enc` that no password could unwrap, locking the
+    /// vault out of its password key (recovery via the BIP39 wrapping would be
+    /// the only way back). Setup writes the file once on a fresh vault, where
+    /// a crash just discards an incomplete vault, so it uses the plain path.
+    pub fn write_wrapped_dek_atomic(&self, wrapped: &[u8]) -> Result<(), StorageError> {
+        Self::write_file_atomic(&self.dek, wrapped)
+    }
+
     /// Read the recovery-wrapped DEK blob. `Io` (not found) surfaces to the
     /// caller, which reports "no recovery key set up" rather than treating
     /// it as a wrong-key failure.
@@ -149,6 +160,22 @@ impl VaultPaths {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// Write `bytes` to `path` atomically via a `.tmp` sibling + `rename`, so a
+    /// reader (or a crash) never sees a partially written file. Mirrors
+    /// [`shroud::platform::storage::write_json_atomic`]; on all three OSes
+    /// `rename` over an existing file on the same volume is atomic.
+    fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut tmp = path.as_os_str().to_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
         Ok(())
     }
 }
@@ -634,5 +661,46 @@ mod tests {
         assert_eq!(store.all_attachment_ids().unwrap(), vec![1, 3, 4]);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn wrapped_dek_atomic_write_round_trips_and_leaves_no_tmp() {
+        // The change-password flow rewrites dek.enc in place via the atomic
+        // path; prove a write is readable back and the `.tmp` sibling is gone
+        // after the rename (so a later read never trips over a stale temp).
+        let dir = std::env::temp_dir().join(format!(
+            "knot-dek-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = VaultPaths {
+            db: dir.join("vault.db"),
+            salt: dir.join("vault.salt"),
+            dek: dir.join("dek.enc"),
+            recovery: dir.join("recovery.enc"),
+        };
+
+        paths
+            .write_wrapped_dek_atomic(b"first-wrapped-blob")
+            .unwrap();
+        assert_eq!(paths.read_wrapped_dek().unwrap(), b"first-wrapped-blob");
+
+        // Overwriting an existing dek.enc must also succeed (rename replaces).
+        paths.write_wrapped_dek_atomic(b"second-blob").unwrap();
+        assert_eq!(paths.read_wrapped_dek().unwrap(), b"second-blob");
+
+        // No leftover temp file from either write.
+        let mut tmp = paths.dek.as_os_str().to_os_string();
+        tmp.push(".tmp");
+        assert!(
+            !Path::new(&tmp).exists(),
+            "the .tmp sibling must be renamed away"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

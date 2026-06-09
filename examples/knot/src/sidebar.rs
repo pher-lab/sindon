@@ -304,12 +304,15 @@ pub fn build(
 
     // Pinned to the bottom of the pane (the scroll above takes grow:1).
     // Opens the settings modal — theme + font size + auto-lock, applied live
-    // and persisted on every change.
+    // and persisted on every change, plus the change-password entry (which is
+    // why the modal needs the app state).
+    let settings_state = Rc::clone(&w.state);
     tree.add_child(
         pane,
         Button::reactive_label(|| i18n::tr(Key::SidebarSettings).to_string())
             .radius(6.0)
-            .on_click(|ctx| {
+            .on_click(move |ctx| {
+                let st = Rc::clone(&settings_state);
                 ctx.push_layer(
                     LayerOptions::modal(),
                     Container::column()
@@ -318,7 +321,7 @@ pub fn build(
                         .gap(16.0)
                         .background(settings::surface())
                         .radius(12.0),
-                    settings::populate_settings_modal,
+                    move |tree, dialog| settings::populate_settings_modal(tree, dialog, st),
                 );
             }),
     );

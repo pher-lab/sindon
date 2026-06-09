@@ -21,8 +21,9 @@
 //! ([`surface`], [`on_surface_variant`], …) so they track a theme swap in
 //! lockstep with the framework-themed widgets.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -31,10 +32,13 @@ use shroud::app::system_theme_signal;
 use shroud::core::{Color, Theme};
 use shroud::platform::SystemTheme;
 use shroud::reactive::{Animated, Easing, Reactive, Signal};
+use shroud::widgets::layer::LayerOptions;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, TextWidget};
 
+use crate::change_password;
 use crate::i18n::{self, Key, Language};
+use crate::state::AppState;
 
 const APP_NAME: &str = "knot";
 const SETTINGS_FILENAME: &str = "settings.json";
@@ -371,13 +375,15 @@ pub fn warning() -> Reactive<Color> {
 // --- Settings modal --------------------------------------------------------
 
 /// Populate the settings dialog body. Used as the `push_layer` populate
-/// closure (`FnOnce(&mut WidgetTree, usize)`), so it needs no
-/// `EventContext` of its own — option clicks only set a signal + persist,
-/// and only the Done button touches `ctx` (to pop the layer).
+/// closure (`FnOnce(&mut WidgetTree, usize)`), so most of it needs no
+/// `EventContext` of its own — option clicks only set a signal + persist.
+/// The Done button and the change-password row touch `ctx` (to pop, or to
+/// push the nested change-password modal); the latter is why `state` is
+/// threaded in.
 ///
 /// Each option button highlights when active by deriving its background
 /// from the same signal it writes, so the selection reads back live.
-pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
+pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize, state: Rc<RefCell<AppState>>) {
     let s = signals();
 
     tree.add_child(
@@ -554,6 +560,37 @@ pub fn populate_settings_modal(tree: &mut WidgetTree, dialog: usize) {
                 }),
         );
     }
+
+    // --- Security ---
+    // Change the master password. Opens a nested modal that re-wraps the DEK
+    // under a new password (the notes are never re-encrypted — see
+    // `crate::change_password`). Distinct from the live-applied option rows
+    // above: it needs the app state and its own `EventContext` to push the
+    // sub-dialog, which is why this builder takes `state`.
+    tree.add_child(
+        dialog,
+        TextWidget::reactive(|| i18n::tr(Key::SettingsSecurity).to_string())
+            .color(on_surface_variant()),
+    );
+    let cp_state = state;
+    tree.add_child(
+        dialog,
+        Button::reactive_label(|| i18n::tr(Key::SettingsChangePassword).to_string())
+            .radius(6.0)
+            .on_click(move |ctx| {
+                let st = Rc::clone(&cp_state);
+                ctx.push_layer(
+                    LayerOptions::modal(),
+                    Container::column()
+                        .width(400.0)
+                        .padding(24.0)
+                        .gap(16.0)
+                        .background(surface())
+                        .radius(12.0),
+                    move |tree, dialog| change_password::populate(tree, dialog, st),
+                );
+            }),
+    );
 
     // --- Done ---
     let done_row = tree.add_child(dialog, Container::row().gap(8.0).justify_center());

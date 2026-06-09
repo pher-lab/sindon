@@ -229,6 +229,18 @@ pub enum Key {
     // --- Tag editor ---
     TagsAddPlaceholder,
 
+    // --- Change password / Security ---
+    SettingsSecurity,
+    SettingsChangePassword,
+    ChangePasswordTitle,
+    ChangePasswordDescription,
+    ChangePasswordCurrentPlaceholder,
+    ChangePasswordPrompt,
+    ChangePasswordCurrentWrong,
+    ChangePasswordEnterCurrentFirst,
+    ChangePasswordSuccess,
+    ChangePasswordCancel,
+
     // --- main / app ---
     ErrSaveChangesPrefix,
 }
@@ -368,6 +380,21 @@ impl Key {
 
             // Tag editor
             TagsAddPlaceholder => "Add tags\u{2026}",
+
+            // Change password / Security
+            SettingsSecurity => "Security",
+            SettingsChangePassword => "Change master password",
+            ChangePasswordTitle => "Change master password",
+            ChangePasswordDescription => {
+                "Enter your current password, then choose a new one. Your notes aren't \
+                 re-encrypted \u{2014} only the password that unlocks them changes."
+            }
+            ChangePasswordCurrentPlaceholder => "Current password",
+            ChangePasswordPrompt => "Enter your current password and a new one, then press Enter.",
+            ChangePasswordCurrentWrong => "current password is incorrect",
+            ChangePasswordEnterCurrentFirst => "enter your current password above first",
+            ChangePasswordSuccess => "Password changed. Use the new password next time you unlock.",
+            ChangePasswordCancel => "Cancel",
 
             // main
             ErrSaveChangesPrefix => "Couldn't save changes: ",
@@ -511,6 +538,25 @@ impl Key {
 
             // Tag editor
             TagsAddPlaceholder => "タグを追加\u{2026}",
+
+            // Change password / Security
+            SettingsSecurity => "セキュリティ",
+            SettingsChangePassword => "マスターパスワードを変更",
+            ChangePasswordTitle => "マスターパスワードを変更",
+            ChangePasswordDescription => {
+                "現在のパスワードを入力し、新しいパスワードを設定してください。\
+                 ノートは再暗号化されません \u{2014} 解錠に使うパスワードだけが変わります。"
+            }
+            ChangePasswordCurrentPlaceholder => "現在のパスワード",
+            ChangePasswordPrompt => {
+                "現在のパスワードと新しいパスワードを入力し、Enter を押してください。"
+            }
+            ChangePasswordCurrentWrong => "現在のパスワードが違います",
+            ChangePasswordEnterCurrentFirst => "先に上の現在のパスワードを入力してください",
+            ChangePasswordSuccess => {
+                "パスワードを変更しました。次回の解錠から新しいパスワードを使用してください。"
+            }
+            ChangePasswordCancel => "キャンセル",
 
             // main
             ErrSaveChangesPrefix => "変更を保存できませんでした: ",
@@ -674,6 +720,16 @@ mod tests {
         Key::PreviewImageUnavailable,
         Key::PreviewExternalImage,
         Key::TagsAddPlaceholder,
+        Key::SettingsSecurity,
+        Key::SettingsChangePassword,
+        Key::ChangePasswordTitle,
+        Key::ChangePasswordDescription,
+        Key::ChangePasswordCurrentPlaceholder,
+        Key::ChangePasswordPrompt,
+        Key::ChangePasswordCurrentWrong,
+        Key::ChangePasswordEnterCurrentFirst,
+        Key::ChangePasswordSuccess,
+        Key::ChangePasswordCancel,
         Key::ErrSaveChangesPrefix,
     ];
 }
