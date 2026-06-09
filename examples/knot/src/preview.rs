@@ -69,12 +69,13 @@ use shroud::reactive::{Reactive, Signal};
 use shroud::render::DecodedImage;
 use shroud::text::TextSpan;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, Image, TextWidget};
+use shroud::widgets::{Container, EventContext, Image, TextWidget};
 
 use crate::highlight::{self, TokenClass};
 use crate::i18n::{self, Key};
 use crate::settings;
 use crate::state::{self, AppState, AttachmentId, Note, NoteId, Phase};
+use crate::tag_editor::TagRefresh;
 
 // ── Reactive block-level theme colors ───────────────────────────────────────
 // Each re-reads `current_theme()` on every paint, so block text and panel
@@ -147,6 +148,11 @@ pub struct WikiNav {
     state: Rc<RefCell<AppState>>,
     title_sig: Signal<String>,
     body_sig: Signal<String>,
+    /// Bridge that rebuilds the editor's tag chips for the newly selected note.
+    /// Navigation switches the active note, so — exactly like a sidebar click —
+    /// it must fire this or the chips would keep showing the previous note's
+    /// tags (the chip row is rebuilt imperatively, not reactively).
+    tag_refresh: TagRefresh,
 }
 
 impl WikiNav {
@@ -154,32 +160,51 @@ impl WikiNav {
         state: Rc<RefCell<AppState>>,
         title_sig: Signal<String>,
         body_sig: Signal<String>,
+        tag_refresh: TagRefresh,
     ) -> Self {
         Self {
             state,
             title_sig,
             body_sig,
+            tag_refresh,
         }
     }
 
     /// Select the note whose title matches `title` — the same end state as
     /// clicking that note in the sidebar. A title with no match is a no-op, so
-    /// a dangling `[[wikilink]]` simply does nothing. The live preview keys off
-    /// the body signal, so it re-renders for the target note without leaving
-    /// preview mode.
-    fn navigate_to(&self, title: &str) {
+    /// a dangling `[[wikilink]]` simply does nothing.
+    fn navigate_to(&self, title: &str, ctx: &mut EventContext) {
+        let id = {
+            let s = self.state.borrow();
+            match &s.phase {
+                Phase::Unlocked { notes, .. } => find_note_id_by_title(notes, title),
+                _ => None,
+            }
+        };
+        if let Some(id) = id {
+            self.navigate_to_id(id, ctx);
+        }
+    }
+
+    /// Select note `id` and rebase the editor onto it — the shared core of
+    /// both wikilink and backlink navigation. The live preview keys off the
+    /// body signal, so it re-renders for the target note without leaving
+    /// preview mode. A no-op if `id` no longer exists (e.g. a stale backlink
+    /// row pointing at a since-deleted note).
+    pub(crate) fn navigate_to_id(&self, id: NoteId, ctx: &mut EventContext) {
         // Snapshot the match under a shared borrow, then re-borrow mutably to
         // flip the selection (RefCell panics on overlapping borrows).
         let snapshot = {
             let s = self.state.borrow();
             match &s.phase {
-                Phase::Unlocked { notes, .. } => find_note_id_by_title(notes, title)
-                    .and_then(|id| notes.iter().find(|n| n.id == id))
-                    .map(|n| (n.id, n.title.clone(), n.body.clone())),
+                Phase::Unlocked { notes, .. } => notes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| (n.title.clone(), n.body.clone())),
                 _ => None,
             }
         };
-        let Some((id, new_title, new_body)) = snapshot else {
+        let Some((new_title, new_body)) = snapshot else {
             return;
         };
         {
@@ -192,6 +217,9 @@ impl WikiNav {
         // re-renders for the target note, exactly as `sidebar::select_note`.
         self.title_sig.set(new_title);
         self.body_sig.set(new_body);
+        // Refresh the editor's tag chips for the now-selected note (sidebar
+        // selection does the same — see the `tag_refresh` field doc).
+        self.tag_refresh.fire(ctx);
     }
 
     /// Resolve an embedded-image attachment id to its decoded pixels via the
@@ -207,12 +235,36 @@ impl WikiNav {
 /// insensitive). ASCII folding lets English titles match regardless of case
 /// while non-ASCII titles (e.g. Japanese) match exactly — the behavior a CJK
 /// notes app wants, since there is no case to fold there.
-fn find_note_id_by_title(notes: &[Note], target: &str) -> Option<NoteId> {
+///
+/// `pub(crate)` so the backlinks panel ([`crate::backlinks`]) can resolve
+/// wikilink targets to ids exactly the way forward navigation does — backlinks
+/// are precisely the reverse of this lookup.
+pub(crate) fn find_note_id_by_title(notes: &[Note], target: &str) -> Option<NoteId> {
     let target = target.trim();
     notes
         .iter()
         .find(|n| n.title.trim().eq_ignore_ascii_case(target))
         .map(|n| n.id)
+}
+
+/// The resolve targets of every `[[wikilink]]` in `text`, in order. Shares
+/// [`split_wikilinks`] with the live preview so both agree on what counts as a
+/// wikilink (an empty or bracket-bearing `[[...]]` is not one, and
+/// `[[Target|Alias]]` yields `Target`).
+///
+/// Used by the backlinks panel to learn which notes a body points at. Note this
+/// scans raw text, so a `[[x]]` inside a fenced code block or `~~strikethrough~~`
+/// counts here even though the preview renders it literally — an acceptable
+/// approximation for "what links here" that keeps a single wikilink-syntax
+/// source of truth.
+pub(crate) fn wikilink_targets(text: &str) -> Vec<String> {
+    split_wikilinks(text)
+        .into_iter()
+        .filter_map(|piece| match piece {
+            WikiPiece::Link { target, .. } => Some(target),
+            WikiPiece::Text(_) => None,
+        })
+        .collect()
 }
 
 /// A run of plain text after `[[wikilink]]` spans have been split out.
@@ -1036,7 +1088,7 @@ fn emit_inline_block(
         // since the widget outlives this call, and each link block keeps its
         // own copy.
         let nav = nav.cloned();
-        w = w.on_link_click(move |target, _ctx| handle_link_click(target, nav.as_ref()));
+        w = w.on_link_click(move |target, ctx| handle_link_click(target, nav.as_ref(), ctx));
     }
     tree.add_child(parent, w);
 }
@@ -1048,10 +1100,10 @@ fn emit_inline_block(
 /// the OS default handler. Everything else is ignored: relative paths, fragment
 /// links, and unknown schemes have no meaning here, and refusing them keeps a
 /// note body from launching `file://` or some arbitrary-scheme handler.
-fn handle_link_click(target: &str, nav: Option<&WikiNav>) {
+fn handle_link_click(target: &str, nav: Option<&WikiNav>, ctx: &mut EventContext) {
     if let Some(title) = target.strip_prefix(WIKI_SCHEME) {
         if let Some(nav) = nav {
-            nav.navigate_to(title);
+            nav.navigate_to(title, ctx);
         }
         return;
     }

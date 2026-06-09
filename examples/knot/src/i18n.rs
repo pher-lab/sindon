@@ -170,6 +170,9 @@ pub enum Key {
     EditorEditing,
     EditorNoNoteSelected,
     EditorNoNoteSelectedHint,
+    /// `"Backlinks"` — header of the editor's backlinks panel (a count in
+    /// parentheses is appended by the caller, e.g. "Backlinks (2)").
+    BacklinksTitle,
     DialogInsertImage,
     DialogExportNote,
     ErrReadImagePrefix,
@@ -324,6 +327,7 @@ impl Key {
             EditorEditing => "Editing: {title}",
             EditorNoNoteSelected => "No note selected.",
             EditorNoNoteSelectedHint => "No note selected \u{2014} click + New to start.",
+            BacklinksTitle => "Backlinks",
             DialogInsertImage => "Insert image",
             DialogExportNote => "Export note",
             ErrReadImagePrefix => "Couldn't read that image: ",
@@ -482,6 +486,7 @@ impl Key {
             EditorNoNoteSelectedHint => {
                 "ノートが選択されていません \u{2014} ＋新規 で作成できます。"
             }
+            BacklinksTitle => "リンク元",
             DialogInsertImage => "画像を挿入",
             DialogExportNote => "ノートをエクスポート",
             ErrReadImagePrefix => "その画像を読み込めませんでした: ",
@@ -674,6 +679,7 @@ mod tests {
         Key::EditorEditing,
         Key::EditorNoNoteSelected,
         Key::EditorNoNoteSelectedHint,
+        Key::BacklinksTitle,
         Key::DialogInsertImage,
         Key::DialogExportNote,
         Key::ErrReadImagePrefix,

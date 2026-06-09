@@ -17,6 +17,7 @@ use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, Image, Input, ReactiveChildren, ScrollView, TextWidget};
 
+use crate::backlinks;
 use crate::i18n::{self, Key};
 use crate::lock_screen;
 use crate::notice;
@@ -335,7 +336,7 @@ pub fn build(
     // Navigation handle for `[[wikilink]]` clicks inside the preview: clicking
     // one selects the matching note (the live preview then re-renders for the
     // new body). Owned by the builder below, which re-uses it on every rebuild.
-    let nav = preview::WikiNav::new(Rc::clone(&state), title_sig, body_sig);
+    let nav = preview::WikiNav::new(Rc::clone(&state), title_sig, body_sig, tag_refresh.clone());
     tree.add_child(
         preview_scroll,
         ReactiveChildren::column().width_full().gap(12.0).source(
@@ -346,6 +347,13 @@ pub fn build(
             },
         ),
     );
+
+    // Backlinks panel: notes that link to the selected one via `[[wikilink]]`.
+    // Lives at the bottom of the pane (below the edit/preview row) so it's
+    // visible in both edit and preview modes. Clicking a backlink navigates to
+    // that note exactly like a wikilink click. Sits in `pane` after
+    // `content_row`, so it's the editor pane's last child.
+    backlinks::build(tree, pane, state, title_sig, body_sig, tag_refresh);
 }
 
 /// Change token for the live preview. Combines the toggle state with a hash of

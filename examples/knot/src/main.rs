@@ -18,6 +18,7 @@
 //!     Lock also runs a belt-and-suspenders full rewrite before dropping
 //!     the key.
 
+mod backlinks;
 mod change_password;
 mod crypto;
 mod editor;
