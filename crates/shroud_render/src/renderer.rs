@@ -102,7 +102,7 @@ impl TextVertex {
 /// (Y points down), matching the on-screen sense of a CSS `rotate()`: a
 /// `▸` chevron rotated by `+PI/2` points down (`▾`).
 ///
-/// The rotation is applied per-vertex on the CPU in [`build_text_geometry`]
+/// The rotation is applied per-vertex on the CPU in `build_text_geometry`
 /// — there is no shader or uniform plumbing, and rects/images are
 /// unaffected (they stay axis-aligned). All glyphs that make up one rotated
 /// element share the same `pivot` (the element's visual center) so they spin
