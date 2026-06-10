@@ -134,6 +134,37 @@ fn remove_layer_root_directly_clears_layer_entry() {
     assert_eq!(tree.layer_count(), 0);
 }
 
+#[test]
+fn replace_screen_tears_down_open_layers() {
+    // A layer belongs to the screen that opened it: a `replace_screen` fired
+    // while a modal is up (e.g. an idle auto-lock, or a restore returning to
+    // the lock screen from inside its own confirm dialog) must drop the layer
+    // so it doesn't hover over the new screen.
+    let mut tree = WidgetTree::new();
+    tree.set_root(Container::column().width(400.0).height(300.0));
+    tree.push_layer(
+        LayerOptions::modal(),
+        Container::column().width(60.0).height(40.0),
+    );
+    tree.push_layer(
+        LayerOptions::modal(),
+        Container::column().width(60.0).height(40.0),
+    );
+    assert_eq!(tree.layer_count(), 2, "two stacked modals are open");
+
+    let mut ctx = EventContext::new();
+    ctx.replace_screen(|t| {
+        t.set_root(Container::row().width(400.0).height(300.0));
+    });
+    tree.apply_pending_commands(&mut ctx);
+
+    assert_eq!(
+        tree.layer_count(),
+        0,
+        "replace_screen must tear down every open layer"
+    );
+}
+
 // ── layout + paint ────────────────────────────────────────────────
 
 #[test]

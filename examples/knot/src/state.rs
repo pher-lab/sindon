@@ -753,6 +753,21 @@ impl AppState {
         Ok(removed)
     }
 
+    /// Drop the unlocked session **without flushing to storage**, closing the
+    /// DB connection. Used before a backup restore overwrites the vault files:
+    ///
+    /// * Flushing here (as [`lock_and_seal`](Self::lock_and_seal) does) would
+    ///   re-encrypt the *old* in-memory notes into the DB and clobber the
+    ///   just-restored file.
+    /// * The open `VaultStorage` connection holds `vault.db` open, which on
+    ///   Windows blocks overwriting it — so the connection must close first.
+    ///
+    /// Replacing the `Unlocked` variant drops `storage` (closing the conn),
+    /// the DEK, the notes, and the image cache, all without touching disk.
+    pub fn discard_and_lock(&mut self) {
+        self.phase = Phase::Locked { error: None };
+    }
+
     /// Re-encrypt the resident notes and transition to `Locked`.
     /// Failures are logged (`log::error!`) but do not block the lock —
     /// the user asked to lock, and stalling on a write error would

@@ -255,6 +255,29 @@ pub enum Key {
     ChangePasswordSuccess,
     ChangePasswordCancel,
 
+    // --- Backup & restore ---
+    SettingsBackup,
+    SettingsBackupBtn,
+    BackupTitle,
+    BackupDescription,
+    BackupFolderLabel,
+    /// Shown in place of a path when no custom folder is set.
+    BackupFolderDefault,
+    BackupChangeFolder,
+    BackupRetentionLabel,
+    BackupNowBtn,
+    BackupRestoreBtn,
+    /// `"Backup saved to {path}"`.
+    BackupSuccess,
+    ErrBackupPrefix,
+    ErrRestorePrefix,
+    RestoreConfirmTitle,
+    RestoreConfirmBody,
+    RestoreConfirmBtn,
+    RestoreCancel,
+    /// File-picker dialog title for choosing a backup to restore.
+    DialogRestoreBackup,
+
     // --- main / app ---
     ErrSaveChangesPrefix,
 }
@@ -419,6 +442,34 @@ impl Key {
             ChangePasswordEnterCurrentFirst => "enter your current password above first",
             ChangePasswordSuccess => "Password changed. Use the new password next time you unlock.",
             ChangePasswordCancel => "Cancel",
+
+            // Backup & restore
+            SettingsBackup => "Backup",
+            SettingsBackupBtn => "Backup & restore\u{2026}",
+            BackupTitle => "Backup & restore",
+            BackupDescription => {
+                "Save an encrypted snapshot of your whole vault to one file, or \
+                 restore an earlier one. Backups are encrypted just like your \
+                 vault, so they're safe to keep anywhere."
+            }
+            BackupFolderLabel => "Backup folder:",
+            BackupFolderDefault => "(default location)",
+            BackupChangeFolder => "Change folder\u{2026}",
+            BackupRetentionLabel => "Backups to keep:",
+            BackupNowBtn => "Back up now",
+            BackupRestoreBtn => "Restore from a backup\u{2026}",
+            BackupSuccess => "Backup saved to {path}",
+            ErrBackupPrefix => "Backup failed: ",
+            ErrRestorePrefix => "Restore failed: ",
+            RestoreConfirmTitle => "Restore this backup?",
+            RestoreConfirmBody => {
+                "This replaces your current vault with the chosen backup and \
+                 returns you to the lock screen to unlock it. Unsaved changes in \
+                 this session are discarded."
+            }
+            RestoreConfirmBtn => "Restore & lock",
+            RestoreCancel => "Cancel",
+            DialogRestoreBackup => "Choose a backup to restore",
 
             // main
             ErrSaveChangesPrefix => "Couldn't save changes: ",
@@ -591,6 +642,34 @@ impl Key {
                 "パスワードを変更しました。次回の解錠から新しいパスワードを使用してください。"
             }
             ChangePasswordCancel => "キャンセル",
+
+            // Backup & restore
+            SettingsBackup => "バックアップ",
+            SettingsBackupBtn => "バックアップと復元\u{2026}",
+            BackupTitle => "バックアップと復元",
+            BackupDescription => {
+                "ボールト全体を暗号化したスナップショットを1ファイルに保存したり、\
+                 以前のものから復元できます。バックアップはボールトと同じく暗号化\
+                 されているので、どこに保管しても安全です。"
+            }
+            BackupFolderLabel => "バックアップ先フォルダ:",
+            BackupFolderDefault => "（既定の場所）",
+            BackupChangeFolder => "フォルダを変更\u{2026}",
+            BackupRetentionLabel => "保持するバックアップ数:",
+            BackupNowBtn => "今すぐバックアップ",
+            BackupRestoreBtn => "バックアップから復元\u{2026}",
+            BackupSuccess => "バックアップを保存しました: {path}",
+            ErrBackupPrefix => "バックアップに失敗しました: ",
+            ErrRestorePrefix => "復元に失敗しました: ",
+            RestoreConfirmTitle => "このバックアップから復元しますか?",
+            RestoreConfirmBody => {
+                "現在のボールトを選択したバックアップで置き換え、ロック画面に戻って\
+                 復元したボールトを解錠します。このセッションの未保存の変更は破棄\
+                 されます。"
+            }
+            RestoreConfirmBtn => "復元してロック",
+            RestoreCancel => "キャンセル",
+            DialogRestoreBackup => "復元するバックアップを選択",
 
             // main
             ErrSaveChangesPrefix => "変更を保存できませんでした: ",

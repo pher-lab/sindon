@@ -605,6 +605,18 @@ impl WidgetTree {
                     if let Some(old) = self.root {
                         self.remove(old);
                     }
+                    // A screen swap also tears down any open layers (modals,
+                    // dropdowns, context menus) — a layer belongs to the screen
+                    // that opened it. Without this, a `replace_screen` fired
+                    // while a modal is up (an idle auto-lock, or a restore that
+                    // returns to the lock screen from inside its confirm dialog)
+                    // would leave the stale modal hovering over the new screen.
+                    // Snapshot the roots first since `remove` mutates `layers`.
+                    let layer_roots: Vec<usize> = self.layers.iter().map(|l| l.root).collect();
+                    for root in layer_roots {
+                        self.remove(root);
+                    }
+                    self.layers.clear();
                     // A screen swap tears down the screen that registered
                     // any file-drop or image-paste handler; clear them so a
                     // stale handler (capturing the old screen's signals)

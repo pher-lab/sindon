@@ -19,6 +19,7 @@
 //!     the key.
 
 mod backlinks;
+mod backup;
 mod change_password;
 mod crypto;
 mod editor;
