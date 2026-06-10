@@ -128,6 +128,40 @@ impl AutoLock {
     }
 }
 
+/// How often to automatically back up on unlock. `Off` (the default — backups
+/// are opt-in for a privacy app) disables it; the others throttle an unlock-time
+/// backup so it runs at most once per period. Discrete + stable on-disk keys for
+/// the same reason as the other settings enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoBackup {
+    #[default]
+    Off,
+    Daily,
+    Weekly,
+}
+
+impl AutoBackup {
+    /// Minimum seconds between automatic backups, or `None` when disabled.
+    /// `pub(crate)` so the backup module's due-check can read it.
+    pub(crate) fn period_secs(self) -> Option<u64> {
+        match self {
+            AutoBackup::Off => None,
+            AutoBackup::Daily => Some(24 * 60 * 60),
+            AutoBackup::Weekly => Some(7 * 24 * 60 * 60),
+        }
+    }
+
+    /// Translation key for this choice's settings-modal button label.
+    pub(crate) fn key(self) -> Key {
+        match self {
+            AutoBackup::Off => Key::AutoBackupOff,
+            AutoBackup::Daily => Key::AutoBackupDaily,
+            AutoBackup::Weekly => Key::AutoBackupWeekly,
+        }
+    }
+}
+
 /// How the sidebar orders the note list. Pinned notes always float to the
 /// top (see `state::compare_notes`); this picks the order *within* the pinned
 /// and unpinned groups. `Created` is the historical default (note id order =
@@ -194,6 +228,13 @@ pub struct Settings {
     /// oldest out. Clamped to ≥ 1 by the rotation itself.
     #[serde(default = "default_retention")]
     pub backup_retention: u32,
+    /// Automatic-backup cadence (on unlock, throttled). Default `Off`.
+    #[serde(default)]
+    pub auto_backup: AutoBackup,
+    /// Unix seconds of the last backup (manual or automatic), `0` = never.
+    /// The auto-backup throttle compares this against `now`.
+    #[serde(default)]
+    pub last_backup_at: u64,
 }
 
 impl Default for Settings {
@@ -206,6 +247,8 @@ impl Default for Settings {
             language: Language::default(),
             backup_dir: None,
             backup_retention: default_retention(),
+            auto_backup: AutoBackup::default(),
+            last_backup_at: 0,
         }
     }
 }
@@ -410,6 +453,31 @@ pub fn backup_retention() -> u32 {
 pub fn set_backup_retention(keep: u32) {
     let mut s = Settings::load();
     s.backup_retention = keep;
+    s.save();
+}
+
+/// Current automatic-backup cadence.
+pub fn auto_backup() -> AutoBackup {
+    Settings::load().auto_backup
+}
+
+/// Persist a new automatic-backup cadence (load-merge).
+pub fn set_auto_backup(choice: AutoBackup) {
+    let mut s = Settings::load();
+    s.auto_backup = choice;
+    s.save();
+}
+
+/// Unix seconds of the last backup (manual or automatic), `0` = never.
+pub fn last_backup_at() -> u64 {
+    Settings::load().last_backup_at
+}
+
+/// Record the time of a backup just taken (load-merge). Read by the
+/// auto-backup throttle to decide when the next one is due.
+pub fn set_last_backup_at(secs: u64) {
+    let mut s = Settings::load();
+    s.last_backup_at = secs;
     s.save();
 }
 
@@ -733,6 +801,8 @@ mod tests {
             language: Language::Ja,
             backup_dir: Some("/tmp/knot-backups".to_string()),
             backup_retention: 10,
+            auto_backup: AutoBackup::Weekly,
+            last_backup_at: 1_700_000_000,
         };
         let json = serde_json::to_string(&original).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
@@ -756,6 +826,8 @@ mod tests {
         // Backup keys absent in an older file fall back to their defaults.
         assert_eq!(back.backup_dir, None);
         assert_eq!(back.backup_retention, 5);
+        assert_eq!(back.auto_backup, AutoBackup::Off);
+        assert_eq!(back.last_backup_at, 0);
 
         // And an empty object loads to all-defaults.
         let empty: Settings = serde_json::from_str("{}").unwrap();

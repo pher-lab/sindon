@@ -219,6 +219,11 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) -> bool {
     // starts counting from zero again.
     state.borrow_mut().reset_unlock_attempts();
     state.borrow_mut().become_unlocked(dek, notes, storage);
+
+    // Opening the vault is the auto-backup trigger: take one now if the
+    // configured cadence says it's due. Runs once per unlock (not per frame),
+    // and the just-opened files are current since nothing's been edited yet.
+    crate::backup::maybe_auto_backup();
     true
 }
 

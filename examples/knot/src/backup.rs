@@ -64,7 +64,7 @@ use crate::crypto::SALT_SIZE;
 use crate::i18n::{self, Key};
 use crate::lock_screen;
 use crate::notice;
-use crate::settings;
+use crate::settings::{self, AutoBackup};
 use crate::state::AppState;
 use crate::storage::VaultPaths;
 
@@ -411,6 +411,45 @@ pub fn populate(tree: &mut WidgetTree, dialog: usize, state: Rc<RefCell<AppState
             .on_change(move |_, _| settings::set_backup_retention(retention.get().max(1) as u32)),
     );
 
+    // --- Automatic backup (on unlock, throttled) ---
+    tree.add_child(
+        dialog,
+        TextWidget::reactive(|| i18n::tr(Key::BackupAutoLabel).to_string())
+            .color(settings::on_surface_variant()),
+    );
+    let auto_sig = Signal::new(settings::auto_backup());
+    let auto_row = tree.add_child(dialog, Container::row().gap(8.0));
+    for choice in [AutoBackup::Off, AutoBackup::Daily, AutoBackup::Weekly] {
+        let sig = auto_sig;
+        let bg = Reactive::derive(move || {
+            let t = settings::current_theme();
+            if sig.get() == choice {
+                t.colors.primary
+            } else {
+                t.colors.surface_variant
+            }
+        });
+        let fg = Reactive::derive(move || {
+            let t = settings::current_theme();
+            if sig.get() == choice {
+                t.colors.on_primary
+            } else {
+                t.colors.on_surface
+            }
+        });
+        tree.add_child(
+            auto_row,
+            Button::reactive_label(move || i18n::tr(choice.key()).to_string())
+                .radius(6.0)
+                .background(bg)
+                .text_color(fg)
+                .on_click(move |_ctx| {
+                    sig.set(choice);
+                    settings::set_auto_backup(choice);
+                }),
+        );
+    }
+
     // --- Back up now ---
     let backup_state = Rc::clone(&state);
     tree.add_child(
@@ -489,16 +528,56 @@ pub fn populate(tree: &mut WidgetTree, dialog: usize, state: Rc<RefCell<AppState
 }
 
 /// Pack the live vault into a fresh `.knotbak` in the resolved backup folder,
-/// rotate old backups per the retention setting, and return the written path as
-/// a display string. The rotation is best-effort — a failed prune doesn't fail
-/// the backup that already landed.
+/// rotate old backups per the retention setting, record the time (so the
+/// auto-backup throttle counts a manual backup too), and return the written
+/// path as a display string. Rotation is best-effort — a failed prune doesn't
+/// fail the backup that already landed.
 fn run_backup() -> Result<String, BackupError> {
     let cfg_err = || BackupError::Format(i18n::tr(Key::ConfigUnavailable).to_string());
     let dir = settings::resolved_backup_dir().ok_or_else(cfg_err)?;
     let paths = VaultPaths::default_for_app().ok_or_else(cfg_err)?;
     let file = create_backup(&paths, &dir)?;
     let _ = rotate(&dir, settings::backup_retention() as usize);
+    settings::set_last_backup_at(unix_now());
     Ok(file.to_string_lossy().into_owned())
+}
+
+/// Run an unlock-time backup if the configured cadence says one is due, then
+/// record the time (via [`run_backup`]). Called once per successful unlock
+/// (see `lock_screen`), so it never touches disk per frame. A no-op when
+/// auto-backup is `Off` or the period hasn't elapsed; a failure is logged but
+/// never blocks opening the vault.
+pub fn maybe_auto_backup() {
+    if !backup_due(
+        settings::auto_backup(),
+        settings::last_backup_at(),
+        unix_now(),
+    ) {
+        return;
+    }
+    if let Err(e) = run_backup() {
+        eprintln!("knot: auto-backup failed: {e}");
+    }
+}
+
+/// Whether an automatic backup is due: enabled, and at least one period has
+/// elapsed since the last backup. Pure (no clock / disk) so the cadence is
+/// unit-testable. `last_at == 0` (never backed up) is always due when enabled.
+fn backup_due(interval: AutoBackup, last_at: u64, now: u64) -> bool {
+    match interval.period_secs() {
+        None => false,
+        // Never backed up — due immediately when enabled, regardless of clock.
+        Some(_) if last_at == 0 => true,
+        Some(period) => now.saturating_sub(last_at) >= period,
+    }
+}
+
+/// Current Unix time in whole seconds (saturating to 0 before the epoch).
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Populate the nested "Restore this backup?" confirmation. The destructive
@@ -810,6 +889,23 @@ mod tests {
         assert!(left[1].to_string_lossy().contains("4000"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backup_due_respects_cadence() {
+        const DAY: u64 = 24 * 60 * 60;
+        // Off is never due, however long it's been.
+        assert!(!backup_due(AutoBackup::Off, 0, 10 * DAY));
+        // Never backed up (last_at = 0) → due as soon as it's enabled.
+        assert!(backup_due(AutoBackup::Daily, 0, 1));
+        // Daily: not due before a day, due at exactly a day.
+        assert!(!backup_due(AutoBackup::Daily, 1000, 1000 + DAY - 1));
+        assert!(backup_due(AutoBackup::Daily, 1000, 1000 + DAY));
+        // Weekly: a single day isn't enough; a week is.
+        assert!(!backup_due(AutoBackup::Weekly, 1000, 1000 + DAY));
+        assert!(backup_due(AutoBackup::Weekly, 1000, 1000 + 7 * DAY));
+        // A clock that went backwards (now < last) saturates, never spuriously due.
+        assert!(!backup_due(AutoBackup::Daily, 5000, 1000));
     }
 
     #[test]

@@ -277,6 +277,10 @@ pub enum Key {
     RestoreCancel,
     /// File-picker dialog title for choosing a backup to restore.
     DialogRestoreBackup,
+    BackupAutoLabel,
+    AutoBackupOff,
+    AutoBackupDaily,
+    AutoBackupWeekly,
 
     // --- main / app ---
     ErrSaveChangesPrefix,
@@ -470,6 +474,10 @@ impl Key {
             RestoreConfirmBtn => "Restore & lock",
             RestoreCancel => "Cancel",
             DialogRestoreBackup => "Choose a backup to restore",
+            BackupAutoLabel => "Automatic backup:",
+            AutoBackupOff => "Off",
+            AutoBackupDaily => "Daily",
+            AutoBackupWeekly => "Weekly",
 
             // main
             ErrSaveChangesPrefix => "Couldn't save changes: ",
@@ -670,6 +678,10 @@ impl Key {
             RestoreConfirmBtn => "復元してロック",
             RestoreCancel => "キャンセル",
             DialogRestoreBackup => "復元するバックアップを選択",
+            BackupAutoLabel => "自動バックアップ:",
+            AutoBackupOff => "オフ",
+            AutoBackupDaily => "毎日",
+            AutoBackupWeekly => "毎週",
 
             // main
             ErrSaveChangesPrefix => "変更を保存できませんでした: ",
