@@ -3481,6 +3481,98 @@ fn input_typing_writes_back_to_bound_signal() {
 }
 
 #[test]
+fn input_cursor_signal_mirrors_caret() {
+    // The bound cursor signal must track the caret as it moves, so a sibling
+    // widget (e.g. a formatting toolbar) can read where the caret is.
+    let sig = Signal::new(String::new());
+    let csig = Signal::new(0usize);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().value(sig).cursor_signal(csig));
+    tree.compute_layout(400.0, 100.0);
+
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    for ch in ['a', 'b', 'c'] {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut event_ctx);
+    }
+    assert_eq!(csig.get(), 3, "caret signal should follow typing to byte 3");
+
+    tree.dispatch_event(
+        &key(shroud_widgets::event::NamedKey::ArrowLeft),
+        &mut event_ctx,
+    );
+    assert_eq!(csig.get(), 2, "ArrowLeft must mirror the moved caret back");
+}
+
+#[test]
+fn input_cursor_signal_external_set_moves_caret() {
+    // Writing the cursor signal from outside must reposition the caret on the
+    // next sync — the mechanism a toolbar uses to drop the caret onto its
+    // freshly-inserted text. Probe with a marker char.
+    let sig = Signal::new(String::from("abcdef"));
+    let csig = Signal::new(0usize);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().value(sig).cursor_signal(csig));
+    tree.compute_layout(400.0, 100.0);
+
+    // Focus (MouseDown lands the caret at the end, byte 6).
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    // External write, as a toolbar would do after inserting text.
+    csig.set(2);
+    // The next event rebases the caret before applying the edit (sync runs at
+    // the top of `event`), so the marker lands at byte 2.
+    assert_cursor_inserts_at(&mut tree, &mut event_ctx, &sig, "abMcdef");
+}
+
+#[test]
+fn input_cursor_signal_snaps_to_char_boundary() {
+    // An external offset that falls inside a multi-byte codepoint must snap
+    // down to the nearest char boundary, or the paint-side `&value[..cursor]`
+    // slice would panic. "あい" = bytes 0..3 ("あ") and 3..6 ("い"); asking
+    // for byte 4 (mid-"い") must clamp to byte 3.
+    let sig = Signal::new(String::from("あい"));
+    let csig = Signal::new(0usize);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().value(sig).cursor_signal(csig));
+    tree.compute_layout(400.0, 100.0);
+
+    let rect = tree.layout_rect(idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    csig.set(4);
+    assert_cursor_inserts_at(&mut tree, &mut event_ctx, &sig, "あMい");
+}
+
+#[test]
 fn input_external_signal_set_rebases_buffer_by_next_paint() {
     // Binds a signal, externally overwrites it, confirms the next paint
     // renders the new value rather than the stale local buffer. Covers the

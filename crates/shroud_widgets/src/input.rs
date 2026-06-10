@@ -92,6 +92,12 @@ pub struct Input {
     /// rebases `value` from the signal if they differ, and every edit
     /// writes the fresh buffer back.
     source: Option<Signal<String>>,
+    /// Optional external binding for the cursor byte offset. When `Some`,
+    /// every paint and event mirrors the caret into the signal (so a sibling
+    /// widget like a formatting toolbar can read it), and an external write
+    /// is adopted on the next sync (clamped to the buffer, snapped to a char
+    /// boundary). Pairs with [`source`](Self::source) for caret-aware inserts.
+    cursor_source: Option<Signal<usize>>,
     placeholder: String,
     font_size: Option<f32>,
     focused: bool,
@@ -156,6 +162,7 @@ impl Input {
             value: RefCell::new(String::new()),
             cursor: Cell::new(0),
             source: None,
+            cursor_source: None,
             placeholder: String::new(),
             font_size: None,
             focused: false,
@@ -201,6 +208,27 @@ impl Input {
         self.cursor.set(initial.len());
         *self.value.borrow_mut() = initial;
         self.source = Some(signal);
+        self
+    }
+
+    /// Bind this input's cursor (byte offset) to a `Signal<usize>`
+    /// (bidirectional).
+    ///
+    /// On every paint and event the widget mirrors its caret into the signal,
+    /// so a sibling widget — e.g. a formatting toolbar — can read where the
+    /// caret is *before* it acts. When the signal is written from outside, the
+    /// widget adopts that offset on the next sync, clamped to the buffer length
+    /// and snapped down to the nearest char boundary.
+    ///
+    /// Pair with [`value`](Self::value) to insert text at the caret: set the
+    /// value signal to the edited text, then set the cursor signal to the new
+    /// caret offset. The widget rebases the buffer and adopts the caret on the
+    /// next paint, leaving the cursor where the caller asked.
+    ///
+    /// The signal seeds from the current cursor on bind.
+    pub fn cursor_signal(mut self, signal: Signal<usize>) -> Self {
+        signal.set(self.cursor.get());
+        self.cursor_source = Some(signal);
         self
     }
 
@@ -463,6 +491,33 @@ impl Input {
                 }
             }
         }
+        // Adopt an externally-set caret last, after the buffer has rebased, so
+        // the offset is clamped against the *new* text. Snapping down to a char
+        // boundary keeps a toolbar that computed a byte offset from panicking
+        // the paint-side `&value[..cursor]` slice on a multi-byte codepoint.
+        if let Some(csrc) = self.cursor_source.as_ref() {
+            let remote = csrc.get();
+            if remote != self.cursor.get() {
+                let buf = self.value.borrow();
+                let mut target = remote.min(buf.len());
+                while target > 0 && !buf.is_char_boundary(target) {
+                    target -= 1;
+                }
+                self.cursor.set(target);
+            }
+        }
+    }
+
+    /// Mirror the current caret into the bound cursor signal (if any). Called
+    /// at the tail of every event so an external reader sees a fresh offset —
+    /// in particular on `FocusLost`, which fires before a clicked toolbar
+    /// button's handler runs, so the toolbar reads the pre-blur caret.
+    fn push_cursor_to_source(&self) {
+        if let Some(csrc) = self.cursor_source.as_ref() {
+            if csrc.get() != self.cursor.get() {
+                csrc.set(self.cursor.get());
+            }
+        }
     }
 
     /// Push the current buffer back to the bound signal (if any). Called
@@ -704,7 +759,7 @@ impl Widget for Input {
         // top of any external write that landed since the last paint.
         self.sync_from_source();
 
-        match event {
+        let result = match event {
             WidgetEvent::MouseDown { .. } => {
                 // Focus is already set by WidgetTree's click-to-focus
                 // (dispatched FocusGained before this handler runs).
@@ -906,6 +961,11 @@ impl Widget for Input {
             },
 
             _ => EventResult::Ignored,
-        }
+        };
+        // Mirror the (possibly moved) caret into the bound cursor signal so an
+        // external observer — e.g. a formatting toolbar — can read it. No-op
+        // when no cursor signal is bound.
+        self.push_cursor_to_source();
+        result
     }
 }

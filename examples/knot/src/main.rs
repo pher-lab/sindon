@@ -34,6 +34,7 @@ mod sidebar;
 mod state;
 mod storage;
 mod tag_editor;
+mod toolbar;
 mod vault_screen;
 
 use std::cell::RefCell;

@@ -6,7 +6,7 @@
 //! to rebuild the subtree. `on_change` writes back to the selected note
 //! in `AppState`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -26,6 +26,7 @@ use crate::settings;
 use crate::sidebar::SidebarRefresh;
 use crate::state::{AppState, Phase};
 use crate::tag_editor::{self, TagRefresh};
+use crate::toolbar;
 
 /// True when the app is unlocked *and* a note is selected — the condition for
 /// showing any editing surface at all (inputs or preview). Shared by the
@@ -284,6 +285,21 @@ pub fn build(
         sidebar_refresh,
     );
 
+    // Formatting toolbar (Heading / Bold / Italic / … ), directly above the
+    // body so its inserts visibly land in the editor below. It reads/writes the
+    // body through `body_sig` + `cursor_sig` and re-focuses the body via
+    // `body_idx`, which we fill in once the body input is built (just below).
+    let cursor_sig = Signal::new(0usize);
+    let body_idx = Rc::new(Cell::new(0usize));
+    toolbar::build(
+        tree,
+        editor_area,
+        Rc::clone(&state),
+        body_sig,
+        cursor_sig,
+        Rc::clone(&body_idx),
+    );
+
     // Body input (multiline, grows to fill remaining height).
     //
     // Pass `grow(1.0)` via a wrapper container — Input itself doesn't take
@@ -294,19 +310,22 @@ pub fn build(
     );
 
     let body_state = Rc::clone(&state);
-    tree.add_child(
+    let body_node = tree.add_child(
         body_wrap,
         Input::new()
             .placeholder(i18n::tr(Key::EditorBodyPlaceholder))
             .multiline()
             .lines(16)
             .value(body_sig)
+            // Mirror the caret so the toolbar can insert at it (see `toolbar`).
+            .cursor_signal(cursor_sig)
             .on_change(move |new_body, _ctx| {
                 write_selected(&body_state, |note| {
                     note.body = new_body.to_string();
                 });
             }),
     );
+    body_idx.set(body_node);
 
     // Preview area: a scrollable, live-rendered markdown view beside the
     // editor. Visible only while a note is selected *and* the preview is
@@ -445,7 +464,7 @@ fn insert_image_from_bytes(state: &Rc<RefCell<AppState>>, body_sig: Signal<Strin
 /// it dirty so the auto-save tick (`AppState::flush_dirty`) writes the
 /// change back to SQLCipher within a tick interval. No-op when no
 /// note is selected or the app is not in `Unlocked`.
-fn write_selected<F>(state: &Rc<RefCell<AppState>>, f: F)
+pub(crate) fn write_selected<F>(state: &Rc<RefCell<AppState>>, f: F)
 where
     F: FnOnce(&mut crate::state::Note),
 {

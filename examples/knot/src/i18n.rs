@@ -180,6 +180,17 @@ pub enum Key {
     ErrImageStore,
     ErrExportPrefix,
 
+    // --- Editor formatting toolbar ---
+    // Button labels for the bar above the body. The Markdown each button
+    // inserts (`**`, `# `, `[](https://)`, …) is fixed syntax, not localized.
+    ToolbarHeading,
+    ToolbarBold,
+    ToolbarItalic,
+    ToolbarCode,
+    ToolbarQuote,
+    ToolbarList,
+    ToolbarLink,
+
     // --- Sidebar ---
     SidebarImport,
     SidebarNewNote,
@@ -334,6 +345,15 @@ impl Key {
             ErrImageUnsupported => "That image isn't a supported format (only PNG/JPEG).",
             ErrImageStore => "Couldn't store that image.",
             ErrExportPrefix => "Export failed: ",
+
+            // Editor formatting toolbar
+            ToolbarHeading => "Heading",
+            ToolbarBold => "Bold",
+            ToolbarItalic => "Italic",
+            ToolbarCode => "Code",
+            ToolbarQuote => "Quote",
+            ToolbarList => "List",
+            ToolbarLink => "Link",
 
             // Sidebar
             SidebarImport => "Import",
@@ -493,6 +513,15 @@ impl Key {
             ErrImageUnsupported => "対応していない画像形式です（PNG / JPEG のみ）。",
             ErrImageStore => "その画像を保存できませんでした。",
             ErrExportPrefix => "エクスポートに失敗しました: ",
+
+            // Editor formatting toolbar
+            ToolbarHeading => "見出し",
+            ToolbarBold => "太字",
+            ToolbarItalic => "斜体",
+            ToolbarCode => "コード",
+            ToolbarQuote => "引用",
+            ToolbarList => "リスト",
+            ToolbarLink => "リンク",
 
             // Sidebar
             SidebarImport => "インポート",
