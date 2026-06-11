@@ -266,6 +266,11 @@ pub struct EventContext {
     /// Deferred tree mutations queued during this dispatch. Drained by
     /// `WidgetTree::dispatch_event` once the walk completes.
     pub(crate) commands: Vec<TreeCommand>,
+    /// Text a handler asked to place on the system clipboard during this
+    /// dispatch (e.g. a copy / cut from a focused `Input`). The event loop
+    /// drains it after dispatch and writes it to the OS clipboard — widgets
+    /// have no direct clipboard access. `None` when nothing was copied.
+    pub(crate) clipboard_write: Option<String>,
 }
 
 impl EventContext {
@@ -273,6 +278,7 @@ impl EventContext {
         Self {
             modifiers: Modifiers::default(),
             commands: Vec::new(),
+            clipboard_write: None,
         }
     }
 
@@ -412,10 +418,28 @@ impl EventContext {
         self.commands.push(TreeCommand::PopTopLayer);
     }
 
+    /// Request that `text` be written to the system clipboard once the
+    /// current dispatch finishes.
+    ///
+    /// Widgets can't touch the OS clipboard directly (it lives in the
+    /// platform layer the event loop owns), so a copy / cut handler stashes
+    /// the text here and the event loop flushes it. The most recent call in a
+    /// dispatch wins. Used by [`Input`](crate::Input)'s Ctrl+C / Ctrl+X.
+    pub fn write_clipboard(&mut self, text: impl Into<String>) {
+        self.clipboard_write = Some(text.into());
+    }
+
     /// Drain queued commands. Intended for `WidgetTree` to call after a
     /// dispatch walk completes.
     pub(crate) fn take_commands(&mut self) -> Vec<TreeCommand> {
         std::mem::take(&mut self.commands)
+    }
+
+    /// Take any pending clipboard write requested via [`Self::write_clipboard`].
+    /// Intended for the event loop to call after dispatch so it can hand the
+    /// text to the platform clipboard. Leaves `None` behind.
+    pub fn take_clipboard_write(&mut self) -> Option<String> {
+        self.clipboard_write.take()
     }
 }
 

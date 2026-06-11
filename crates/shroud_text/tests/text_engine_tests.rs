@@ -223,6 +223,139 @@ fn cursor_position_delegates_to_cursor_position_attrs_with_default() {
 }
 
 #[test]
+fn offset_at_point_empty_text_is_zero() {
+    let mut engine = TextEngine::new();
+    assert_eq!(engine.offset_at_point("", 50.0, 0.0, 16.0, 20.0, None), 0);
+}
+
+#[test]
+fn offset_at_point_left_edge_is_start() {
+    // A click at (or left of) the text origin lands before the first glyph.
+    let mut engine = TextEngine::new();
+    assert_eq!(
+        engine.offset_at_point("Hello", 0.0, 0.0, 16.0, 20.0, None),
+        0
+    );
+    assert_eq!(
+        engine.offset_at_point("Hello", -20.0, 0.0, 16.0, 20.0, None),
+        0,
+        "a click in the leading padding clamps to offset 0"
+    );
+}
+
+#[test]
+fn offset_at_point_far_right_is_end() {
+    // A click well past the last glyph lands at end-of-text.
+    let mut engine = TextEngine::new();
+    let n = engine.offset_at_point("Hello", 10_000.0, 0.0, 16.0, 20.0, None);
+    assert_eq!(n, "Hello".len());
+}
+
+#[test]
+fn offset_at_point_round_trips_with_cursor_position() {
+    // The two are inverses: feed the x reported by `cursor_position` for a
+    // prefix back into `offset_at_point` and recover that prefix's length.
+    let mut engine = TextEngine::new();
+    let text = "Hello world";
+    for prefix_len in [1usize, 3, 6, 9, text.len()] {
+        let (x, y) = engine.cursor_position(&text[..prefix_len], 16.0, 20.0, None);
+        let got = engine.offset_at_point(text, x, y, 16.0, 20.0, None);
+        assert_eq!(
+            got, prefix_len,
+            "click at the caret x of prefix len {prefix_len} should map back to it (x={x})"
+        );
+    }
+}
+
+#[test]
+fn offset_at_point_picks_the_clicked_hard_line() {
+    // Multi-line: a click on the second line resolves to an offset past the
+    // first line's newline.
+    let mut engine = TextEngine::new();
+    let text = "abc\ndef";
+    // y near the top of the second line (one line_height down).
+    let n = engine.offset_at_point(text, 0.0, 20.0, 16.0, 20.0, None);
+    assert!(
+        n >= 4,
+        "click on line 2 should land at/after the newline (offset {n})"
+    );
+    assert!(n <= text.len());
+}
+
+#[test]
+fn selection_rects_empty_or_inverted_range_is_empty() {
+    let mut engine = TextEngine::new();
+    assert!(
+        engine
+            .selection_rects("Hello", 2, 2, 16.0, 20.0, None)
+            .is_empty(),
+        "zero-width range produces no rects"
+    );
+    assert!(
+        engine
+            .selection_rects("Hello", 4, 1, 16.0, 20.0, None)
+            .is_empty(),
+        "inverted range produces no rects"
+    );
+    assert!(
+        engine
+            .selection_rects("", 0, 0, 16.0, 20.0, None)
+            .is_empty()
+    );
+}
+
+#[test]
+fn selection_rects_full_single_line_spans_the_text_width() {
+    // Selecting all of a single line yields one rect roughly as wide as the
+    // shaped text.
+    let mut engine = TextEngine::new();
+    let text = "Hello";
+    let shaped = engine.shape_text(text, 16.0, 20.0, None);
+    let rects = engine.selection_rects(text, 0, text.len(), 16.0, 20.0, None);
+    assert_eq!(rects.len(), 1, "single line → one rect, got {rects:?}");
+    let r = rects[0];
+    assert!(r.origin.y.abs() < 0.5, "single line sits at block top");
+    assert!(
+        (r.size.width - shaped.width).abs() < 2.0,
+        "selection width {} should track text width {}",
+        r.size.width,
+        shaped.width
+    );
+}
+
+#[test]
+fn selection_rects_partial_is_narrower_than_full() {
+    let mut engine = TextEngine::new();
+    let text = "Hello world";
+    let full = engine.selection_rects(text, 0, text.len(), 16.0, 20.0, None);
+    let part = engine.selection_rects(text, 0, 5, 16.0, 20.0, None);
+    assert_eq!(full.len(), 1);
+    assert_eq!(part.len(), 1);
+    assert!(
+        part[0].size.width < full[0].size.width,
+        "partial selection ({}) should be narrower than full ({})",
+        part[0].size.width,
+        full[0].size.width
+    );
+}
+
+#[test]
+fn selection_rects_across_newline_spans_two_lines() {
+    // A range crossing a hard break produces a rect on each line, on distinct
+    // rows.
+    let mut engine = TextEngine::new();
+    let text = "abc\ndef";
+    let rects = engine.selection_rects(text, 1, 6, 16.0, 20.0, None);
+    assert!(
+        rects.len() >= 2,
+        "selection across a newline should span >=2 lines, got {rects:?}"
+    );
+    let rows: std::collections::BTreeSet<i32> =
+        rects.iter().map(|r| r.origin.y.round() as i32).collect();
+    assert!(rows.len() >= 2, "rects should land on >=2 distinct rows");
+}
+
+#[test]
 fn monospace_family_makes_iii_and_mmm_equal_width() {
     // The cosmic-text fontdb resolves the `Monospace` generic against
     // whatever monospace face is installed on the platform (Consolas /

@@ -39,10 +39,10 @@
 
 use std::cell::{Cell, RefCell};
 
-use crate::event::{EventContext, EventResult, Key, NamedKey, WidgetEvent};
+use crate::event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, Rect};
+use shroud_core::{Color, Point, Rect};
 use shroud_layout::FlexStyle;
 use shroud_reactive::Signal;
 
@@ -62,6 +62,19 @@ type TextCallback = Box<dyn FnMut(&str, &mut EventContext)>;
 /// [`Input::on_backspace_empty`], where the handler reacts to a focus/key
 /// event rather than to the buffer contents.
 type CtxCallback = Box<dyn FnMut(&mut EventContext)>;
+
+/// True for the canonical "command" chord used by select-all / copy / cut:
+/// Ctrl-only (Windows/Linux) or Logo/Cmd-only (macOS), with no Shift or Alt.
+/// Mirrors the event loop's `is_paste_combo` gating so the four clipboard
+/// chords (Ctrl+A/C/X/V) are recognized consistently.
+fn is_cmd_combo(mods: Modifiers) -> bool {
+    if mods.shift || mods.alt {
+        return false;
+    }
+    let ctrl_only = mods.ctrl && !mods.logo;
+    let logo_only = mods.logo && !mods.ctrl;
+    ctrl_only || logo_only
+}
 
 /// Clamp `v` to the inclusive `[min, max]` range when either bound is set.
 /// `None` bounds are unbounded on that side. Used by numeric-mode editing.
@@ -88,6 +101,22 @@ pub struct Input {
     /// paint-time sync may have to clamp it when the external signal
     /// produces a shorter string than the local buffer.
     cursor: Cell<usize>,
+    /// Selection anchor (byte offset). When `Some`, the selection spans
+    /// `[min(anchor, cursor), max(anchor, cursor))` and the caret (active end)
+    /// is always `cursor`. `None` means no selection — just a caret. `Cell`
+    /// so paint can collapse / clamp it alongside the cursor.
+    selection_anchor: Cell<Option<usize>>,
+    /// A click / drag position waiting to be resolved against the shaped text
+    /// at paint time. `Input::event` has no text engine, so a precise
+    /// click-to-caret hit-test is deferred to `paint` (which holds the
+    /// engine) — the same paint-time hit-cache idiom `TextWidget` uses for
+    /// link clicks. The bool is `extend`: `true` moves only the active end
+    /// (drag / shift-click), `false` plants a fresh collapsed caret.
+    pending_hit: Cell<Option<(Point, bool)>>,
+    /// Whether a primary-button drag is in progress — set on MouseDown,
+    /// cleared on MouseUp / FocusLost. While set, MouseMove extends the
+    /// selection's active end.
+    selecting: Cell<bool>,
     /// Optional external binding. When `Some`, every paint and event
     /// rebases `value` from the signal if they differ, and every edit
     /// writes the fresh buffer back.
@@ -153,6 +182,9 @@ pub struct Input {
     placeholder_color: Option<Color>,
     border_color: Option<Color>,
     focus_ring_color: Option<Color>,
+    /// Override for the selection highlight color. `None` reads
+    /// `theme.colors.selection_background` each frame.
+    selection_color: Option<Color>,
 }
 
 impl Input {
@@ -161,6 +193,9 @@ impl Input {
         Self {
             value: RefCell::new(String::new()),
             cursor: Cell::new(0),
+            selection_anchor: Cell::new(None),
+            pending_hit: Cell::new(None),
+            selecting: Cell::new(false),
             source: None,
             cursor_source: None,
             placeholder: String::new(),
@@ -182,6 +217,7 @@ impl Input {
             placeholder_color: None,
             border_color: None,
             focus_ring_color: None,
+            selection_color: None,
         }
     }
 
@@ -399,6 +435,14 @@ impl Input {
         self
     }
 
+    /// Override the text-selection highlight color. `None` (the default)
+    /// reads `theme.colors.selection_background` each frame. A translucent
+    /// color keeps the selected glyphs legible on top.
+    pub fn selection_color(mut self, color: Color) -> Self {
+        self.selection_color = Some(color);
+        self
+    }
+
     /// Get a clone of the current value.
     pub fn value_clone(&self) -> String {
         self.value.borrow().clone()
@@ -417,6 +461,67 @@ impl Input {
     /// Get cursor position (byte offset).
     pub fn cursor(&self) -> usize {
         self.cursor.get()
+    }
+
+    /// Whether any text is currently selected.
+    pub fn has_selection(&self) -> bool {
+        self.selection_range().is_some()
+    }
+
+    /// The selected substring, or `None` when nothing is selected.
+    pub fn selected_text(&self) -> Option<String> {
+        let (lo, hi) = self.selection_range()?;
+        Some(self.value.borrow()[lo..hi].to_string())
+    }
+
+    /// The current selection as a sorted `(lo, hi)` byte range, or `None`
+    /// when there is no selection (no anchor, or a collapsed one where
+    /// `anchor == cursor`).
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.selection_anchor.get()?;
+        let cursor = self.cursor.get();
+        let lo = anchor.min(cursor);
+        let hi = anchor.max(cursor);
+        if lo < hi { Some((lo, hi)) } else { None }
+    }
+
+    /// Drop the selection, leaving the caret where it is.
+    fn clear_selection(&self) {
+        self.selection_anchor.set(None);
+    }
+
+    /// Begin (or keep) a selection anchored at the current caret. The first
+    /// Shift+motion pins the anchor; later ones just move the active end.
+    fn ensure_anchor(&self) {
+        if self.selection_anchor.get().is_none() {
+            self.selection_anchor.set(Some(self.cursor.get()));
+        }
+    }
+
+    /// Select the whole buffer (Ctrl/Cmd+A): anchor at the start, caret at
+    /// the end.
+    fn select_all(&self) {
+        let len = self.value.borrow().len();
+        self.selection_anchor.set(Some(0));
+        self.cursor.set(len);
+        self.desired_col.set(None);
+    }
+
+    /// Delete the current selection if any: remove `[lo, hi)`, move the caret
+    /// to `lo`, clear the anchor. Returns whether anything was removed — the
+    /// caller composes the follow-up (`push_to_source` / `on_change`); this
+    /// only mutates the buffer + caret so it can be shared by typing,
+    /// Backspace, Delete, and Cut.
+    fn delete_selection(&mut self) -> bool {
+        if let Some((lo, hi)) = self.selection_range() {
+            self.value.borrow_mut().drain(lo..hi);
+            self.cursor.set(lo);
+            self.selection_anchor.set(None);
+            self.desired_col.set(None);
+            true
+        } else {
+            false
+        }
     }
 
     fn resolve_bg(&self, colors: &shroud_core::Colors) -> Color {
@@ -680,6 +785,62 @@ impl Widget for Input {
             None
         };
 
+        // Resolve a deferred click / drag against the shaped text now that the
+        // engine + geometry are in hand (the event handler has neither — see
+        // `pending_hit`). `extend` keeps the anchor and moves only the active
+        // end; otherwise the caret collapses to a fresh, selection-free point.
+        if let Some((pos, extend)) = self.pending_hit.take() {
+            let rel_x = pos.x - text_x;
+            let rel_y = pos.y - text_y;
+            let offset = {
+                let v = self.value.borrow();
+                ctx.text_engine.offset_at_point(
+                    &v,
+                    rel_x,
+                    rel_y,
+                    font_size,
+                    line_height,
+                    wrap_width,
+                )
+            };
+            if extend {
+                self.ensure_anchor();
+            } else {
+                self.selection_anchor.set(None);
+            }
+            self.cursor.set(offset);
+            self.desired_col.set(None);
+            // Mirror the moved caret so a bound cursor signal (and the next
+            // event's `sync_from_source`) agrees with the paint-resolved hit.
+            self.push_cursor_to_source();
+        }
+
+        // Selection highlight, painted behind the glyphs so the (opaque) text
+        // stays legible on top of the translucent fill.
+        if self.focused {
+            if let Some((lo, hi)) = self.selection_range() {
+                let sel_color = self
+                    .selection_color
+                    .unwrap_or(ctx.theme.colors.selection_background);
+                let rects = {
+                    let v = self.value.borrow();
+                    ctx.text_engine
+                        .selection_rects(&v, lo, hi, font_size, line_height, wrap_width)
+                };
+                for r in rects {
+                    ctx.fill_rect(
+                        Rect::new(
+                            text_x + r.origin.x,
+                            text_y + r.origin.y,
+                            r.size.width,
+                            r.size.height,
+                        ),
+                        sel_color,
+                    );
+                }
+            }
+        }
+
         let value = self.value.borrow();
         if value.is_empty() {
             if !self.placeholder.is_empty() {
@@ -760,14 +921,31 @@ impl Widget for Input {
         self.sync_from_source();
 
         let result = match event {
-            WidgetEvent::MouseDown { .. } => {
+            WidgetEvent::MouseDown { position, button } => {
                 // Focus is already set by WidgetTree's click-to-focus
-                // (dispatched FocusGained before this handler runs).
-                // Just move the cursor to end — precise positioning
-                // would need per-glyph metrics.
-                self.cursor.set(self.value.borrow().len());
-                self.desired_col.set(None);
+                // (dispatched FocusGained before this handler runs). Defer
+                // the precise caret hit-test to paint (no text engine here):
+                // plant a pending click and begin a potential drag. `extend`
+                // follows Shift, so Shift+click stretches the selection from
+                // the current caret to the click point.
+                if *button == MouseButton::Left {
+                    self.pending_hit.set(Some((*position, ctx.modifiers.shift)));
+                    self.selecting.set(true);
+                    self.desired_col.set(None);
+                }
                 EventResult::Consumed
+            }
+
+            WidgetEvent::MouseMove { position } if self.selecting.get() => {
+                // Drag with the button held: extend the selection's active
+                // end to the new point (resolved at paint).
+                self.pending_hit.set(Some((*position, true)));
+                EventResult::Consumed
+            }
+
+            WidgetEvent::MouseUp { .. } => {
+                self.selecting.set(false);
+                EventResult::Ignored
             }
 
             WidgetEvent::FocusGained => {
@@ -777,6 +955,7 @@ impl Widget for Input {
 
             WidgetEvent::FocusLost => {
                 self.focused = false;
+                self.selecting.set(false);
                 self.desired_col.set(None);
                 if self.numeric {
                     self.canonicalize_numeric_buffer();
@@ -803,6 +982,9 @@ impl Widget for Input {
                     !ch.is_control()
                 };
                 if accept {
+                    // Typing over a selection replaces it (the caret lands at
+                    // `lo` before the insert). No-op when nothing is selected.
+                    self.delete_selection();
                     let ch_len = ch.len_utf8();
                     let cursor = self.cursor.get();
                     self.value.borrow_mut().insert(cursor, *ch);
@@ -820,77 +1002,140 @@ impl Widget for Input {
 
             WidgetEvent::KeyDown { key } if self.focused => match key {
                 Key::Named(NamedKey::Backspace) => {
-                    let cursor = self.cursor.get();
-                    if cursor > 0 {
-                        let prev = {
-                            let v = self.value.borrow();
-                            Self::prev_char_boundary(&v, cursor)
-                        };
-                        self.value.borrow_mut().drain(prev..cursor);
-                        self.cursor.set(prev);
-                        self.desired_col.set(None);
-
+                    // A selection is deleted as a unit; otherwise fall back to
+                    // the single-char delete (and the empty-buffer hand-off).
+                    if self.delete_selection() {
                         self.push_to_source();
                         if let Some(handler) = self.on_change.as_mut() {
                             let snapshot = self.value.borrow().clone();
                             handler(&snapshot, ctx);
                         }
-                    } else if self.value.borrow().is_empty() {
-                        // Empty buffer + Backspace: hand off to the app (e.g.
-                        // a tag editor removing the last chip). Gated on a
-                        // truly-empty buffer so a Backspace at the start of
-                        // non-empty text stays an inert no-op.
-                        if let Some(handler) = self.on_backspace_empty.as_mut() {
-                            handler(ctx);
+                    } else {
+                        let cursor = self.cursor.get();
+                        if cursor > 0 {
+                            let prev = {
+                                let v = self.value.borrow();
+                                Self::prev_char_boundary(&v, cursor)
+                            };
+                            self.value.borrow_mut().drain(prev..cursor);
+                            self.cursor.set(prev);
+                            self.desired_col.set(None);
+
+                            self.push_to_source();
+                            if let Some(handler) = self.on_change.as_mut() {
+                                let snapshot = self.value.borrow().clone();
+                                handler(&snapshot, ctx);
+                            }
+                        } else if self.value.borrow().is_empty() {
+                            // Empty buffer + Backspace: hand off to the app
+                            // (e.g. a tag editor removing the last chip). Gated
+                            // on a truly-empty buffer so a Backspace at the
+                            // start of non-empty text stays an inert no-op.
+                            if let Some(handler) = self.on_backspace_empty.as_mut() {
+                                handler(ctx);
+                            }
                         }
                     }
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Delete) => {
-                    let cursor = self.cursor.get();
-                    let len = self.value.borrow().len();
-                    if cursor < len {
-                        let next = {
-                            let v = self.value.borrow();
-                            Self::next_char_boundary(&v, cursor)
-                        };
-                        self.value.borrow_mut().drain(cursor..next);
-                        self.desired_col.set(None);
-
+                    // A selection is deleted as a unit; otherwise delete the
+                    // single char to the right of the caret.
+                    if self.delete_selection() {
                         self.push_to_source();
                         if let Some(handler) = self.on_change.as_mut() {
                             let snapshot = self.value.borrow().clone();
                             handler(&snapshot, ctx);
                         }
+                    } else {
+                        let cursor = self.cursor.get();
+                        let len = self.value.borrow().len();
+                        if cursor < len {
+                            let next = {
+                                let v = self.value.borrow();
+                                Self::next_char_boundary(&v, cursor)
+                            };
+                            self.value.borrow_mut().drain(cursor..next);
+                            self.desired_col.set(None);
+
+                            self.push_to_source();
+                            if let Some(handler) = self.on_change.as_mut() {
+                                let snapshot = self.value.borrow().clone();
+                                handler(&snapshot, ctx);
+                            }
+                        }
                     }
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowLeft) => {
-                    let cursor = self.cursor.get();
-                    if cursor > 0 {
-                        let prev = {
-                            let v = self.value.borrow();
-                            Self::prev_char_boundary(&v, cursor)
-                        };
-                        self.cursor.set(prev);
+                    if ctx.modifiers.shift {
+                        // Extend selection one char left.
+                        self.ensure_anchor();
+                        let cursor = self.cursor.get();
+                        if cursor > 0 {
+                            let prev = {
+                                let v = self.value.borrow();
+                                Self::prev_char_boundary(&v, cursor)
+                            };
+                            self.cursor.set(prev);
+                        }
+                    } else if let Some((lo, _hi)) = self.selection_range() {
+                        // Plain ArrowLeft with a selection collapses to its
+                        // left edge (no per-char move).
+                        self.cursor.set(lo);
+                        self.clear_selection();
+                    } else {
+                        let cursor = self.cursor.get();
+                        if cursor > 0 {
+                            let prev = {
+                                let v = self.value.borrow();
+                                Self::prev_char_boundary(&v, cursor)
+                            };
+                            self.cursor.set(prev);
+                        }
                     }
                     self.desired_col.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowRight) => {
-                    let cursor = self.cursor.get();
-                    let len = self.value.borrow().len();
-                    if cursor < len {
-                        let next = {
-                            let v = self.value.borrow();
-                            Self::next_char_boundary(&v, cursor)
-                        };
-                        self.cursor.set(next);
+                    if ctx.modifiers.shift {
+                        self.ensure_anchor();
+                        let cursor = self.cursor.get();
+                        let len = self.value.borrow().len();
+                        if cursor < len {
+                            let next = {
+                                let v = self.value.borrow();
+                                Self::next_char_boundary(&v, cursor)
+                            };
+                            self.cursor.set(next);
+                        }
+                    } else if let Some((_lo, hi)) = self.selection_range() {
+                        // Plain ArrowRight with a selection collapses to its
+                        // right edge.
+                        self.cursor.set(hi);
+                        self.clear_selection();
+                    } else {
+                        let cursor = self.cursor.get();
+                        let len = self.value.borrow().len();
+                        if cursor < len {
+                            let next = {
+                                let v = self.value.borrow();
+                                Self::next_char_boundary(&v, cursor)
+                            };
+                            self.cursor.set(next);
+                        }
                     }
                     self.desired_col.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowUp) if self.multiline => {
+                    // Shift extends the selection; a plain vertical move drops
+                    // it.
+                    if ctx.modifiers.shift {
+                        self.ensure_anchor();
+                    } else {
+                        self.clear_selection();
+                    }
                     let (line, col) = {
                         let v = self.value.borrow();
                         Self::line_col_for_cursor(&v, self.cursor.get())
@@ -910,6 +1155,11 @@ impl Widget for Input {
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowDown) if self.multiline => {
+                    if ctx.modifiers.shift {
+                        self.ensure_anchor();
+                    } else {
+                        self.clear_selection();
+                    }
                     let (line, col) = {
                         let v = self.value.borrow();
                         Self::line_col_for_cursor(&v, self.cursor.get())
@@ -927,11 +1177,21 @@ impl Widget for Input {
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Home) => {
+                    if ctx.modifiers.shift {
+                        self.ensure_anchor();
+                    } else {
+                        self.clear_selection();
+                    }
                     self.cursor.set(0);
                     self.desired_col.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::End) => {
+                    if ctx.modifiers.shift {
+                        self.ensure_anchor();
+                    } else {
+                        self.clear_selection();
+                    }
                     self.cursor.set(self.value.borrow().len());
                     self.desired_col.set(None);
                     EventResult::Consumed
@@ -956,6 +1216,43 @@ impl Widget for Input {
                         handler(&snapshot, ctx);
                     }
                     EventResult::Consumed
+                }
+                // Clipboard chords arrive here as `Character` KeyDowns because
+                // the event loop promotes Ctrl/Cmd+letter out of `CharInput`.
+                // (Ctrl/Cmd+V is intercepted upstream and replayed as
+                // `CharInput`, so paste flows through the insert path and
+                // replaces any selection via `delete_selection`.)
+                Key::Character(c) if is_cmd_combo(ctx.modifiers) => {
+                    match c.to_ascii_lowercase() {
+                        'a' => {
+                            self.select_all();
+                            EventResult::Consumed
+                        }
+                        'c' => {
+                            if let Some(text) = self.selected_text() {
+                                ctx.write_clipboard(text);
+                            }
+                            EventResult::Consumed
+                        }
+                        'x' => {
+                            // Cut = copy + delete the selection.
+                            if let Some(text) = self.selected_text() {
+                                ctx.write_clipboard(text);
+                                if self.delete_selection() {
+                                    self.push_to_source();
+                                    if let Some(handler) = self.on_change.as_mut() {
+                                        let snapshot = self.value.borrow().clone();
+                                        handler(&snapshot, ctx);
+                                    }
+                                }
+                            }
+                            EventResult::Consumed
+                        }
+                        // Other Ctrl/Cmd+letter combos aren't ours — leave
+                        // them for an app shortcut (the router already had
+                        // first refusal upstream).
+                        _ => EventResult::Ignored,
+                    }
                 }
                 _ => EventResult::Ignored,
             },

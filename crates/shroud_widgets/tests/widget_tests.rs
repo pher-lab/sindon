@@ -6124,3 +6124,194 @@ fn input_numeric_min_clamp_on_edit_only() {
     let input = tree.widget_as::<Input>(idx).unwrap();
     assert_eq!(input.value_clone(), "10");
 }
+
+// ── Input text selection model ─────────────────────────────────────
+//
+// Keyboard selection / clipboard tests drive the state machine through
+// `dispatch_event` with no paint pass. The precise click-to-caret and
+// drag-select paths resolve at paint time (the widget has no text engine in
+// `event`) and are covered by the engine's `offset_at_point` round-trip
+// tests; here we seed the caret with `with_value` (caret lands at the end).
+
+/// Build a focused single-line Input seeded with `text` (caret at end).
+fn selection_input(text: &str) -> (WidgetTree, usize, EventContext) {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().with_value(text));
+    tree.compute_layout(400.0, 100.0);
+    let mut ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut ctx);
+    (tree, idx, ctx)
+}
+
+/// Dispatch a KeyDown with `mods` held, then reset modifiers so a following
+/// CharInput isn't accidentally treated as a chord.
+fn dispatch_key(tree: &mut WidgetTree, key: Key, mods: Modifiers, ctx: &mut EventContext) {
+    ctx.modifiers = mods;
+    tree.dispatch_event(&WidgetEvent::KeyDown { key }, ctx);
+    ctx.modifiers = Modifiers::NONE;
+}
+
+#[test]
+fn shift_arrow_left_extends_selection() {
+    let (mut tree, idx, mut ctx) = selection_input("hello");
+    // Caret at end (5). Shift+Left twice selects the last two chars.
+    for _ in 0..2 {
+        dispatch_key(
+            &mut tree,
+            Key::Named(NamedKey::ArrowLeft),
+            Modifiers::SHIFT,
+            &mut ctx,
+        );
+    }
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert!(input.has_selection());
+    assert_eq!(input.selected_text().as_deref(), Some("lo"));
+}
+
+#[test]
+fn shift_arrow_selects_multibyte_char() {
+    // Selection must split on char boundaries: each kana is 3 UTF-8 bytes.
+    let (mut tree, idx, mut ctx) = selection_input("あい");
+    dispatch_key(
+        &mut tree,
+        Key::Named(NamedKey::ArrowLeft),
+        Modifiers::SHIFT,
+        &mut ctx,
+    );
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.selected_text().as_deref(), Some("い"));
+}
+
+#[test]
+fn home_then_shift_end_selects_whole_line() {
+    let (mut tree, idx, mut ctx) = selection_input("hello");
+    dispatch_key(
+        &mut tree,
+        Key::Named(NamedKey::Home),
+        Modifiers::NONE,
+        &mut ctx,
+    );
+    dispatch_key(
+        &mut tree,
+        Key::Named(NamedKey::End),
+        Modifiers::SHIFT,
+        &mut ctx,
+    );
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.selected_text().as_deref(), Some("hello"));
+}
+
+#[test]
+fn ctrl_a_selects_all() {
+    let (mut tree, idx, mut ctx) = selection_input("hello world");
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx);
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.selected_text().as_deref(), Some("hello world"));
+}
+
+#[test]
+fn typing_replaces_selection() {
+    let (mut tree, idx, mut ctx) = selection_input("hello");
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx);
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'Z' }, &mut ctx);
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.value_clone(), "Z");
+    assert!(!input.has_selection(), "insert collapses the selection");
+}
+
+#[test]
+fn backspace_deletes_selection_as_a_unit() {
+    let (mut tree, idx, mut ctx) = selection_input("hello");
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx);
+    dispatch_key(
+        &mut tree,
+        Key::Named(NamedKey::Backspace),
+        Modifiers::NONE,
+        &mut ctx,
+    );
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.value_clone(), "");
+    assert!(!input.has_selection());
+}
+
+#[test]
+fn delete_key_removes_selection() {
+    let (mut tree, idx, mut ctx) = selection_input("hello");
+    // Select the last two chars, then Delete removes exactly that range.
+    for _ in 0..2 {
+        dispatch_key(
+            &mut tree,
+            Key::Named(NamedKey::ArrowLeft),
+            Modifiers::SHIFT,
+            &mut ctx,
+        );
+    }
+    dispatch_key(
+        &mut tree,
+        Key::Named(NamedKey::Delete),
+        Modifiers::NONE,
+        &mut ctx,
+    );
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.value_clone(), "hel");
+    assert!(!input.has_selection());
+}
+
+#[test]
+fn ctrl_c_copies_selection_to_clipboard() {
+    let (mut tree, idx, mut ctx) = selection_input("hello");
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx);
+    dispatch_key(&mut tree, Key::Character('c'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(ctx.take_clipboard_write().as_deref(), Some("hello"));
+    // Copy does not mutate the buffer.
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "hello");
+}
+
+#[test]
+fn ctrl_c_with_no_selection_writes_nothing() {
+    let (mut tree, _idx, mut ctx) = selection_input("hello");
+    dispatch_key(&mut tree, Key::Character('c'), Modifiers::CTRL, &mut ctx);
+    assert!(ctx.take_clipboard_write().is_none());
+}
+
+#[test]
+fn ctrl_x_cuts_selection() {
+    let (mut tree, idx, mut ctx) = selection_input("hello world");
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx);
+    dispatch_key(&mut tree, Key::Character('x'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(ctx.take_clipboard_write().as_deref(), Some("hello world"));
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "");
+}
+
+#[test]
+fn plain_arrow_left_collapses_selection_to_left_edge() {
+    let (mut tree, idx, mut ctx) = selection_input("hello");
+    // Ctrl+A → anchor 0, caret 5. Plain ArrowLeft collapses to the left edge
+    // (offset 0) rather than stepping one char left from the caret.
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx);
+    dispatch_key(
+        &mut tree,
+        Key::Named(NamedKey::ArrowLeft),
+        Modifiers::NONE,
+        &mut ctx,
+    );
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert!(!input.has_selection());
+    assert_eq!(input.cursor(), 0);
+}
+
+#[test]
+fn plain_arrow_right_collapses_selection_to_right_edge() {
+    let (mut tree, idx, mut ctx) = selection_input("hello");
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx);
+    dispatch_key(
+        &mut tree,
+        Key::Named(NamedKey::ArrowRight),
+        Modifiers::NONE,
+        &mut ctx,
+    );
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert!(!input.has_selection());
+    assert_eq!(input.cursor(), 5);
+}

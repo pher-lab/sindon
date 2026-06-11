@@ -749,6 +749,19 @@ impl ShroudEventLoop {
             }
         }
     }
+
+    /// Write any text a widget queued during the last dispatch (via
+    /// [`EventContext::write_clipboard`]) to the OS clipboard. Drives copy /
+    /// cut from a focused `Input`. A fresh [`SecureClipboard`] with no
+    /// auto-clear timer is used so ordinary copied text persists like any
+    /// normal clipboard write; failures are silently ignored (clipboard
+    /// access is best-effort).
+    fn flush_clipboard_write(&mut self) {
+        if let Some(text) = self.event_ctx.take_clipboard_write() {
+            let mut clipboard = SecureClipboard::new();
+            let _ = clipboard.write(&text);
+        }
+    }
 }
 
 impl ApplicationHandler<AppEvent> for ShroudEventLoop {
@@ -1014,6 +1027,10 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                                     tree.dispatch_event(&ev, &mut self.event_ctx);
                                 }
                             }
+                            // A focused Input may have asked to copy / cut its
+                            // selection (Ctrl+C / Ctrl+X arrive on this path as
+                            // KeyDown). Flush that to the OS clipboard now.
+                            self.flush_clipboard_write();
                             self.request_redraw();
                         }
                     }

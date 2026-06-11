@@ -2,7 +2,7 @@
 
 use crate::attrs::TextAttrs;
 use crate::span::{TextSpan, cosmic_to_shroud, shroud_to_cosmic};
-use cosmic_text::{Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
+use cosmic_text::{Buffer, Cursor, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
 use shroud_core::{Color, Rect};
 
 /// A positioned glyph ready for rasterization.
@@ -414,6 +414,107 @@ impl TextEngine {
         (cursor_x, cursor_y)
     }
 
+    /// Map a point within a shaped text block back to a byte offset into
+    /// `text` — the inverse of [`cursor_position`](Self::cursor_position).
+    ///
+    /// `(x, y)` are in the block's local coordinate space (origin at the
+    /// block's top-left, the same space `cursor_position` *returns*). The
+    /// result is the byte offset of the insertion point nearest that point,
+    /// always on a `char` boundary. Used by an editable `Input` to place the
+    /// caret where the user clicked and to drag-select.
+    ///
+    /// `x` / `y` are clamped to the block's leading edge, so a click in the
+    /// left / top padding maps to the line start rather than off the front;
+    /// cosmic-text's hit test already pins a click past the last line to the
+    /// end of the final run. `max_width` must match the wrap configuration
+    /// used to render the text or the offset won't line up with the painted
+    /// glyphs. Empty `text` returns 0.
+    pub fn offset_at_point(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_size(&mut self.font_system, max_width, None);
+        buffer.set_text(
+            &mut self.font_system,
+            text,
+            &TextAttrs::default().as_cosmic(),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+
+        let hx = x.max(0.0);
+        let hy = y.max(0.0);
+        match buffer.hit(hx, hy) {
+            Some(cursor) => line_index_to_offset(text, cursor.line, cursor.index),
+            None => text.len(),
+        }
+    }
+
+    /// Block-relative highlight rectangles covering the byte range
+    /// `[start, end)` of `text`, one per visual line the range spans.
+    ///
+    /// Used by `Input` to paint a selection behind the glyphs. Coordinates
+    /// are in the same block-relative space as [`cursor_position`] and the
+    /// painted glyphs (origin at the block top-left), so a caller adds the
+    /// text origin to translate into screen space. `max_width` must match
+    /// the render wrap configuration. An empty or inverted range, or empty
+    /// `text`, returns an empty `Vec`.
+    pub fn selection_rects(
+        &mut self,
+        text: &str,
+        start: usize,
+        end: usize,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> Vec<Rect> {
+        if text.is_empty() || start >= end {
+            return Vec::new();
+        }
+        let lo = start.min(text.len());
+        let hi = end.min(text.len());
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_size(&mut self.font_system, max_width, None);
+        buffer.set_text(
+            &mut self.font_system,
+            text,
+            &TextAttrs::default().as_cosmic(),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+
+        let (lo_line, lo_idx) = offset_to_line_index(text, lo);
+        let (hi_line, hi_idx) = offset_to_line_index(text, hi);
+        let cursor_lo = Cursor::new(lo_line, lo_idx);
+        let cursor_hi = Cursor::new(hi_line, hi_idx);
+
+        let mut rects = Vec::new();
+        for run in buffer.layout_runs() {
+            // `highlight` returns the pixel span of this run's glyphs whose
+            // cursor falls within [lo, hi]. A run with no intersecting glyphs
+            // (e.g. a blank line between the endpoints) yields None.
+            if let Some((x, w)) = run.highlight(cursor_lo, cursor_hi) {
+                if w > 0.0 {
+                    rects.push(Rect::new(x, run.line_top, w, run.line_height));
+                }
+            }
+        }
+        rects
+    }
+
     /// Rasterize a glyph into an alpha mask.
     ///
     /// Returns `None` if the glyph has no visible pixels (e.g. space).
@@ -452,6 +553,40 @@ impl TextEngine {
             top: placement.top,
         })
     }
+}
+
+/// Split a global byte `offset` into (hard-line index, byte index within that
+/// line). Hard lines are `\n`-separated and the `\n` belongs to neither line,
+/// matching cosmic-text's `BufferLine` model — so the result feeds directly
+/// into `Cursor::new(line, index)`.
+fn offset_to_line_index(text: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(text.len());
+    let prefix = &text[..offset];
+    let line = prefix.matches('\n').count();
+    let index = match prefix.rfind('\n') {
+        Some(nl) => offset - (nl + 1),
+        None => offset,
+    };
+    (line, index)
+}
+
+/// Inverse of [`offset_to_line_index`]: resolve a cosmic-text
+/// `(line, byte-in-line)` cursor back to a global byte offset into `text`,
+/// clamped to the text length and snapped down to a `char` boundary (so a hit
+/// landing inside a multi-byte codepoint never produces a non-boundary offset).
+fn line_index_to_offset(text: &str, line: usize, index: usize) -> usize {
+    let mut line_start = 0;
+    for _ in 0..line {
+        match text[line_start..].find('\n') {
+            Some(rel) => line_start += rel + 1,
+            None => return text.len(),
+        }
+    }
+    let mut target = (line_start + index).min(text.len());
+    while target > 0 && !text.is_char_boundary(target) {
+        target -= 1;
+    }
+    target
 }
 
 /// Emit the span box for a finished glyph group, plus any decoration lines the

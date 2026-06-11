@@ -91,6 +91,9 @@ pub struct Colors {
     pub input_border_focused: Color,
     /// Input placeholder text.
     pub input_placeholder: Color,
+    /// Text-selection highlight, painted behind selected glyphs. Typically
+    /// translucent so the text stays legible on top of it.
+    pub selection_background: Color,
 
     // Semantic
     /// Error state.
@@ -150,6 +153,8 @@ impl Theme {
                 input_border: Color::rgb(0.3, 0.3, 0.35),
                 input_border_focused: Color::rgb(0.4, 0.5, 0.9),
                 input_placeholder: Color::rgb(0.5, 0.5, 0.5),
+                // Translucent accent so glyphs stay legible on top.
+                selection_background: Color::rgba(0.4, 0.5, 0.9, 0.4),
 
                 error: Color::rgb(0.9, 0.3, 0.3),
                 warning: Color::rgb(0.9, 0.7, 0.2),
@@ -218,6 +223,8 @@ impl Theme {
                 input_border: Color::rgb(0.75, 0.75, 0.8),
                 input_border_focused: Color::rgb(0.3, 0.45, 0.85),
                 input_placeholder: Color::rgb(0.6, 0.6, 0.65),
+                // Translucent accent so glyphs stay legible on top.
+                selection_background: Color::rgba(0.3, 0.5, 0.95, 0.3),
 
                 error: Color::rgb(0.85, 0.2, 0.2),
                 warning: Color::rgb(0.85, 0.6, 0.1),
@@ -334,6 +341,7 @@ impl Lerp for Colors {
             input_border: self.input_border.lerp(&to.input_border, t),
             input_border_focused: self.input_border_focused.lerp(&to.input_border_focused, t),
             input_placeholder: self.input_placeholder.lerp(&to.input_placeholder, t),
+            selection_background: self.selection_background.lerp(&to.selection_background, t),
             error: self.error.lerp(&to.error, t),
             warning: self.warning.lerp(&to.warning, t),
             success: self.success.lerp(&to.success, t),
@@ -418,20 +426,34 @@ mod tests {
         let dark = Theme::dark();
         let light = Theme::light();
 
-        // t == 0 is an exact identity — the displayed theme rests at `from`.
-        assert_eq!(dark.lerp(&light, 0.0), dark);
-
-        // t == 1 reaches the target up to float rounding. (The animation
-        // layer snaps to an exact target once settled; a direct
-        // `lerp(_, 1.0)` only needs to *converge*, since `self + (to-self)`
-        // isn't bit-exact for arbitrary floats.)
-        let end = dark.lerp(&light, 1.0);
         let close = |a: Color, b: Color| {
             (a.r - b.r).abs() < 1e-6
                 && (a.g - b.g).abs() < 1e-6
                 && (a.b - b.b).abs() < 1e-6
                 && (a.a - b.a).abs() < 1e-6
         };
+
+        // t == 0 rests at `from` up to float rounding. It is *not* bit-exact:
+        // `Color::lerp` interpolates in premultiplied-alpha space, so a
+        // *translucent* token (e.g. `selection_background`, alpha 0.4) makes a
+        // round trip through premultiply→un-premultiply that can land ~1e-7
+        // off the original. Opaque tokens (every other color) are exact. The
+        // resting-frame error is imperceptible; the semantic invariant is "t=0
+        // shows `from`", which holds within epsilon.
+        let start = dark.lerp(&light, 0.0);
+        assert!(close(start.colors.background, dark.colors.background));
+        assert!(close(
+            start.colors.selection_background,
+            dark.colors.selection_background
+        ));
+        assert!(close(start.hover.bg, dark.hover.bg));
+        assert!(close(start.focus.ring_color, dark.focus.ring_color));
+
+        // t == 1 reaches the target up to float rounding. (The animation
+        // layer snaps to an exact target once settled; a direct
+        // `lerp(_, 1.0)` only needs to *converge*, since `self + (to-self)`
+        // isn't bit-exact for arbitrary floats.)
+        let end = dark.lerp(&light, 1.0);
         assert!(close(end.colors.background, light.colors.background));
         assert!(close(
             end.colors.surface_variant,
