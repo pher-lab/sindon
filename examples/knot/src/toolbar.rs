@@ -4,33 +4,32 @@
 //! This is the feature-parity port of Knot v0.7.0's `Editor/Toolbar`. Each
 //! button performs one of two kinds of edit:
 //!
-//! * **Inline** (Bold / Italic / Code) inserts an *empty* pair of the matching
-//!   Markdown markers (`****`, `**`, `` `` ``) and drops the caret *between*
-//!   them, so the user types the content directly and it comes out wrapped.
-//!   `Input` has no selection, so inserting a placeholder we could "select"
-//!   isn't possible — empty markers sidestep that and leave nothing to delete.
-//! * **Link** inserts `[](https://)` with the caret inside the `[]`, so the
-//!   user types the link text directly; the `https://` is a prefix to continue
-//!   the URL from (arrow right past `](`).
+//! * **Inline** (Bold / Italic / Code) and **Link**: when text is selected they
+//!   *wrap* the selection (`**bold**`, `[text](https://)`); with no selection
+//!   they fall back to inserting an *empty* pair of markers (`****`) / the
+//!   `[](https://)` template with the caret parked where the user types next.
 //! * **Line prefix** (Heading / Quote / List) inserts `# ` / `> ` / `- ` at the
-//!   start of the caret's line.
+//!   start of the caret's line (selection-agnostic).
 //!
-//! ## How it reaches the caret without a selection model
+//! ## How it reaches the body without touching it directly
 //!
-//! `Input` exposes only a caret (no selection range), and a toolbar button is a
-//! *sibling* of the body input — it can't reach into it directly. The bridge is
-//! two signals shared with the body input ([`crate::editor`] builds them):
+//! A toolbar button is a *sibling* of the body input — it can't reach into it.
+//! The bridge is three signals shared with the body input ([`crate::editor`]
+//! builds them):
 //!
 //! * `body_sig: Signal<String>` — the body text (already used for note save).
 //! * `cursor_sig: Signal<usize>` — the body's caret byte offset, mirrored by
 //!   [`shroud::widgets::Input::cursor_signal`].
+//! * `selection_sig: Signal<Option<(usize, usize)>>` — the body's selection
+//!   range, mirrored by [`shroud::widgets::Input::selection_signal`].
 //!
 //! When a button is clicked the body input first loses focus, and `Input`
-//! mirrors its final caret into `cursor_sig` on that `FocusLost` — *before* this
-//! button's click handler runs. So [`apply`] reads the correct pre-blur caret,
-//! rewrites `body_sig`, writes the new caret back into `cursor_sig`, and
-//! re-focuses the body (`ctx.focus`) so the caret it just set becomes live and
-//! the user keeps typing where the snippet landed.
+//! mirrors its final caret *and* selection into those signals on that
+//! `FocusLost` — *before* this button's click handler runs. So [`apply`] reads
+//! the correct pre-blur state, rewrites `body_sig` (which clears the now-stale
+//! selection), writes the new caret into `cursor_sig`, and re-focuses the body
+//! (`ctx.focus`) so the caret it set becomes live and the user keeps typing
+//! where the snippet landed.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -53,6 +52,7 @@ pub fn build(
     state: Rc<RefCell<AppState>>,
     body_sig: Signal<String>,
     cursor_sig: Signal<usize>,
+    selection_sig: Signal<Option<(usize, usize)>>,
     body_idx: Rc<Cell<usize>>,
 ) {
     // `flex_wrap` so a narrow editor pane (e.g. while the preview is open)
@@ -76,27 +76,35 @@ pub fn build(
                 .radius(6.0)
                 .font_size(13.0)
                 .on_click(move |ctx| {
-                    apply(&state, body_sig, cursor_sig, &body_idx, ctx, fmt);
+                    apply(
+                        &state,
+                        body_sig,
+                        cursor_sig,
+                        selection_sig,
+                        &body_idx,
+                        ctx,
+                        fmt,
+                    );
                 }),
         );
     }
 }
 
-/// Apply a formatting action: read the caret, rewrite the body around it, push
-/// the new caret back, persist the note, and re-focus the body. No-op on the
-/// note save when nothing is selected (the toolbar is hidden then anyway, since
-/// it lives inside the selection-gated editor area).
+/// Apply a formatting action: read the caret + selection, rewrite the body,
+/// push the new caret back, persist the note, and re-focus the body.
 fn apply(
     state: &Rc<RefCell<AppState>>,
     body_sig: Signal<String>,
     cursor_sig: Signal<usize>,
+    selection_sig: Signal<Option<(usize, usize)>>,
     body_idx: &Rc<Cell<usize>>,
     ctx: &mut EventContext,
     fmt: Fmt,
 ) {
     let old = body_sig.get_clone();
     let caret = cursor_sig.get();
-    let (new_body, new_caret) = fmt.transform(&old, caret);
+    let selection = selection_sig.get();
+    let (new_body, new_caret) = fmt.transform(&old, caret, selection);
 
     body_sig.set(new_body.clone());
     cursor_sig.set(new_caret);
@@ -126,17 +134,47 @@ enum Fmt {
 }
 
 impl Fmt {
-    /// Produce the edited body and the new caret byte offset.
-    fn transform(self, body: &str, caret: usize) -> (String, usize) {
+    /// Produce the edited body and the new caret byte offset. `selection` is the
+    /// body's selected `[lo, hi)` range (or `None`); inline + link actions wrap
+    /// it when present and fall back to caret insertion when absent.
+    fn transform(
+        self,
+        body: &str,
+        caret: usize,
+        selection: Option<(usize, usize)>,
+    ) -> (String, usize) {
         match self {
             Fmt::Heading => insert_line_prefix(body, caret, "# "),
             Fmt::Quote => insert_line_prefix(body, caret, "> "),
             Fmt::List => insert_line_prefix(body, caret, "- "),
-            Fmt::Bold => insert_inline(body, caret, "**"),
-            Fmt::Italic => insert_inline(body, caret, "*"),
-            Fmt::Code => insert_inline(body, caret, "`"),
-            Fmt::Link => insert_link(body, caret),
+            Fmt::Bold => inline(body, caret, selection, "**"),
+            Fmt::Italic => inline(body, caret, selection, "*"),
+            Fmt::Code => inline(body, caret, selection, "`"),
+            Fmt::Link => link(body, caret, selection),
         }
+    }
+}
+
+/// Inline marker action: wrap the selection if there is one, else insert an
+/// empty marker pair at the caret.
+fn inline(
+    body: &str,
+    caret: usize,
+    selection: Option<(usize, usize)>,
+    marker: &str,
+) -> (String, usize) {
+    match selection {
+        Some((lo, hi)) => wrap_inline(body, lo, hi, marker),
+        None => insert_inline(body, caret, marker),
+    }
+}
+
+/// Link action: wrap the selection as link text if there is one, else insert
+/// the empty `[](https://)` template at the caret.
+fn link(body: &str, caret: usize, selection: Option<(usize, usize)>) -> (String, usize) {
+    match selection {
+        Some((lo, hi)) => wrap_link(body, lo, hi),
+        None => insert_link(body, caret),
     }
 }
 
@@ -176,6 +214,39 @@ fn insert_link(body: &str, caret: usize) -> (String, usize) {
     out.push_str(TEMPLATE);
     out.push_str(&body[caret..]);
     (out, caret + 1)
+}
+
+/// Wrap the selected `[lo, hi)` range in `<marker>…<marker>`, returning the new
+/// body and the caret placed just after the closing marker. The selection
+/// itself collapses — the body input drops it when its value rebases — so the
+/// user continues typing outside the formatting.
+fn wrap_inline(body: &str, lo: usize, hi: usize, marker: &str) -> (String, usize) {
+    let lo = char_boundary(body, lo);
+    let hi = char_boundary(body, hi).max(lo);
+    let mut out = String::with_capacity(body.len() + marker.len() * 2);
+    out.push_str(&body[..lo]);
+    out.push_str(marker);
+    out.push_str(&body[lo..hi]);
+    out.push_str(marker);
+    out.push_str(&body[hi..]);
+    (out, hi + marker.len() * 2)
+}
+
+/// Wrap the selected `[lo, hi)` range as the link text of `[…](https://)`,
+/// returning the new body and the caret placed inside the URL right after
+/// `https://`, so the user types the destination directly.
+fn wrap_link(body: &str, lo: usize, hi: usize) -> (String, usize) {
+    let lo = char_boundary(body, lo);
+    let hi = char_boundary(body, hi).max(lo);
+    let mut out = String::with_capacity(body.len() + "[](https://)".len());
+    out.push_str(&body[..lo]);
+    out.push('[');
+    out.push_str(&body[lo..hi]);
+    out.push_str("](https://");
+    let caret = out.len(); // just after "https://", before the ")"
+    out.push(')');
+    out.push_str(&body[hi..]);
+    (out, caret)
 }
 
 /// Insert `prefix` at the start of the line containing `caret` (the byte after
@@ -249,5 +320,54 @@ mod tests {
         let (out, caret) = insert_inline("あ", 2, "**");
         assert_eq!(out, "****あ");
         assert_eq!(caret, 2);
+    }
+
+    #[test]
+    fn wrap_inline_wraps_the_selection_and_parks_caret_after() {
+        // Select "lo" in "hello" → [3, 5). Bold wraps it; the caret lands just
+        // past the closing "**" so typing continues outside the formatting.
+        let (out, caret) = wrap_inline("hello", 3, 5, "**");
+        assert_eq!(out, "hel**lo**");
+        assert_eq!(caret, out.len());
+        assert_eq!(&out[..caret], "hel**lo**");
+    }
+
+    #[test]
+    fn wrap_inline_keeps_the_trailing_text() {
+        let (out, caret) = wrap_inline("hello world", 0, 5, "*");
+        assert_eq!(out, "*hello* world");
+        assert_eq!(&out[..caret], "*hello*");
+    }
+
+    #[test]
+    fn wrap_inline_on_multibyte_selection() {
+        // "あい" = 6 bytes; select the trailing "い" → [3, 6).
+        let (out, caret) = wrap_inline("あい", 3, 6, "**");
+        assert_eq!(out, "あ**い**");
+        assert_eq!(&out[..caret], "あ**い**");
+    }
+
+    #[test]
+    fn wrap_link_uses_selection_as_link_text_caret_in_url() {
+        // Select "docs" in "see docs here" → [4, 8).
+        let (out, caret) = wrap_link("see docs here", 4, 8);
+        assert_eq!(out, "see [docs](https://) here");
+        assert_eq!(&out[..caret], "see [docs](https://");
+        assert_eq!(&out[caret..], ") here");
+    }
+
+    #[test]
+    fn inline_without_selection_falls_back_to_empty_markers() {
+        // No selection → the empty-marker behavior is preserved.
+        let (out, caret) = inline("hello", 2, None, "**");
+        assert_eq!(out, "he****llo");
+        assert_eq!(caret, 4);
+    }
+
+    #[test]
+    fn inline_with_selection_wraps() {
+        let (out, caret) = inline("hello", 2, Some((0, 5)), "**");
+        assert_eq!(out, "**hello**");
+        assert_eq!(caret, out.len());
     }
 }

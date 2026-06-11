@@ -290,6 +290,7 @@ pub fn build(
     // body through `body_sig` + `cursor_sig` and re-focuses the body via
     // `body_idx`, which we fill in once the body input is built (just below).
     let cursor_sig = Signal::new(0usize);
+    let selection_sig: Signal<Option<(usize, usize)>> = Signal::new(None);
     let body_idx = Rc::new(Cell::new(0usize));
     toolbar::build(
         tree,
@@ -297,6 +298,7 @@ pub fn build(
         Rc::clone(&state),
         body_sig,
         cursor_sig,
+        selection_sig,
         Rc::clone(&body_idx),
     );
 
@@ -317,8 +319,10 @@ pub fn build(
             .multiline()
             .lines(16)
             .value(body_sig)
-            // Mirror the caret so the toolbar can insert at it (see `toolbar`).
+            // Mirror the caret + selection so the toolbar can insert at / wrap
+            // them (see `toolbar`).
             .cursor_signal(cursor_sig)
+            .selection_signal(selection_sig)
             .on_change(move |new_body, _ctx| {
                 write_selected(&body_state, |note| {
                     note.body = new_body.to_string();

@@ -127,6 +127,13 @@ pub struct Input {
     /// is adopted on the next sync (clamped to the buffer, snapped to a char
     /// boundary). Pairs with [`source`](Self::source) for caret-aware inserts.
     cursor_source: Option<Signal<usize>>,
+    /// Optional external binding for the selection range, mirrored to a sibling
+    /// (e.g. a formatting toolbar that wraps the selection). One-way: the widget
+    /// writes its current sorted `Some((lo, hi))` — or `None` when nothing is
+    /// selected — on every event; external writes are not adopted (a caller
+    /// repositions via the value + cursor signals instead, and the widget clears
+    /// its selection when the bound value changes externally).
+    selection_source: Option<Signal<Option<(usize, usize)>>>,
     placeholder: String,
     font_size: Option<f32>,
     focused: bool,
@@ -198,6 +205,7 @@ impl Input {
             selecting: Cell::new(false),
             source: None,
             cursor_source: None,
+            selection_source: None,
             placeholder: String::new(),
             font_size: None,
             focused: false,
@@ -265,6 +273,28 @@ impl Input {
     pub fn cursor_signal(mut self, signal: Signal<usize>) -> Self {
         signal.set(self.cursor.get());
         self.cursor_source = Some(signal);
+        self
+    }
+
+    /// Mirror this input's selection range into a `Signal<Option<(usize, usize)>>`
+    /// so a sibling widget can read it.
+    ///
+    /// The signal carries the sorted byte range `Some((lo, hi))` while text is
+    /// selected and `None` when it isn't, refreshed on every event — including
+    /// `FocusLost`, which fires *before* a clicked toolbar button's handler, so
+    /// the toolbar reads the pre-blur selection.
+    ///
+    /// One-way: writes to the signal from outside are ignored. To act on the
+    /// selection (e.g. wrap it in `**`), read the range here, then rewrite the
+    /// text via [`value`](Self::value) and reposition the caret via
+    /// [`cursor_signal`](Self::cursor_signal). The widget clears its selection
+    /// whenever the bound value changes externally, so the stale range can't
+    /// outlive the rewrite.
+    ///
+    /// The signal seeds from the current selection on bind.
+    pub fn selection_signal(mut self, signal: Signal<Option<(usize, usize)>>) -> Self {
+        signal.set(self.selection_range());
+        self.selection_source = Some(signal);
         self
     }
 
@@ -577,6 +607,10 @@ impl Input {
                 if self.cursor.get() > new_len {
                     self.cursor.set(new_len);
                 }
+                // An external rewrite (e.g. a toolbar wrapping the selection)
+                // invalidates the byte offsets the selection was anchored on —
+                // drop it so a stale highlight can't outlive the edit.
+                self.selection_anchor.set(None);
             }
         }
         if let Some(src) = self.number_source.as_ref() {
@@ -621,6 +655,19 @@ impl Input {
         if let Some(csrc) = self.cursor_source.as_ref() {
             if csrc.get() != self.cursor.get() {
                 csrc.set(self.cursor.get());
+            }
+        }
+    }
+
+    /// Mirror the current selection range into the bound selection signal (if
+    /// any). Called alongside [`push_cursor_to_source`] so a sibling reader sees
+    /// a fresh range — in particular on `FocusLost`, which fires before a
+    /// clicked toolbar button's handler runs.
+    fn push_selection_to_source(&self) {
+        if let Some(ssrc) = self.selection_source.as_ref() {
+            let current = self.selection_range();
+            if ssrc.get() != current {
+                ssrc.set(current);
             }
         }
     }
@@ -810,9 +857,10 @@ impl Widget for Input {
             }
             self.cursor.set(offset);
             self.desired_col.set(None);
-            // Mirror the moved caret so a bound cursor signal (and the next
-            // event's `sync_from_source`) agrees with the paint-resolved hit.
+            // Mirror the moved caret + selection so bound signals (and the next
+            // event's `sync_from_source`) agree with the paint-resolved hit.
             self.push_cursor_to_source();
+            self.push_selection_to_source();
         }
 
         // Selection highlight, painted behind the glyphs so the (opaque) text
@@ -1259,10 +1307,11 @@ impl Widget for Input {
 
             _ => EventResult::Ignored,
         };
-        // Mirror the (possibly moved) caret into the bound cursor signal so an
-        // external observer — e.g. a formatting toolbar — can read it. No-op
-        // when no cursor signal is bound.
+        // Mirror the (possibly moved) caret + selection into the bound signals
+        // so an external observer — e.g. a formatting toolbar — can read them.
+        // No-op when the respective signal isn't bound.
         self.push_cursor_to_source();
+        self.push_selection_to_source();
         result
     }
 }

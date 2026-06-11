@@ -6315,3 +6315,50 @@ fn plain_arrow_right_collapses_selection_to_right_edge() {
     assert!(!input.has_selection());
     assert_eq!(input.cursor(), 5);
 }
+
+#[test]
+fn selection_signal_mirrors_range_to_sibling() {
+    // A sibling (e.g. a formatting toolbar) reads the live selection range via
+    // a bound signal — the bridge that lets it wrap the selection in markers.
+    let body = Signal::new(String::from("hello"));
+    let sel = Signal::new(None);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().value(body).selection_signal(sel));
+    tree.compute_layout(400.0, 100.0);
+    let mut ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut ctx);
+
+    assert_eq!(sel.get(), None, "nothing selected yet");
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(
+        sel.get(),
+        Some((0, 5)),
+        "Ctrl+A mirrors the whole range to the sibling signal"
+    );
+}
+
+#[test]
+fn external_value_change_clears_selection() {
+    // When a sibling rewrites the bound value (the toolbar-wrap path), the next
+    // sync rebases the buffer and drops the now-stale selection so it can't
+    // outlive the edit (and the mirror reflects the cleared state).
+    let body = Signal::new(String::from("hello"));
+    let sel = Signal::new(None);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().value(body).selection_signal(sel));
+    tree.compute_layout(400.0, 100.0);
+    let mut ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut ctx);
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx);
+    assert!(tree.widget_as::<Input>(idx).unwrap().has_selection());
+
+    body.set(String::from("hello world"));
+    // Any event runs `sync_from_source` first, which performs the rebase.
+    tree.dispatch_event(&WidgetEvent::FocusGained, &mut ctx);
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert!(!input.has_selection());
+    assert_eq!(input.value_clone(), "hello world");
+    assert_eq!(sel.get(), None);
+}
