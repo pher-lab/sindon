@@ -54,6 +54,12 @@ pub struct WidgetTree {
     layout: LayoutEngine,
     /// Index of the widget currently under the cursor (for MouseEnter/Leave).
     hovered: Option<usize>,
+    /// Widget that has captured the pointer (e.g. an `Input` mid drag-select).
+    /// While `Some`, `MouseMove` / `MouseUp` are routed directly to it,
+    /// bypassing hit-testing, so the drag keeps extending past its rect. Set
+    /// when a handler calls [`EventContext::capture_pointer`], cleared on
+    /// [`EventContext::release_pointer`] or when the widget is removed.
+    pointer_capture: Option<usize>,
     /// Tree-global keyboard focus tracker. Mutated by
     /// [`Self::advance_focus`] (Tab/Shift+Tab) and invalidated by
     /// [`Self::remove`] so a removed widget never stays focused.
@@ -190,6 +196,7 @@ impl WidgetTree {
             root: None,
             layout: LayoutEngine::new(),
             hovered: None,
+            pointer_capture: None,
             focus: FocusManager::new(),
             pending_initial_focus: None,
             layers: Vec::new(),
@@ -433,6 +440,14 @@ impl WidgetTree {
         if let Some(f) = self.focus.focused() {
             if to_remove.contains(&f) {
                 self.focus.set(None);
+            }
+        }
+
+        // Drop a pointer capture held by anything we're about to remove, so a
+        // tombstoned index can't keep receiving routed drag events.
+        if let Some(c) = self.pointer_capture {
+            if to_remove.contains(&c) {
+                self.pointer_capture = None;
             }
         }
 
@@ -1297,6 +1312,32 @@ impl WidgetTree {
             return EventResult::Consumed;
         }
 
+        // Pointer capture: a widget that began a drag (e.g. an `Input`
+        // mid-selection) receives every `MouseMove` / `MouseUp` directly,
+        // ahead of hit-testing and the layer routing below, so the drag keeps
+        // extending — and is reliably ended — even when the cursor leaves the
+        // widget's rect or the active layer. `MouseDown` is never captured: a
+        // fresh press routes normally (and is where capture is acquired).
+        if let Some(cap) = self.pointer_capture {
+            if !self.contains(cap) {
+                self.pointer_capture = None;
+            } else if matches!(
+                event,
+                WidgetEvent::MouseMove { .. } | WidgetEvent::MouseUp { .. }
+            ) {
+                let (dx, dy) = self.pointer_offset_for(cap, offset);
+                let local = shift_event_position(event, dx, dy);
+                let layout_rect = self.layout_rect(cap);
+                let result = self
+                    .node_mut(cap)
+                    .expect("capture liveness checked above")
+                    .widget
+                    .event(&local, layout_rect, event_ctx);
+                self.apply_capture_change(cap, event_ctx);
+                return result;
+            }
+        }
+
         // Pointer events: when a layer is up, route based on whether the
         // cursor is inside the layer's interactive rect. Outside hits
         // either dismiss (configurable) or are silently swallowed, but
@@ -1380,6 +1421,16 @@ impl WidgetTree {
     /// automatically when the focused widget is removed from the tree.
     pub fn focused(&self) -> Option<usize> {
         self.focus.focused()
+    }
+
+    /// Index of the widget that currently holds the pointer capture, if any.
+    ///
+    /// Set when a handler calls [`EventContext::capture_pointer`] (e.g. an
+    /// `Input` starting a drag-select) and cleared on
+    /// [`EventContext::release_pointer`] or when the widget is removed. While
+    /// `Some`, `MouseMove` / `MouseUp` are delivered straight to this widget.
+    pub fn pointer_capture(&self) -> Option<usize> {
+        self.pointer_capture
     }
 
     /// Collect focusable widgets in tab order — DFS pre-order over the
@@ -1691,10 +1742,48 @@ impl WidgetTree {
         }
 
         // Borrow widget mutably (safe because we're not accessing children here)
-        let Some(node) = self.node_mut(idx) else {
-            return EventResult::Ignored;
+        let result = {
+            let Some(node) = self.node_mut(idx) else {
+                return EventResult::Ignored;
+            };
+            node.widget.event(event, layout_rect, event_ctx)
         };
-        node.widget.event(event, layout_rect, event_ctx)
+        // Bind any pointer-capture request the handler made to this node (so a
+        // `MouseDown` that starts a drag captures the pointer for it).
+        self.apply_capture_change(idx, event_ctx);
+        result
+    }
+
+    /// Apply a pointer-capture request a widget made during its `event`
+    /// handler. `node` is the widget that just handled the event, so an
+    /// acquire binds the capture to it; a release clears the capture only
+    /// when it currently belongs to that node.
+    fn apply_capture_change(&mut self, node: usize, event_ctx: &mut EventContext) {
+        match event_ctx.take_capture_change() {
+            Some(true) => self.pointer_capture = Some(node),
+            // Only the capturing widget can release its own capture.
+            Some(false) if self.pointer_capture == Some(node) => self.pointer_capture = None,
+            _ => {}
+        }
+    }
+
+    /// Coordinate delta that maps a viewport-space pointer position into
+    /// `idx`'s local event space — the same shift the recursive dispatch
+    /// accumulates on the way down: minus the active layer `offset`, plus
+    /// every proper ancestor's scroll offset. Used to deliver captured
+    /// pointer events (which skip the walk) in the widget's own space.
+    fn pointer_offset_for(&self, idx: usize, layer_offset: (f32, f32)) -> (f32, f32) {
+        let mut dx = -layer_offset.0;
+        let mut dy = -layer_offset.1;
+        let mut cur = self.node(idx).and_then(|n| n.parent);
+        while let Some(a) = cur {
+            let Some(node) = self.node(a) else { break };
+            let (sx, sy) = node.widget.scroll_offset();
+            dx += sx;
+            dy += sy;
+            cur = node.parent;
+        }
+        (dx, dy)
     }
 
     /// Get the layout rectangle for a widget.

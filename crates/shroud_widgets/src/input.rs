@@ -1096,6 +1096,10 @@ impl Widget for Input {
                     self.pending_word_select.set(is_double);
                     self.selecting.set(true);
                     self.desired_col.set(None);
+                    // Capture the pointer so the drag keeps being delivered
+                    // (and is reliably ended) even when the cursor leaves the
+                    // field's rect — the tree routes MouseMove/Up straight here.
+                    ctx.capture_pointer();
                 }
                 EventResult::Consumed
             }
@@ -1108,8 +1112,16 @@ impl Widget for Input {
             }
 
             WidgetEvent::MouseUp { .. } => {
-                self.selecting.set(false);
-                EventResult::Ignored
+                // End of a drag (or a plain click): drop the capture and stop
+                // extending. Consume only when we were actually dragging, so a
+                // release that wasn't ours doesn't shadow another handler.
+                let was_selecting = self.selecting.replace(false);
+                if was_selecting {
+                    ctx.release_pointer();
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
 
             WidgetEvent::FocusGained => {
@@ -1119,7 +1131,11 @@ impl Widget for Input {
 
             WidgetEvent::FocusLost => {
                 self.focused = false;
-                self.selecting.set(false);
+                // Releasing focus mid-drag (e.g. programmatic refocus) ends the
+                // drag; drop the capture too so it can't outlive the selection.
+                if self.selecting.replace(false) {
+                    ctx.release_pointer();
+                }
                 self.pending_word_select.set(false);
                 self.desired_col.set(None);
                 if self.numeric {

@@ -271,6 +271,13 @@ pub struct EventContext {
     /// drains it after dispatch and writes it to the OS clipboard — widgets
     /// have no direct clipboard access. `None` when nothing was copied.
     pub(crate) clipboard_write: Option<String>,
+    /// Pointer-capture request a handler made this dispatch:
+    /// `Some(true)` = capture the pointer for the widget that is currently
+    /// handling the event, `Some(false)` = release it, `None` = no change.
+    /// The tree binds an acquire to the dispatched-to widget and routes
+    /// subsequent `MouseMove` / `MouseUp` straight to it. See
+    /// [`Self::capture_pointer`].
+    pub(crate) capture_change: Option<bool>,
 }
 
 impl EventContext {
@@ -279,6 +286,7 @@ impl EventContext {
             modifiers: Modifiers::default(),
             commands: Vec::new(),
             clipboard_write: None,
+            capture_change: None,
         }
     }
 
@@ -427,6 +435,33 @@ impl EventContext {
     /// dispatch wins. Used by [`Input`](crate::Input)'s Ctrl+C / Ctrl+X.
     pub fn write_clipboard(&mut self, text: impl Into<String>) {
         self.clipboard_write = Some(text.into());
+    }
+
+    /// Capture the pointer for the widget currently handling the event.
+    ///
+    /// While captured, the tree routes every `MouseMove` and `MouseUp`
+    /// straight to this widget — bypassing hit-testing — so a drag keeps
+    /// being delivered even when the cursor leaves the widget's rect. Call
+    /// from a `MouseDown` handler that begins a drag (e.g. `Input`'s
+    /// drag-select); pair with [`Self::release_pointer`] on `MouseUp`.
+    /// Capture is also dropped automatically if the widget is removed.
+    pub fn capture_pointer(&mut self) {
+        self.capture_change = Some(true);
+    }
+
+    /// Release a pointer capture taken via [`Self::capture_pointer`].
+    ///
+    /// No-op unless this widget currently holds the capture. Call from the
+    /// `MouseUp` handler that ends the drag.
+    pub fn release_pointer(&mut self) {
+        self.capture_change = Some(false);
+    }
+
+    /// Take any pending pointer-capture change requested this dispatch.
+    /// Intended for `WidgetTree` to call right after a widget's `event`
+    /// returns, so an acquire binds to that widget. Leaves `None` behind.
+    pub(crate) fn take_capture_change(&mut self) -> Option<bool> {
+        self.capture_change.take()
     }
 
     /// Drain queued commands. Intended for `WidgetTree` to call after a

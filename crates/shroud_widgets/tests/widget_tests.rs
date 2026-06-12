@@ -6362,3 +6362,140 @@ fn external_value_change_clears_selection() {
     assert_eq!(input.value_clone(), "hello world");
     assert_eq!(sel.get(), None);
 }
+
+// ── Pointer capture (drag-select past the widget rect) ─────────────
+//
+// An Input that begins a drag captures the pointer so MouseMove / MouseUp
+// keep reaching it even when the cursor leaves its rect. Without capture the
+// tree's hit-test would drop those events: the drag would freeze at the edge
+// and a release outside would be missed, leaving the field stuck "selecting".
+
+#[test]
+fn input_mousedown_captures_pointer() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(200.0));
+    let idx = tree.add_child(root, Input::new().with_value("hello"));
+    tree.compute_layout(400.0, 200.0);
+    let rect = tree.layout_rect(idx);
+    let mut ctx = EventContext::new();
+
+    assert_eq!(tree.pointer_capture(), None);
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+    assert_eq!(
+        tree.pointer_capture(),
+        Some(idx),
+        "starting a drag captures the pointer for the input"
+    );
+}
+
+#[test]
+fn mouseup_outside_rect_is_routed_and_releases_capture() {
+    // The release lands well below the input — a normal hit-test would miss
+    // it, but the capture routes it to the input so the drag ends cleanly.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(400.0));
+    let idx = tree.add_child(root, Input::new().with_value("hello"));
+    tree.compute_layout(400.0, 400.0);
+    let rect = tree.layout_rect(idx);
+    let mut ctx = EventContext::new();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+    assert_eq!(tree.pointer_capture(), Some(idx));
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseUp {
+            position: Point::new(rect.origin.x + 5.0, rect.bottom() + 80.0),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+    assert_eq!(
+        tree.pointer_capture(),
+        None,
+        "a captured MouseUp outside the rect still reaches the input and releases"
+    );
+}
+
+#[test]
+fn drag_extends_selection_past_the_rect() {
+    use shroud_text::TextEngine;
+    // End-to-end: press at the start of the text, drag far to the right
+    // (outside the field), and the selection must reach the end — proving the
+    // out-of-rect MouseMove was delivered to the captured input rather than
+    // dropped by the hit-test.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(120.0));
+    let idx = tree.add_child(root, Input::new().with_value("hello world"));
+    let theme = Theme::default();
+    let mut engine = TextEngine::new();
+    tree.compute_layout_with_measure(200.0, 120.0, &mut engine, &theme);
+    let rect = tree.layout_rect(idx);
+    let mid_y = rect.origin.y + rect.size.height * 0.5;
+    let mut ctx = EventContext::new();
+
+    // Press at the left edge → caret collapses to offset 0.
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 1.0, mid_y),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+    let mut paint = PaintContext::new(theme.clone());
+    tree.paint(&mut paint);
+
+    // Drag far to the right, well past the field's right edge.
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(rect.right() + 200.0, mid_y),
+        },
+        &mut ctx,
+    );
+    let mut paint2 = PaintContext::new(theme.clone());
+    tree.paint(&mut paint2);
+
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(
+        input.selected_text().as_deref(),
+        Some("hello world"),
+        "dragging past the right edge selects to the end of the text"
+    );
+}
+
+#[test]
+fn removing_captured_input_clears_capture() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(200.0));
+    let idx = tree.add_child(root, Input::new().with_value("hello"));
+    tree.compute_layout(400.0, 200.0);
+    let rect = tree.layout_rect(idx);
+    let mut ctx = EventContext::new();
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+    assert_eq!(tree.pointer_capture(), Some(idx));
+
+    tree.remove(idx);
+    assert_eq!(
+        tree.pointer_capture(),
+        None,
+        "capture must not dangle on a removed widget"
+    );
+}
