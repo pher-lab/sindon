@@ -38,6 +38,7 @@
 //! is mutually exclusive with multi-line mode (the builder asserts in debug).
 
 use std::cell::{Cell, RefCell};
+use std::time::{Duration, Instant};
 
 use crate::event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
@@ -74,6 +75,85 @@ fn is_cmd_combo(mods: Modifiers) -> bool {
     let ctrl_only = mods.ctrl && !mods.logo;
     let logo_only = mods.logo && !mods.ctrl;
     ctrl_only || logo_only
+}
+
+/// Maximum gap between two primary-button presses for them to count as a
+/// double-click (word select). Matches the Windows default double-click time.
+const DOUBLE_CLICK_MAX: Duration = Duration::from_millis(500);
+/// Maximum pointer travel (px, per axis) between the two presses of a
+/// double-click. A press that lands further away starts a fresh selection
+/// instead of extending the first into a word select.
+const DOUBLE_CLICK_SLOP: f32 = 4.0;
+
+/// Character class used by double-click word expansion. A double-click selects
+/// the maximal run of same-class characters under the caret, so a click in a
+/// word grabs the word, a click in whitespace grabs the gap, and a click in a
+/// punctuation run grabs that run.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum CharClass {
+    /// Alphanumeric or `_` — the "word" characters.
+    Word,
+    /// Whitespace (including `\n`, so word runs never cross a hard line break).
+    Space,
+    /// Everything else (punctuation, symbols).
+    Other,
+}
+
+fn classify(c: char) -> CharClass {
+    if c.is_alphanumeric() || c == '_' {
+        CharClass::Word
+    } else if c.is_whitespace() {
+        CharClass::Space
+    } else {
+        CharClass::Other
+    }
+}
+
+/// Expand a caret `offset` to the byte range of the "word" under it, used by
+/// double-click selection. The reference class is the character to the right of
+/// the caret, except when that is whitespace (or we're at end-of-text): then we
+/// look left, so clicking at a word's trailing edge still grabs the word rather
+/// than the following gap. `offset` is clamped and treated as a char boundary;
+/// expansion always stops on char boundaries, so multibyte text is safe.
+fn word_bounds(s: &str, offset: usize) -> (usize, usize) {
+    if s.is_empty() {
+        return (0, 0);
+    }
+    let offset = offset.min(s.len());
+    let right = s[offset..].chars().next();
+    let left = s[..offset].chars().next_back();
+    // Prefer a non-space reference so a click between a word and a trailing
+    // space selects the word, not the space.
+    let use_left = match (left, right) {
+        (Some(l), Some(r)) => classify(r) == CharClass::Space && classify(l) != CharClass::Space,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => return (0, 0),
+    };
+    let ref_class = if use_left {
+        classify(left.unwrap())
+    } else {
+        classify(right.unwrap())
+    };
+    let mut lo = offset;
+    while lo > 0 {
+        let prev = s[..lo].chars().next_back().unwrap();
+        if classify(prev) == ref_class {
+            lo -= prev.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let mut hi = offset;
+    while hi < s.len() {
+        let next = s[hi..].chars().next().unwrap();
+        if classify(next) == ref_class {
+            hi += next.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (lo, hi)
 }
 
 /// Clamp `v` to the inclusive `[min, max]` range when either bound is set.
@@ -117,6 +197,14 @@ pub struct Input {
     /// cleared on MouseUp / FocusLost. While set, MouseMove extends the
     /// selection's active end.
     selecting: Cell<bool>,
+    /// Timestamp + position of the last primary press, used to recognize a
+    /// double-click. A second press within [`DOUBLE_CLICK_MAX`] and
+    /// [`DOUBLE_CLICK_SLOP`] of the first promotes the pending hit to a word
+    /// select. Reset after a double fires so a triple-click doesn't chain.
+    last_click: Cell<Option<(Instant, Point)>>,
+    /// Set on a recognized double-click; consumed at paint time to expand the
+    /// resolved caret offset to the surrounding word via [`word_bounds`].
+    pending_word_select: Cell<bool>,
     /// Optional external binding. When `Some`, every paint and event
     /// rebases `value` from the signal if they differ, and every edit
     /// writes the fresh buffer back.
@@ -203,6 +291,8 @@ impl Input {
             selection_anchor: Cell::new(None),
             pending_hit: Cell::new(None),
             selecting: Cell::new(false),
+            last_click: Cell::new(None),
+            pending_word_select: Cell::new(false),
             source: None,
             cursor_source: None,
             selection_source: None,
@@ -850,12 +940,22 @@ impl Widget for Input {
                     wrap_width,
                 )
             };
-            if extend {
-                self.ensure_anchor();
+            if self.pending_word_select.take() {
+                // Double-click: select the whole word under the resolved caret.
+                let (lo, hi) = {
+                    let v = self.value.borrow();
+                    word_bounds(&v, offset)
+                };
+                self.selection_anchor.set(Some(lo));
+                self.cursor.set(hi);
             } else {
-                self.selection_anchor.set(None);
+                if extend {
+                    self.ensure_anchor();
+                } else {
+                    self.selection_anchor.set(None);
+                }
+                self.cursor.set(offset);
             }
-            self.cursor.set(offset);
             self.desired_col.set(None);
             // Mirror the moved caret + selection so bound signals (and the next
             // event's `sync_from_source`) agree with the paint-resolved hit.
@@ -977,7 +1077,23 @@ impl Widget for Input {
                 // follows Shift, so Shift+click stretches the selection from
                 // the current caret to the click point.
                 if *button == MouseButton::Left {
+                    // Recognize a double-click (two quick presses at the same
+                    // spot) and promote it to a word select, resolved at paint.
+                    let now = Instant::now();
+                    let is_double = self.last_click.get().is_some_and(|(t, p)| {
+                        now.duration_since(t) <= DOUBLE_CLICK_MAX
+                            && (p.x - position.x).abs() <= DOUBLE_CLICK_SLOP
+                            && (p.y - position.y).abs() <= DOUBLE_CLICK_SLOP
+                    });
+                    // Reset the chain after a double so a third press starts
+                    // fresh rather than registering as another double.
+                    self.last_click.set(if is_double {
+                        None
+                    } else {
+                        Some((now, *position))
+                    });
                     self.pending_hit.set(Some((*position, ctx.modifiers.shift)));
+                    self.pending_word_select.set(is_double);
                     self.selecting.set(true);
                     self.desired_col.set(None);
                 }
@@ -1004,6 +1120,7 @@ impl Widget for Input {
             WidgetEvent::FocusLost => {
                 self.focused = false;
                 self.selecting.set(false);
+                self.pending_word_select.set(false);
                 self.desired_col.set(None);
                 if self.numeric {
                     self.canonicalize_numeric_buffer();
@@ -1313,5 +1430,66 @@ impl Widget for Input {
         self.push_cursor_to_source();
         self.push_selection_to_source();
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_bounds;
+
+    #[test]
+    fn word_bounds_grabs_word_from_middle() {
+        // Caret inside "hello" expands to the whole word.
+        assert_eq!(word_bounds("hello world", 2), (0, 5));
+        assert_eq!(word_bounds("hello world", 8), (6, 11));
+    }
+
+    #[test]
+    fn word_bounds_trailing_edge_prefers_word_over_gap() {
+        // Caret between "hello" and the space: looking right would grab the
+        // space, so we look left and select the word.
+        assert_eq!(word_bounds("hello world", 5), (0, 5));
+    }
+
+    #[test]
+    fn word_bounds_on_whitespace_selects_the_gap() {
+        // Caret inside a run of spaces selects the run, not an adjacent word.
+        assert_eq!(word_bounds("a    b", 3), (1, 5));
+    }
+
+    #[test]
+    fn word_bounds_groups_punctuation_run() {
+        // A run of punctuation is its own class.
+        assert_eq!(word_bounds("a...b", 2), (1, 4));
+    }
+
+    #[test]
+    fn word_bounds_does_not_cross_newline() {
+        // `\n` is whitespace, so a word run stops at the line break.
+        assert_eq!(word_bounds("foo\nbar", 5), (4, 7));
+        assert_eq!(word_bounds("foo\nbar", 1), (0, 3));
+    }
+
+    #[test]
+    fn word_bounds_respects_char_boundaries() {
+        // Each kana is 3 UTF-8 bytes; the run is alphanumeric so all three are
+        // selected, and the boundaries land on char starts (0 and 9).
+        assert_eq!(word_bounds("あいう", 3), (0, 9));
+    }
+
+    #[test]
+    fn word_bounds_at_end_of_text_looks_left() {
+        assert_eq!(word_bounds("hello", 5), (0, 5));
+    }
+
+    #[test]
+    fn word_bounds_empty_string_is_origin() {
+        assert_eq!(word_bounds("", 0), (0, 0));
+    }
+
+    #[test]
+    fn word_bounds_underscore_is_word_char() {
+        // Identifiers with underscores select as one word.
+        assert_eq!(word_bounds("foo_bar baz", 4), (0, 7));
     }
 }
