@@ -841,3 +841,120 @@ fn shape_rich_wrap_breaks_inside_long_attributed_span() {
         wrapped.width
     );
 }
+
+// --- Shape cache (added with the unified measure+paint shaping cache) --------
+//
+// These guard the *observable* contract: a cache hit returns geometry identical
+// to a cold shape, and every input that changes the output is part of the key
+// (a missing key dimension would surface as a wrong-but-confident cache hit).
+// The cache's internal mechanics (population, eviction, clear) are unit-tested
+// inside `engine.rs`.
+
+/// Compare two shaping results for full geometric equality.
+fn assert_shaped_eq(a: &shroud_text::ShapedText, b: &shroud_text::ShapedText, ctx: &str) {
+    assert_eq!(a.glyphs.len(), b.glyphs.len(), "{ctx}: glyph count");
+    assert_eq!(a.width, b.width, "{ctx}: width");
+    assert_eq!(a.height, b.height, "{ctx}: height");
+    for (i, (ga, gb)) in a.glyphs.iter().zip(b.glyphs.iter()).enumerate() {
+        assert_eq!(ga.cache_key, gb.cache_key, "{ctx}: glyph {i} cache_key");
+        assert_eq!(ga.x, gb.x, "{ctx}: glyph {i} x");
+        assert_eq!(ga.y, gb.y, "{ctx}: glyph {i} y");
+    }
+}
+
+#[test]
+fn cache_hit_matches_a_cold_shape() {
+    // A fresh engine shapes the text once (cold). A second engine shapes it,
+    // then shapes it again (the warm, cache-served call). The warm result must
+    // be byte-for-byte the cold one — the whole point of the cache.
+    let mut cold = TextEngine::new();
+    let reference = cold.shape_text("The quick brown fox", 16.0, 20.0, Some(120.0));
+
+    let mut warm = TextEngine::new();
+    let _ = warm.shape_text("The quick brown fox", 16.0, 20.0, Some(120.0));
+    let hit = warm.shape_text("The quick brown fox", 16.0, 20.0, Some(120.0));
+
+    assert_shaped_eq(&hit, &reference, "warm cache hit vs cold shape");
+}
+
+#[test]
+fn cache_key_distinguishes_max_width() {
+    // A long line shaped unwrapped, then wrapped narrow: if max_width were left
+    // out of the key, the second call would wrongly return the unwrapped result
+    // (same height). The wrapped one must be taller.
+    let mut engine = TextEngine::new();
+    let text = "wrapping must change the cached result not reuse it";
+    let unwrapped = engine.shape_text(text, 16.0, 20.0, None);
+    let wrapped = engine.shape_text(text, 16.0, 20.0, Some(80.0));
+    assert!(
+        wrapped.height > unwrapped.height,
+        "wrapped (h={}) must differ from unwrapped (h={}) — max_width must be in the key",
+        wrapped.height,
+        unwrapped.height
+    );
+}
+
+#[test]
+fn cache_key_distinguishes_font_size() {
+    let mut engine = TextEngine::new();
+    let small = engine.shape_text("Hello", 16.0, 20.0, None);
+    let large = engine.shape_text("Hello", 32.0, 40.0, None);
+    assert!(
+        large.width > small.width,
+        "32px (w={}) must not reuse 16px (w={}) — metrics must be in the key",
+        large.width,
+        small.width
+    );
+}
+
+#[test]
+fn cache_key_distinguishes_attrs() {
+    // Same text, different weight. A bold glyph comes from a different font
+    // instance, so its cache_key differs from the normal one. If attrs were not
+    // keyed, the bold call would return the normal cached glyphs (equal keys).
+    let mut engine = TextEngine::new();
+    let normal = engine.shape_text_attrs("Hello", 16.0, 20.0, None, &TextAttrs::default());
+    let bold = engine.shape_text_attrs(
+        "Hello",
+        16.0,
+        20.0,
+        None,
+        &TextAttrs::default().weight(FontWeight::BOLD),
+    );
+    assert!(!normal.glyphs.is_empty() && !bold.glyphs.is_empty());
+    assert_ne!(
+        normal.glyphs[0].cache_key, bold.glyphs[0].cache_key,
+        "bold must not reuse the normal-weight cached glyphs — attrs must be in the key"
+    );
+}
+
+#[test]
+fn rich_cache_hit_matches_cold_shape() {
+    let spans = vec![
+        TextSpan::new("plain "),
+        TextSpan::new("bold").bold(),
+        TextSpan::new(" tail"),
+    ];
+    let mut cold = TextEngine::new();
+    let reference = cold.shape_rich(&spans, 16.0, 20.0, Some(200.0));
+
+    let mut warm = TextEngine::new();
+    let _ = warm.shape_rich(&spans, 16.0, 20.0, Some(200.0));
+    let hit = warm.shape_rich(&spans, 16.0, 20.0, Some(200.0));
+
+    assert_shaped_eq(&hit, &reference, "rich warm cache hit vs cold shape");
+    assert_eq!(
+        hit.span_boxes.len(),
+        reference.span_boxes.len(),
+        "rich cache hit must preserve span boxes"
+    );
+}
+
+#[test]
+fn clear_shape_cache_preserves_correctness() {
+    let mut engine = TextEngine::new();
+    let before = engine.shape_text("round trip", 16.0, 20.0, None);
+    engine.clear_shape_cache();
+    let after = engine.shape_text("round trip", 16.0, 20.0, None);
+    assert_shaped_eq(&after, &before, "shape after clear");
+}

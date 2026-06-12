@@ -107,6 +107,12 @@ pub struct WidgetTree {
     /// transition, matching the per-screen lifetime of the signals such a
     /// handler captures.
     image_paste_handler: Option<ImagePasteHandler>,
+    /// Set when [`Self::replace_root`] swaps the root subtree, consumed by the
+    /// event loop via [`Self::take_root_replaced`] before the next layout. Lets
+    /// the loop drop the text engine's shape cache on a screen swap so glyph
+    /// geometry derived from one screen's text — the user's plaintext, for a
+    /// notes app — does not outlive the screen that produced it.
+    root_replaced: bool,
 }
 
 /// Handler for an OS file drop onto the window — receives the dropped
@@ -200,6 +206,7 @@ impl WidgetTree {
             focus: FocusManager::new(),
             pending_initial_focus: None,
             layers: Vec::new(),
+            root_replaced: false,
             viewport: (0.0, 0.0),
             shortcuts: ShortcutRouter::new(),
             file_drop_handler: None,
@@ -551,6 +558,10 @@ impl WidgetTree {
         if let Some(old) = self.root {
             self.remove(old);
         }
+        // Signal the event loop to drop the shape cache before the next layout:
+        // the old screen's text (plaintext, for a notes app) is gone, so its
+        // cached glyph geometry should not linger.
+        self.root_replaced = true;
         self.set_root_boxed(widget)
     }
 
@@ -1879,6 +1890,16 @@ impl WidgetTree {
     /// Index of the current root widget, if set.
     pub fn root(&self) -> Option<usize> {
         self.root
+    }
+
+    /// Consume the "root was replaced" flag, returning whether a root swap has
+    /// happened since the last call and clearing it.
+    ///
+    /// The event loop calls this once before each layout to decide whether to
+    /// drop the text engine's shape cache (a screen swap, e.g. a vault lock,
+    /// invalidates the previous screen's cached glyph geometry).
+    pub fn take_root_replaced(&mut self) -> bool {
+        std::mem::take(&mut self.root_replaced)
     }
 }
 

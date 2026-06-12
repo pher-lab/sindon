@@ -112,9 +112,15 @@ impl Widget for SecureText {
                 return;
             }
 
-            let shaped =
-                ctx.text_engine
-                    .shape_text(text, font_size, line_height, Some(layout_width));
+            // Uncached: the shaped glyphs encode the revealed secret, so they
+            // must never be retained in the shape cache (unlike masked /
+            // note-body text, which is cacheable).
+            let shaped = ctx.text_engine.shape_text_uncached(
+                text,
+                font_size,
+                line_height,
+                Some(layout_width),
+            );
 
             for glyph in &shaped.glyphs {
                 if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {

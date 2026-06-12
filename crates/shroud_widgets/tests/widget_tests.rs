@@ -3125,6 +3125,30 @@ fn tree_replace_root_drops_old_subtree() {
 }
 
 #[test]
+fn replace_root_flags_a_swap_for_the_shape_cache() {
+    // The event loop reads this flag to drop the shape cache on a screen swap
+    // (e.g. a vault lock), so glyph geometry derived from the old screen's
+    // plaintext does not outlive it. It must be one-shot: set by replace_root,
+    // cleared on read, and never set by a plain set_root / add_child.
+    let mut tree = WidgetTree::new();
+    tree.set_root(Container::column().width(10.0).height(10.0));
+    assert!(
+        !tree.take_root_replaced(),
+        "the initial set_root is not a swap"
+    );
+
+    tree.add_child(tree.root().unwrap(), TextWidget::new("child"));
+    assert!(!tree.take_root_replaced(), "adding a child is not a swap");
+
+    tree.replace_root(Container::column().width(20.0).height(20.0));
+    assert!(tree.take_root_replaced(), "replace_root flags a swap");
+    assert!(
+        !tree.take_root_replaced(),
+        "the flag is one-shot: cleared on read"
+    );
+}
+
+#[test]
 fn event_handler_can_queue_remove_via_context() {
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(400.0).height(200.0));

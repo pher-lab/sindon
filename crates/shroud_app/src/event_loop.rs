@@ -1123,6 +1123,15 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 // `tree.focus_initially(...)`.
                 tree.flush_pending_focus(&mut self.event_ctx);
 
+                // A screen swap (e.g. an auto-lock replacing the vault with the
+                // lock screen) invalidates the shape cache: its glyph geometry
+                // was derived from the old screen's text, which for a notes app
+                // is the user's plaintext. Drop it before re-shaping the new
+                // screen so nothing note-derived outlives the lock.
+                if tree.take_root_replaced() {
+                    paint_ctx.text_engine.clear_shape_cache();
+                }
+
                 // Layout pass — widgets report intrinsic size via their
                 // `measure()` so `.center()` / gap / grow work without a
                 // fixed-width wrapper around leaves.

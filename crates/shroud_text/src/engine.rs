@@ -1,9 +1,12 @@
 //! Core text engine: shaping + rasterization.
 
-use crate::attrs::TextAttrs;
+use crate::attrs::{FontStyle, TextAttrs};
 use crate::span::{TextSpan, cosmic_to_shroud, shroud_to_cosmic};
 use cosmic_text::{Buffer, Cursor, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
 use shroud_core::{Color, Rect};
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// A positioned glyph ready for rasterization.
 #[derive(Debug, Clone)]
@@ -58,7 +61,12 @@ pub struct DecorationLine {
 }
 
 /// Result of shaping a text string.
-#[derive(Debug)]
+///
+/// `Clone` so the shape cache can hand back an owned copy on a hit without
+/// re-borrowing the engine: callers iterate the glyphs while also calling
+/// `rasterize(&mut self)`, so a borrowed return would conflict. The clone is a
+/// few `Vec` copies (glyph keys + positions) — far cheaper than re-shaping.
+#[derive(Debug, Clone)]
 pub struct ShapedText {
     /// Positioned glyphs in draw order.
     pub glyphs: Vec<ShapedGlyph>,
@@ -105,6 +113,145 @@ impl std::fmt::Debug for GlyphImage {
     }
 }
 
+/// Max number of distinct shaping results held by [`TextEngine`]'s cache.
+///
+/// One entry per `(text, attrs, metrics, wrap-width)` tuple. The hot case — a
+/// markdown preview repainted every idle tick — touches its whole paragraph
+/// set each frame, so the cache only helps when that set fits; this covers
+/// notes up to several hundred paragraphs (each shaped at its natural and
+/// wrapped widths). Past the cap, least-recently-used entries are evicted and
+/// re-shaped on demand, degrading gracefully rather than growing unbounded.
+const SHAPE_CACHE_CAP: usize = 1024;
+
+/// Bounded, least-recently-used cache of shaping results.
+///
+/// Keyed by a 64-bit digest of the shaping inputs (text + attrs + metrics +
+/// wrap width), never the source string — so the cache stores no plaintext in
+/// its keys. The cached [`ShapedText`] holds glyph cache-keys and pixel
+/// positions (not the text), and the whole cache is dropped on a screen swap
+/// (e.g. a vault lock) so nothing note-derived outlives the screen that made
+/// it. Secret reveals (`SecureText`) bypass the cache entirely via the
+/// `*_uncached` shaping entry points.
+struct ShapeCache {
+    /// digest -> (result, last-touched logical clock).
+    map: HashMap<u64, (ShapedText, u64)>,
+    clock: u64,
+}
+
+impl ShapeCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            clock: 0,
+        }
+    }
+
+    /// Return an owned copy of the cached result for `key`, bumping its
+    /// recency, or `None` on a miss.
+    fn get(&mut self, key: u64) -> Option<ShapedText> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.map.get_mut(&key).map(|entry| {
+            entry.1 = clock;
+            entry.0.clone()
+        })
+    }
+
+    /// Insert `value` under `key`, evicting the least-recently-used entry first
+    /// if a *new* key would push the map past the cap.
+    fn insert(&mut self, key: u64, value: ShapedText) {
+        self.clock += 1;
+        let clock = self.clock;
+        if self.map.len() >= SHAPE_CACHE_CAP && !self.map.contains_key(&key) {
+            if let Some((&lru, _)) = self.map.iter().min_by_key(|(_, (_, used))| *used) {
+                self.map.remove(&lru);
+            }
+        }
+        self.map.insert(key, (value, clock));
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+    }
+}
+
+/// Fold the per-span style inputs that change the shaped output into `h`.
+/// `link` is deliberately excluded — it never affects glyphs or boxes (the
+/// widget maps a span index back to its link from the live span list, not the
+/// cache).
+fn hash_attrs(attrs: &TextAttrs, h: &mut DefaultHasher) {
+    attrs.family.hash(h);
+    attrs.weight.0.hash(h);
+    // `FontStyle` (cosmic-text's `Style`) has no `Hash`; map to a discriminant.
+    let style_tag: u8 = match attrs.style {
+        FontStyle::Normal => 0,
+        FontStyle::Italic => 1,
+        FontStyle::Oblique => 2,
+    };
+    style_tag.hash(h);
+}
+
+fn hash_metrics(font_size: f32, line_height: f32, max_width: Option<f32>, h: &mut DefaultHasher) {
+    font_size.to_bits().hash(h);
+    line_height.to_bits().hash(h);
+    match max_width {
+        Some(w) => {
+            1u8.hash(h);
+            w.to_bits().hash(h);
+        }
+        None => 0u8.hash(h),
+    }
+}
+
+/// Digest for a single-attrs (plain) shaping call. Domain-tagged `0` so it can
+/// never collide with a rich digest of the same text.
+fn shape_key_plain(
+    text: &str,
+    font_size: f32,
+    line_height: f32,
+    max_width: Option<f32>,
+    attrs: &TextAttrs,
+) -> u64 {
+    let mut h = DefaultHasher::new();
+    0u8.hash(&mut h);
+    text.hash(&mut h);
+    hash_attrs(attrs, &mut h);
+    hash_metrics(font_size, line_height, max_width, &mut h);
+    h.finish()
+}
+
+/// Digest for a rich (multi-span) shaping call. Domain-tagged `1`. Folds every
+/// input that moves a glyph or a decoration: each span's text, attrs, color,
+/// and decoration flags, plus the shared metrics.
+fn shape_key_rich(
+    spans: &[TextSpan],
+    font_size: f32,
+    line_height: f32,
+    max_width: Option<f32>,
+) -> u64 {
+    let mut h = DefaultHasher::new();
+    1u8.hash(&mut h);
+    spans.len().hash(&mut h);
+    for s in spans {
+        s.text.hash(&mut h);
+        hash_attrs(&s.attrs, &mut h);
+        match s.color {
+            Some(c) => {
+                1u8.hash(&mut h);
+                c.r.to_bits().hash(&mut h);
+                c.g.to_bits().hash(&mut h);
+                c.b.to_bits().hash(&mut h);
+                c.a.to_bits().hash(&mut h);
+            }
+            None => 0u8.hash(&mut h),
+        }
+        s.decoration.underline.hash(&mut h);
+        s.decoration.strikethrough.hash(&mut h);
+    }
+    hash_metrics(font_size, line_height, max_width, &mut h);
+    h.finish()
+}
+
 /// Text engine: owns the font system and glyph cache.
 ///
 /// Create one per application. Not Send — cosmic-text's FontSystem is not
@@ -112,6 +259,7 @@ impl std::fmt::Debug for GlyphImage {
 pub struct TextEngine {
     font_system: FontSystem,
     swash_cache: SwashCache,
+    shape_cache: ShapeCache,
 }
 
 impl Default for TextEngine {
@@ -126,7 +274,19 @@ impl TextEngine {
         Self {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
+            shape_cache: ShapeCache::new(),
         }
+    }
+
+    /// Drop every cached shaping result.
+    ///
+    /// Called on a screen swap (the framework clears it when the tree root is
+    /// replaced) so glyph geometry derived from one screen's text — which for a
+    /// notes app is the user's plaintext — does not outlive that screen. Also
+    /// the escape hatch if a font is registered at runtime and previously-shaped
+    /// text should be re-evaluated against it.
+    pub fn clear_shape_cache(&mut self) {
+        self.shape_cache.clear();
     }
 
     /// Access the underlying FontSystem (for advanced usage).
@@ -162,7 +322,54 @@ impl TextEngine {
     /// `max_width`: optional max width for line wrapping.
     /// `attrs`: family / weight / style. Default attrs match cosmic-text's
     /// `Attrs::new()`.
+    ///
+    /// Cached: identical inputs return a cloned previous result instead of
+    /// re-shaping. This is what keeps a markdown preview cheap to repaint every
+    /// idle tick — unchanged paragraphs become an `O(1)` lookup. Secret reveals
+    /// must use [`shape_text_uncached`](Self::shape_text_uncached) so they never
+    /// land in the cache.
     pub fn shape_text_attrs(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> ShapedText {
+        let key = shape_key_plain(text, font_size, line_height, max_width, attrs);
+        if let Some(hit) = self.shape_cache.get(key) {
+            return hit;
+        }
+        let shaped = self.shape_text_attrs_uncached(text, font_size, line_height, max_width, attrs);
+        self.shape_cache.insert(key, shaped.clone());
+        shaped
+    }
+
+    /// Shape plain text with default attributes, **bypassing the cache**.
+    ///
+    /// For `SecureText`'s transient secret reveal: the shaped glyphs encode the
+    /// secret, so they must not be retained in the cache. Masked widgets
+    /// (`SecureInput`) shape only the mask string and can use the cached path.
+    pub fn shape_text_uncached(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> ShapedText {
+        self.shape_text_attrs_uncached(
+            text,
+            font_size,
+            line_height,
+            max_width,
+            &TextAttrs::default(),
+        )
+    }
+
+    /// Shape into positioned glyphs without consulting or populating the cache.
+    /// The cached [`shape_text_attrs`](Self::shape_text_attrs) is a thin wrapper
+    /// over this.
+    fn shape_text_attrs_uncached(
         &mut self,
         text: &str,
         font_size: f32,
@@ -226,7 +433,30 @@ impl TextEngine {
     /// Wraps inside a single span when needed (the whole reason this exists
     /// rather than `Container::row().flex_wrap()` of per-run `TextWidget`s).
     /// `max_width = None` reports the natural max-content width.
+    ///
+    /// Cached on the full span list (text + attrs + color + decoration) and
+    /// metrics — see [`shape_text_attrs`](Self::shape_text_attrs). This is the
+    /// hot path for markdown previews, where it spares re-shaping every
+    /// paragraph on every idle-tick repaint.
     pub fn shape_rich(
+        &mut self,
+        spans: &[TextSpan],
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> ShapedText {
+        let key = shape_key_rich(spans, font_size, line_height, max_width);
+        if let Some(hit) = self.shape_cache.get(key) {
+            return hit;
+        }
+        let shaped = self.shape_rich_uncached(spans, font_size, line_height, max_width);
+        self.shape_cache.insert(key, shaped.clone());
+        shaped
+    }
+
+    /// Shape a rich run without consulting or populating the cache. The cached
+    /// [`shape_rich`](Self::shape_rich) is a thin wrapper over this.
+    fn shape_rich_uncached(
         &mut self,
         spans: &[TextSpan],
         font_size: f32,
@@ -647,5 +877,80 @@ fn flush_group(
 impl std::fmt::Debug for TextEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TextEngine").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Cache mechanics, exercised against private internals. Observable shaping
+    //! behavior (cache hits return correct results, every key dimension is
+    //! honored) is covered by the integration tests in `text_engine_tests.rs`.
+    use super::*;
+
+    fn empty_shaped() -> ShapedText {
+        ShapedText {
+            glyphs: Vec::new(),
+            width: 0.0,
+            height: 0.0,
+            span_boxes: Vec::new(),
+            decoration_lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn shape_cache_dedups_keys_and_clears() {
+        let mut c = ShapeCache::new();
+        assert_eq!(c.map.len(), 0);
+        c.insert(1, empty_shaped());
+        c.insert(1, empty_shaped()); // same key — replaces, no growth
+        assert_eq!(c.map.len(), 1);
+        c.insert(2, empty_shaped());
+        assert_eq!(c.map.len(), 2);
+        assert!(c.get(1).is_some());
+        assert!(c.get(99).is_none());
+        c.clear();
+        assert_eq!(c.map.len(), 0);
+    }
+
+    #[test]
+    fn shape_cache_evicts_least_recently_used_past_cap() {
+        let mut c = ShapeCache::new();
+        for k in 0..SHAPE_CACHE_CAP as u64 {
+            c.insert(k, empty_shaped());
+        }
+        assert_eq!(c.map.len(), SHAPE_CACHE_CAP);
+        // Touch key 0 so it becomes most-recently-used; key 1 is now the LRU.
+        assert!(c.get(0).is_some());
+        // A brand-new key evicts exactly the LRU and holds the map at the cap.
+        c.insert(u64::MAX, empty_shaped());
+        assert_eq!(c.map.len(), SHAPE_CACHE_CAP);
+        assert!(c.get(0).is_some(), "recently-touched entry must survive");
+        assert!(
+            c.get(1).is_none(),
+            "least-recently-used entry must be evicted"
+        );
+        assert!(c.get(u64::MAX).is_some(), "new entry must be present");
+    }
+
+    #[test]
+    fn cached_path_populates_uncached_path_does_not() {
+        let mut e = TextEngine::new();
+        assert_eq!(e.shape_cache.map.len(), 0);
+
+        let a = e.shape_text("Hello", 16.0, 20.0, None);
+        assert_eq!(e.shape_cache.map.len(), 1, "cached shape must populate");
+
+        // Identical inputs hit the cache: same result, no growth.
+        let b = e.shape_text("Hello", 16.0, 20.0, None);
+        assert_eq!(e.shape_cache.map.len(), 1);
+        assert_eq!(a.glyphs.len(), b.glyphs.len());
+        assert_eq!(a.width, b.width);
+
+        // The secret-reveal path must never deposit glyph geometry in the cache.
+        let _ = e.shape_text_uncached("Secret", 16.0, 20.0, None);
+        assert_eq!(e.shape_cache.map.len(), 1, "uncached must not populate");
+
+        e.clear_shape_cache();
+        assert_eq!(e.shape_cache.map.len(), 0);
     }
 }
