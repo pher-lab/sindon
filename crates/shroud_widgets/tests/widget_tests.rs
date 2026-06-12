@@ -6339,10 +6339,9 @@ fn selection_signal_mirrors_range_to_sibling() {
 }
 
 #[test]
-fn external_value_change_clears_selection() {
-    // When a sibling rewrites the bound value (the toolbar-wrap path), the next
-    // sync rebases the buffer and drops the now-stale selection so it can't
-    // outlive the edit (and the mirror reflects the cleared state).
+fn external_value_change_with_none_signal_clears_selection() {
+    // A sibling that rewrites the value and writes `None` to the selection
+    // signal clears the selection (the caret-only edit path).
     let body = Signal::new(String::from("hello"));
     let sel = Signal::new(None);
     let mut tree = WidgetTree::new();
@@ -6355,12 +6354,67 @@ fn external_value_change_clears_selection() {
     assert!(tree.widget_as::<Input>(idx).unwrap().has_selection());
 
     body.set(String::from("hello world"));
+    sel.set(None);
     // Any event runs `sync_from_source` first, which performs the rebase.
     tree.dispatch_event(&WidgetEvent::FocusGained, &mut ctx);
     let input = tree.widget_as::<Input>(idx).unwrap();
     assert!(!input.has_selection());
     assert_eq!(input.value_clone(), "hello world");
     assert_eq!(sel.get(), None);
+}
+
+#[test]
+fn selection_signal_external_write_reselects_after_value_change() {
+    // The toolbar re-select path: rewrite the value *and* write a fresh range
+    // into the selection signal — the widget adopts it, so the wrapped text
+    // stays selected instead of collapsing to a caret.
+    let body = Signal::new(String::from("hello"));
+    let sel = Signal::new(None);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().value(body).selection_signal(sel));
+    tree.compute_layout(400.0, 100.0);
+    let mut ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut ctx);
+
+    // Simulate a toolbar wrapping "hello" → "**hello**" and re-selecting the
+    // inner text, which now sits at bytes [2, 7).
+    body.set(String::from("**hello**"));
+    sel.set(Some((2, 7)));
+    tree.dispatch_event(&WidgetEvent::FocusGained, &mut ctx);
+
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.value_clone(), "**hello**");
+    assert_eq!(
+        input.selected_text().as_deref(),
+        Some("hello"),
+        "the inner text written back to the signal is re-selected"
+    );
+    // The caret (active end) follows the range's upper bound, and the mirror
+    // settles on the adopted range.
+    assert_eq!(input.cursor(), 7);
+    assert_eq!(sel.get(), Some((2, 7)));
+}
+
+#[test]
+fn selection_signal_external_write_snaps_to_char_boundaries() {
+    // A range whose bounds fall inside multi-byte codepoints is snapped down to
+    // boundaries rather than panicking the paint-side slice. "あい" is 6 bytes;
+    // a write of (1, 4) snaps to (0, 3) = the first kana.
+    let body = Signal::new(String::from("あい"));
+    let sel = Signal::new(None);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().value(body).selection_signal(sel));
+    tree.compute_layout(400.0, 100.0);
+    let mut ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut ctx);
+
+    sel.set(Some((1, 4)));
+    tree.dispatch_event(&WidgetEvent::FocusGained, &mut ctx);
+
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.selected_text().as_deref(), Some("あ"));
 }
 
 // ── Pointer capture (drag-select past the widget rect) ─────────────

@@ -216,11 +216,13 @@ pub struct Input {
     /// boundary). Pairs with [`source`](Self::source) for caret-aware inserts.
     cursor_source: Option<Signal<usize>>,
     /// Optional external binding for the selection range, mirrored to a sibling
-    /// (e.g. a formatting toolbar that wraps the selection). One-way: the widget
-    /// writes its current sorted `Some((lo, hi))` — or `None` when nothing is
-    /// selected — on every event; external writes are not adopted (a caller
-    /// repositions via the value + cursor signals instead, and the widget clears
-    /// its selection when the bound value changes externally).
+    /// (e.g. a formatting toolbar that wraps the selection). Bidirectional,
+    /// like [`cursor_source`](Self::cursor_source): the widget writes its
+    /// current sorted `Some((lo, hi))` — or `None` when nothing is selected —
+    /// on every event, and adopts an external write on the next sync (clamped
+    /// to the buffer, snapped to char boundaries; the caret follows `hi`). A
+    /// caller that rewrites the value should also write the intended post-edit
+    /// selection here — `Some(range)` to re-select, `None` to clear.
     selection_source: Option<Signal<Option<(usize, usize)>>>,
     placeholder: String,
     font_size: Option<f32>,
@@ -374,12 +376,15 @@ impl Input {
     /// `FocusLost`, which fires *before* a clicked toolbar button's handler, so
     /// the toolbar reads the pre-blur selection.
     ///
-    /// One-way: writes to the signal from outside are ignored. To act on the
-    /// selection (e.g. wrap it in `**`), read the range here, then rewrite the
-    /// text via [`value`](Self::value) and reposition the caret via
-    /// [`cursor_signal`](Self::cursor_signal). The widget clears its selection
-    /// whenever the bound value changes externally, so the stale range can't
-    /// outlive the rewrite.
+    /// Bidirectional: an external write is adopted on the next sync (clamped to
+    /// the buffer and snapped to char boundaries, with the caret following the
+    /// range's upper bound). To act on the selection (e.g. wrap it in `**`),
+    /// read the range here, rewrite the text via [`value`](Self::value), then
+    /// write the intended *post-edit* range back — `Some(range)` to re-select
+    /// the new text, `None` to clear. Without an explicit write the selection
+    /// collapses when the value changes (the stale range can't outlive the
+    /// rewrite); the write is what lets a toolbar re-select what it just
+    /// wrapped. Pairs with [`cursor_signal`](Self::cursor_signal) for the caret.
     ///
     /// The signal seeds from the current selection on bind.
     pub fn selection_signal(mut self, signal: Signal<Option<(usize, usize)>>) -> Self {
@@ -733,6 +738,41 @@ impl Input {
                     target -= 1;
                 }
                 self.cursor.set(target);
+            }
+        }
+        // Adopt an externally-set selection range last of all — after the
+        // buffer rebased and the value-change drop above ran — so a caller can
+        // set a fresh selection that survives the edit. This is what lets the
+        // toolbar re-select the inner text it just wrapped: it writes the new
+        // range into the bound signal alongside the new value, and the widget
+        // adopts it here (clamped + char-boundary-snapped) rather than leaving
+        // the collapsed caret the rebase produced. A `None` clears the
+        // selection; the active end (caret) follows the range's upper bound.
+        if let Some(ssrc) = self.selection_source.as_ref() {
+            let remote = ssrc.get();
+            if remote != self.selection_range() {
+                match remote {
+                    Some((lo, hi)) => {
+                        let buf = self.value.borrow();
+                        let snap = |mut i: usize| {
+                            i = i.min(buf.len());
+                            while i > 0 && !buf.is_char_boundary(i) {
+                                i -= 1;
+                            }
+                            i
+                        };
+                        let lo = snap(lo);
+                        let hi = snap(hi).max(lo);
+                        drop(buf);
+                        if lo < hi {
+                            self.selection_anchor.set(Some(lo));
+                            self.cursor.set(hi);
+                        } else {
+                            self.selection_anchor.set(None);
+                        }
+                    }
+                    None => self.selection_anchor.set(None),
+                }
             }
         }
     }
