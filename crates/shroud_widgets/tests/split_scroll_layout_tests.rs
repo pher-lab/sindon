@@ -142,3 +142,94 @@ fn row_without_overflow_hidden_balloons_the_panes() {
         "without the row overflow_hidden the ScrollView balloons to content ({content_h}), got {scroll_h}"
     );
 }
+
+// --- Sidebar chain (the post-unlock shell, distinct from the editor split) ---
+
+/// Replicates the *sidebar* nesting from `vault_screen`:
+/// `column(full) > row(grow) > pane(column, height_full) > [header,
+/// ScrollView(grow) > list(60 lines), settings]`. The grow row sits between the
+/// definite-height shell and the `height_full` pane, and the pane has a trailing
+/// sibling (the settings button) *after* the ScrollView. `row_overflow_hidden`
+/// toggles the fix on that grow row.
+fn build_sidebar_chain(row_overflow_hidden: bool) -> (WidgetTree, usize, usize, usize) {
+    let mut tree = WidgetTree::new();
+    let shell = tree.set_root(Container::column().width(VIEWPORT_W).height(VIEWPORT_H));
+
+    let mut row = Container::row().width_full().grow(1.0);
+    if row_overflow_hidden {
+        row = row.overflow_hidden();
+    }
+    let row = tree.add_child(shell, row);
+
+    let pane = tree.add_child(
+        row,
+        Container::column()
+            .width(260.0)
+            .height_full()
+            .padding(16.0)
+            .gap(12.0),
+    );
+    tree.add_child(pane, TextWidget::new("header"));
+    let scroll = tree.add_child(pane, ScrollView::new().width_full().grow(1.0));
+    let list = tree.add_child(scroll, Container::column().width_full().gap(4.0));
+    for i in 0..60 {
+        tree.add_child(list, TextWidget::new(format!("note {i}")));
+    }
+    let settings = tree.add_child(pane, TextWidget::new("settings"));
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(VIEWPORT_W, VIEWPORT_H, &mut engine, &theme);
+    (tree, scroll, list, settings)
+}
+
+#[test]
+fn sidebar_chain_with_overflow_hidden_clamps_and_keeps_settings_visible() {
+    // The fix: `overflow_hidden` on the grow row pins its automatic minimum to
+    // 0, so it clamps to the shell's height instead of ballooning to the tall
+    // note list. The `height_full` pane stretches to the clamped row, the
+    // ScrollView gets the pane's leftover height (room to scroll), and the
+    // trailing settings button stays inside the window.
+    let (tree, scroll, list, settings) = build_sidebar_chain(true);
+    let scroll_h = tree.layout_rect(scroll).size.height;
+    let list_h = tree.layout_rect(list).size.height;
+    let settings = tree.layout_rect(settings);
+    let settings_bottom = settings.origin.y + settings.size.height;
+
+    assert!(
+        scroll_h <= VIEWPORT_H,
+        "the ScrollView viewport must fit within the window, got {scroll_h}"
+    );
+    assert!(
+        list_h > scroll_h + 50.0,
+        "the note list ({list_h}) must overflow the viewport ({scroll_h}) so it scrolls"
+    );
+    assert!(
+        settings_bottom <= VIEWPORT_H,
+        "the settings button (bottom {settings_bottom}) must stay inside the window ({VIEWPORT_H})"
+    );
+}
+
+#[test]
+fn sidebar_chain_without_overflow_hidden_balloons_and_hides_settings() {
+    // Documents the bug (knot 2026-06-13: sidebar scrollbar never showed, the
+    // wheel did nothing, and the settings button sank off the bottom). Without
+    // `overflow_hidden` on the grow row, the row inherits its tall content as an
+    // automatic minimum, the pane stretches past the window, the ScrollView
+    // balloons to its content (so nothing scrolls / no scrollbar), and the
+    // trailing settings button is pushed below the viewport.
+    let (tree, scroll, list, settings) = build_sidebar_chain(false);
+    let scroll_h = tree.layout_rect(scroll).size.height;
+    let list_h = tree.layout_rect(list).size.height;
+    let settings = tree.layout_rect(settings);
+    let settings_bottom = settings.origin.y + settings.size.height;
+
+    assert!(
+        scroll_h >= list_h,
+        "without overflow_hidden the ScrollView balloons to its content ({list_h}), got {scroll_h}"
+    );
+    assert!(
+        settings_bottom > VIEWPORT_H,
+        "the bug pushes the settings button (bottom {settings_bottom}) below the window ({VIEWPORT_H})"
+    );
+}

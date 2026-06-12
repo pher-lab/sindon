@@ -55,9 +55,23 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     // Root is a column: a dismissable error banner across the top (collapsed to
     // zero height when there's nothing to show), then the main content row
     // (sidebar | editor) that fills the rest.
+    //
+    // `overflow_hidden` on the content row is load-bearing, not cosmetic: the
+    // row grows to fill the shell's height, but a flex item's automatic minimum
+    // size is its content — so a tall note list or a long preview would balloon
+    // the row past the window, every pane (the sidebar's `height_full` column,
+    // the editor) would stretch to that, and the `grow` ScrollViews inside would
+    // have nothing to scroll (no scrollbar, the wheel dead, and the sidebar's
+    // settings button shoved off the bottom). Pinning the row's automatic
+    // minimum to 0 makes it clamp to the allocated height so the panes size it
+    // and the content scrolls inside — the same trick the ScrollView and the
+    // editor's inner split row already use on themselves.
     let shell = tree.set_root(Container::column().width_full().height_full());
     build_error_banner(tree, shell);
-    let root = tree.add_child(shell, Container::row().width_full().grow(1.0));
+    let root = tree.add_child(
+        shell,
+        Container::row().width_full().grow(1.0).overflow_hidden(),
+    );
 
     // Bridges the sidebar (which switches the active note) to the editor's
     // tag chips (which must re-render for the newly selected note). The
