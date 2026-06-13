@@ -695,7 +695,7 @@ impl TextEngine {
     /// `[start, end)` of `text`, one per visual line the range spans.
     ///
     /// Used by `Input` to paint a selection behind the glyphs. Coordinates
-    /// are in the same block-relative space as [`cursor_position`] and the
+    /// are in the same block-relative space as [`cursor_position`](Self::cursor_position) and the
     /// painted glyphs (origin at the block top-left), so a caller adds the
     /// text origin to translate into screen space. `max_width` must match
     /// the render wrap configuration. An empty or inverted range, or empty
