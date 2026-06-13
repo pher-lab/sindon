@@ -53,6 +53,29 @@ fn shape_text_glyph_y_includes_baseline() {
 }
 
 #[test]
+fn baseline_is_independent_of_script_mix() {
+    // Regression for the cosmic-text per-line centering jitter: cosmic derives
+    // the baseline from each line's real fonts' ascent/descent, so an
+    // ASCII-only line and a CJK-containing line landed on different baselines —
+    // the brackets in `[a]` sat lower than in `[あ]`. We override with a fixed
+    // baseline, so the shared leading `[` glyph must land at the same y in both.
+    //
+    // On a runner with no CJK font, `あ` renders as `.notdef` from the *same*
+    // default font, so the inputs coincide and this still passes (it just can't
+    // catch a regression there) — it never fails spuriously.
+    let mut engine = TextEngine::new();
+    let ascii = engine.shape_text("[a]", 24.0, 30.0, None);
+    let cjk = engine.shape_text("[\u{3042}]", 24.0, 30.0, None); // [あ]
+    assert!(!ascii.glyphs.is_empty() && !cjk.glyphs.is_empty());
+    assert_eq!(
+        ascii.glyphs[0].y, cjk.glyphs[0].y,
+        "the leading '[' must share one baseline regardless of script mix \
+         (ascii {} vs cjk {})",
+        ascii.glyphs[0].y, cjk.glyphs[0].y
+    );
+}
+
+#[test]
 fn shape_text_glyph_positions_are_ordered() {
     let mut engine = TextEngine::new();
     let result = engine.shape_text("ABCDEF", 16.0, 20.0, None);

@@ -398,13 +398,17 @@ impl TextEngine {
             total_width = total_width.max(run.line_w);
             total_height = run.line_top + run.line_height;
 
-            // `run.line_y` is the baseline Y within the shaped block. We must
-            // pass it as the offset to `physical()` so that each glyph's `.y`
-            // is its screen-space baseline (relative to the block top) rather
-            // than a meaningless 0 — the downstream renderer subtracts
-            // `image.top` from `glyph.y` expecting baseline coordinates.
+            // Place glyphs on a *script-independent* baseline rather than
+            // cosmic-text's `run.line_y`. cosmic centers the baseline using the
+            // line's actual fonts' ascent/descent, so a line's baseline jumps
+            // when its script mix changes — ASCII-only `[a]` and CJK-containing
+            // `[あ]` resolve different fallback fonts and so landed on different
+            // baselines (the brackets in `[a]` sat visibly lower). See
+            // [`stable_baseline`]. The downstream renderer subtracts
+            // `image.top` from `glyph.y`, so this is still a baseline Y.
+            let baseline = stable_baseline(run.line_top, run.line_height, font_size);
             for glyph in run.glyphs.iter() {
-                let physical = glyph.physical((0.0, run.line_y), 1.0);
+                let physical = glyph.physical((0.0, baseline), 1.0);
                 glyphs.push(ShapedGlyph {
                     cache_key: physical.cache_key,
                     x: physical.x,
@@ -501,6 +505,11 @@ impl TextEngine {
         for run in buffer.layout_runs() {
             total_width = total_width.max(run.line_w);
             total_height = run.line_top + run.line_height;
+            // Script-independent baseline, replacing cosmic-text's `run.line_y`
+            // (see the plain path and [`stable_baseline`]). Used both to place
+            // glyphs and to anchor decoration lines, so under/strike-through
+            // track the repositioned glyphs.
+            let baseline = stable_baseline(run.line_top, run.line_height, font_size);
             // Accumulate the horizontal extent of consecutive glyphs sharing a
             // metadata (= span index) on this line. A group is flushed whenever
             // the span changes and at end-of-line, so each span gets one box
@@ -508,7 +517,7 @@ impl TextEngine {
             let mut group: Option<(usize, f32, f32)> = None; // (span, min_x, max_x)
             for glyph in run.glyphs.iter() {
                 let color = glyph.color_opt.map(cosmic_to_shroud);
-                let physical = glyph.physical((0.0, run.line_y), 1.0);
+                let physical = glyph.physical((0.0, baseline), 1.0);
                 glyphs.push(ShapedGlyph {
                     cache_key: physical.cache_key,
                     x: physical.x,
@@ -533,7 +542,7 @@ impl TextEngine {
                                 max,
                                 run.line_top,
                                 run.line_height,
-                                run.line_y,
+                                baseline,
                                 font_size,
                             );
                         }
@@ -551,7 +560,7 @@ impl TextEngine {
                     max,
                     run.line_top,
                     run.line_height,
-                    run.line_y,
+                    baseline,
                     font_size,
                 );
             }
@@ -817,6 +826,27 @@ fn line_index_to_offset(text: &str, line: usize, index: usize) -> usize {
         target -= 1;
     }
     target
+}
+
+/// Where the text baseline sits inside the em box, as a fraction of
+/// `font_size` measured from the box top. Most Latin/CJK faces put the baseline
+/// around 0.8 of the em down; using one constant for every line is what makes
+/// the baseline script-independent (see [`stable_baseline`]).
+const BASELINE_ASCENT_RATIO: f32 = 0.8;
+
+/// Baseline Y for a run, replacing cosmic-text's per-line `LayoutRun::line_y`.
+///
+/// cosmic-text derives `line_y` from the *actual* fonts shaped on that line
+/// (`line_top + (line_height − (max_ascent + max_descent))/2 + max_ascent`), so
+/// the baseline moves when a line's font mix changes — e.g. an ASCII-only run
+/// and a CJK-containing run pick up different fallback fonts and so sit on
+/// different baselines, which showed up as `[a]`'s brackets sitting lower than
+/// `[あ]`'s. We instead treat the em (`font_size`) as a fixed content box,
+/// center it in `line_height` (CSS half-leading style), and put the baseline a
+/// fixed [`BASELINE_ASCENT_RATIO`] of the way down it. The result depends only
+/// on the metrics every line shares, so every line lands on one baseline.
+fn stable_baseline(line_top: f32, line_height: f32, font_size: f32) -> f32 {
+    line_top + (line_height - font_size) / 2.0 + BASELINE_ASCENT_RATIO * font_size
 }
 
 /// Emit the span box for a finished glyph group, plus any decoration lines the
