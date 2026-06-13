@@ -142,6 +142,12 @@ pub enum Key {
     RecoveryRevealDescription,
     RecoveryRevealWarning,
     RecoveryRevealDone,
+    /// Button that saves the recovery key as a printable PDF.
+    RecoverySavePdf,
+    /// Save-dialog title for the recovery-key PDF.
+    DialogSaveRecoveryPdf,
+    /// `"Couldn't save the PDF: "` — recovery PDF write failure (prefix).
+    ErrRecoveryPdfPrefix,
 
     // --- Recovery screen ---
     RecoveryTitle,
@@ -339,6 +345,9 @@ impl Key {
                  with your password."
             }
             RecoveryRevealDone => "I've saved it \u{2014} open my vault",
+            RecoverySavePdf => "Save as PDF",
+            DialogSaveRecoveryPdf => "Save recovery key",
+            ErrRecoveryPdfPrefix => "Couldn't save the PDF: ",
 
             // Recovery screen
             RecoveryTitle => "Recover your vault",
@@ -535,6 +544,9 @@ impl Key {
                  パスワードと一緒に保管したりしないでください。"
             }
             RecoveryRevealDone => "保存しました \u{2014} ボールトを開く",
+            RecoverySavePdf => "PDFで保存",
+            DialogSaveRecoveryPdf => "リカバリーキーを保存",
+            ErrRecoveryPdfPrefix => "PDFを保存できませんでした: ",
 
             // Recovery screen
             RecoveryTitle => "ボールトを復元",
@@ -777,6 +789,9 @@ mod tests {
         Key::RecoveryRevealDescription,
         Key::RecoveryRevealWarning,
         Key::RecoveryRevealDone,
+        Key::RecoverySavePdf,
+        Key::DialogSaveRecoveryPdf,
+        Key::ErrRecoveryPdfPrefix,
         Key::RecoveryTitle,
         Key::RecoveryDescription,
         Key::RecoveryKeyPlaceholder,

@@ -1,0 +1,304 @@
+//! A minimal, dependency-free PDF writer for the recovery-key sheet.
+//!
+//! Knot v0.7.0 offered a "save recovery key as PDF" so the user could print
+//! the 12-word BIP39 phrase and store it offline. This is the port — but
+//! deliberately *without* a PDF crate (`printpdf`/`genpdf`) or an embedded
+//! font. Those pull in megabytes of dependency (and a multi-MB Noto Sans JP
+//! face for CJK), which clashes with the project's lean, self-build ethos.
+//!
+//! We get away with hand-rolling because the sheet only ever contains ASCII:
+//! BIP39 English words are pure lowercase `a-z`, the numbering is digits, and
+//! the static instructions are written in English. That lets us use the PDF
+//! **standard-14** fonts (Helvetica + Courier-Bold), which every reader has
+//! built in — so there is nothing to embed and no encoding table to ship.
+//!
+//! Because the content is necessarily ASCII, the sheet's instruction text is
+//! English regardless of the app's UI language; only the in-app button and
+//! save-dialog labels are localized. Localizing the PDF body would require a
+//! CJK font embed, i.e. exactly the heavy dependency this module avoids.
+//!
+//! ## File shape
+//!
+//! A single-page document with six objects (catalog, pages, page, the content
+//! stream, and the two fonts), a classic `xref` table, and a trailer. Object
+//! byte offsets are recorded as they're written so the `xref` is exact. The
+//! whole thing is returned in a [`Zeroizing`] buffer because it holds the
+//! plaintext recovery words — the caller writes it to disk and drops it, and
+//! the heap copy is wiped on drop.
+
+use std::fmt::Write as _;
+
+use zeroize::Zeroizing;
+
+/// A4 page, in PDF points (1/72 inch). A4 because the typical Knot user prints
+/// on A4; the exact size only affects where the text sits, not correctness.
+const PAGE_W: f32 = 595.0;
+const PAGE_H: f32 = 842.0;
+/// Page margin, points (~22mm).
+const MARGIN: f32 = 64.0;
+
+/// Render the recovery `phrase` (a space-separated BIP39 mnemonic) as a
+/// one-page A4 PDF. The returned buffer holds the words in plaintext, so it is
+/// [`Zeroizing`]: write it to disk, then let it drop to wipe the heap copy.
+///
+/// Any number of words is accepted and laid out; callers pass the canonical 12.
+pub fn render(phrase: &str) -> Zeroizing<Vec<u8>> {
+    let words: Vec<&str> = phrase.split_whitespace().collect();
+    // The content stream also holds the plaintext words — zeroize it too.
+    let content = Zeroizing::new(build_content(&words));
+
+    let mut pdf = PdfBuilder::new();
+    // Objects must be written in number order; forward references (e.g. the
+    // catalog pointing at the pages object) are fine in PDF.
+    pdf.object("<< /Type /Catalog /Pages 2 0 R >>"); // 1
+    pdf.object("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"); // 2
+    pdf.object(&format!(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W} {PAGE_H}] \
+         /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>"
+    )); // 3
+    pdf.stream_object(content.as_bytes()); // 4
+    pdf.object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"); // 5
+    pdf.object("<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold >>"); // 6
+    Zeroizing::new(pdf.finish())
+}
+
+/// Build the page's content stream: drawing operators that place the title,
+/// instructions, the numbered word grid, and the warning. All ASCII.
+fn build_content(words: &[&str]) -> String {
+    let mut c = String::new();
+
+    text(&mut c, "F1", 24.0, MARGIN, 772.0, "Knot Recovery Key");
+    text(
+        &mut c,
+        "F1",
+        11.0,
+        MARGIN,
+        740.0,
+        "These 12 words are the only way back into your vault if you forget",
+    );
+    text(
+        &mut c,
+        "F1",
+        11.0,
+        MARGIN,
+        724.0,
+        "your master password. Print this sheet and keep it somewhere safe.",
+    );
+
+    // A border around the word grid, so it reads as a self-contained block to
+    // cut out and store.
+    rect(&mut c, MARGIN, 392.0, PAGE_W - 2.0 * MARGIN, 284.0);
+
+    // 12 words in two columns of six. Numbers in Helvetica, the word itself in
+    // Courier-Bold so look-alike characters stay unambiguous on paper.
+    let col_x = [MARGIN + 36.0, PAGE_W / 2.0 + 8.0];
+    let top = 636.0;
+    let step = 42.0;
+    for (i, w) in words.iter().enumerate() {
+        let col = (i / 6).min(1);
+        let row = i % 6;
+        let x = col_x[col];
+        let y = top - row as f32 * step;
+        text(&mut c, "F1", 13.0, x, y, &format!("{:>2}.", i + 1));
+        text(&mut c, "F2", 15.0, x + 34.0, y, w);
+    }
+
+    text(
+        &mut c,
+        "F1",
+        10.0,
+        MARGIN,
+        356.0,
+        "Anyone who has these words can open your vault. Never share them,",
+    );
+    text(
+        &mut c,
+        "F1",
+        10.0,
+        MARGIN,
+        342.0,
+        "and never store them together with your master password.",
+    );
+    text(&mut c, "F1", 9.0, MARGIN, 72.0, "Generated by Knot.");
+
+    c
+}
+
+/// Emit a single line of text: `BT /Font size Tf x y Td (string) Tj ET`.
+/// Each `BT` resets the text matrix to identity, so `x y Td` is an absolute
+/// page position (origin bottom-left, y up).
+fn text(c: &mut String, font: &str, size: f32, x: f32, y: f32, s: &str) {
+    let _ = write!(c, "BT /{font} {size} Tf {x:.2} {y:.2} Td (");
+    push_escaped(c, s);
+    c.push_str(") Tj ET\n");
+}
+
+/// Stroke a rectangle outline at `(x, y)` with size `w` x `h`.
+fn rect(c: &mut String, x: f32, y: f32, w: f32, h: f32) {
+    let _ = writeln!(c, "0.6 w {x:.2} {y:.2} {w:.2} {h:.2} re S");
+}
+
+/// Escape the three characters that are special inside a PDF literal string.
+/// BIP39 words never contain them, but the instruction text and defensiveness
+/// make this worthwhile.
+fn push_escaped(c: &mut String, s: &str) {
+    for ch in s.chars() {
+        if matches!(ch, '\\' | '(' | ')') {
+            c.push('\\');
+        }
+        c.push(ch);
+    }
+}
+
+/// Accumulates PDF objects, recording each object's byte offset so the final
+/// `xref` table is exact.
+struct PdfBuilder {
+    buf: Vec<u8>,
+    /// `offsets[i]` is the byte offset of object number `i + 1`.
+    offsets: Vec<usize>,
+}
+
+impl PdfBuilder {
+    fn new() -> Self {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"%PDF-1.4\n");
+        // High-bit "binary" comment so tools treat the file as binary, not text.
+        buf.extend_from_slice(b"%\xE2\xE3\xCF\xD3\n");
+        Self {
+            buf,
+            offsets: Vec::new(),
+        }
+    }
+
+    /// Write a plain object whose dictionary/body is `body`.
+    fn object(&mut self, body: &str) {
+        self.begin_object();
+        self.buf.extend_from_slice(body.as_bytes());
+        self.buf.extend_from_slice(b"\nendobj\n");
+    }
+
+    /// Write a stream object wrapping `content` (`<< /Length N >> stream … endstream`).
+    fn stream_object(&mut self, content: &[u8]) {
+        self.begin_object();
+        let header = format!("<< /Length {} >>\nstream\n", content.len());
+        self.buf.extend_from_slice(header.as_bytes());
+        self.buf.extend_from_slice(content);
+        self.buf.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+
+    /// Record the next object's offset and write its `N 0 obj` header. Returns
+    /// the object number.
+    fn begin_object(&mut self) -> usize {
+        let n = self.offsets.len() + 1;
+        self.offsets.push(self.buf.len());
+        self.buf
+            .extend_from_slice(format!("{n} 0 obj\n").as_bytes());
+        n
+    }
+
+    /// Append the `xref` table and trailer, and return the finished bytes.
+    fn finish(mut self) -> Vec<u8> {
+        let xref_off = self.buf.len();
+        let size = self.offsets.len() + 1; // +1 for the free object 0
+        self.buf
+            .extend_from_slice(format!("xref\n0 {size}\n").as_bytes());
+        // Object 0 is always the head of the free list.
+        self.buf.extend_from_slice(b"0000000000 65535 f \n");
+        for off in &self.offsets {
+            // Each entry is exactly 20 bytes: 10-digit offset, gen, 'n', EOL.
+            self.buf
+                .extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        self.buf.extend_from_slice(
+            format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_off}\n%%EOF\n")
+                .as_bytes(),
+        );
+        self.buf
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A valid 12-word BIP39 mnemonic (the canonical all-`a` test vector).
+    const WORDS: &str = "abandon ability able about above absent \
+                         absorb abstract absurd abuse access accident";
+
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        find(haystack, needle).is_some()
+    }
+
+    #[test]
+    fn starts_with_pdf_header() {
+        let pdf = render(WORDS);
+        assert!(pdf.starts_with(b"%PDF-1.4"));
+    }
+
+    #[test]
+    fn ends_with_eof() {
+        let pdf = render(WORDS);
+        assert!(pdf.ends_with(b"%%EOF\n"));
+    }
+
+    #[test]
+    fn embeds_every_word() {
+        let pdf = render(WORDS);
+        for w in WORDS.split_whitespace() {
+            assert!(contains(&pdf, w.as_bytes()), "PDF is missing word {w:?}");
+        }
+    }
+
+    #[test]
+    fn declares_all_six_objects() {
+        let pdf = render(WORDS);
+        for n in 1..=6 {
+            assert!(
+                contains(&pdf, format!("{n} 0 obj").as_bytes()),
+                "missing object {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn startxref_points_at_the_xref_table() {
+        let pdf = render(WORDS);
+        let marker = b"startxref\n";
+        let pos = find(&pdf, marker).expect("startxref present") + marker.len();
+        let nl = pdf[pos..].iter().position(|&b| b == b'\n').unwrap() + pos;
+        let off: usize = std::str::from_utf8(&pdf[pos..nl])
+            .unwrap()
+            .parse()
+            .expect("startxref is a number");
+        assert_eq!(&pdf[off..off + 4], b"xref", "startxref must address `xref`");
+    }
+
+    /// Dev convenience: write a real sample PDF so the layout can be eyeballed
+    /// in a viewer. Ignored by default; run with
+    /// `cargo test -p knot recovery_pdf::tests::emit_sample -- --ignored`.
+    #[test]
+    #[ignore]
+    fn emit_sample() {
+        let pdf = render(WORDS);
+        let path = std::env::temp_dir().join("knot-recovery-sample.pdf");
+        std::fs::write(&path, &*pdf).unwrap();
+        eprintln!("wrote sample PDF to {}", path.display());
+    }
+
+    #[test]
+    fn first_xref_offset_addresses_object_one() {
+        let pdf = render(WORDS);
+        // The xref's second entry (after the free object 0) is object 1's
+        // offset; it must land exactly on its `1 0 obj` header.
+        let xref = find(&pdf, b"xref\n0 ").expect("xref table present");
+        let table = std::str::from_utf8(&pdf[xref..]).unwrap();
+        // Lines: "xref", "0 7", free entry, then object 1's entry.
+        let obj1_line = table.lines().nth(3).expect("object 1 xref entry");
+        let off: usize = obj1_line[..10].parse().expect("10-digit offset");
+        assert_eq!(&pdf[off..off + 7], b"1 0 obj");
+    }
+}

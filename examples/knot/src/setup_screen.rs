@@ -20,6 +20,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use shroud::platform::FileDialog;
 use shroud::reactive::Reactive;
 use shroud::security::SecureString;
 use shroud::widgets::tree::WidgetTree;
@@ -28,10 +29,10 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{derive_key, generate_dek, random_salt, recovery, wrap_dek};
 use crate::i18n::{self, Key};
-use crate::settings;
 use crate::state::{AppState, Note, Phase};
 use crate::storage::{VaultPaths, VaultStorage};
 use crate::vault_screen;
+use crate::{notice, recovery_pdf, settings};
 
 /// Minimum master-password length (characters). A typo guard, not a
 /// strength policy — recovery via the BIP39 key is the real safety net
@@ -321,6 +322,12 @@ fn build_recovery_reveal(
 ) {
     let words: Vec<&str> = mnemonic.split_whitespace().collect();
 
+    // A copy of the phrase for the "Save as PDF" button. It lives in the
+    // button closure for exactly as long as this reveal screen does — the same
+    // exposure window as the words already shown on screen — and is zeroized
+    // when the screen is replaced (Continue) and the widget tree drops.
+    let phrase_for_pdf = Zeroizing::new(mnemonic.trim().to_string());
+
     let root = tree.set_root(
         Container::column()
             .width_full()
@@ -383,9 +390,37 @@ fn build_recovery_reveal(
             .color(settings::warning()),
     );
 
+    // Actions row: save the key as a printable PDF, or continue into the vault.
+    let actions = tree.add_child(card, Container::row().gap(12.0));
+
+    // Save-as-PDF (secondary). Writes the 12 words to a user-chosen
+    // `knot-recovery-key.pdf` via the dependency-free `recovery_pdf` writer.
+    // The bytes hold the plaintext key, so `render` returns them zeroizing and
+    // they're wiped the moment this closure's temporary drops after the write.
+    tree.add_child(
+        actions,
+        Button::reactive_label(|| i18n::tr(Key::RecoverySavePdf).to_string())
+            .radius(8.0)
+            .on_click(move |_ctx| {
+                let Some(path) = FileDialog::new()
+                    .title(i18n::tr(Key::DialogSaveRecoveryPdf))
+                    .filter("PDF", &["pdf"])
+                    .file_name("knot-recovery-key.pdf".to_string())
+                    .save_file()
+                else {
+                    return;
+                };
+                let pdf = recovery_pdf::render(phrase_for_pdf.as_str());
+                if let Err(e) = std::fs::write(&path, &*pdf) {
+                    notice::show(format!("{}{e}", i18n::tr(Key::ErrRecoveryPdfPrefix)));
+                }
+            }),
+    );
+
+    // Continue (primary) — drops into the vault.
     let next = Rc::clone(&state);
     tree.add_child(
-        card,
+        actions,
         Button::reactive_label(|| i18n::tr(Key::RecoveryRevealDone).to_string())
             .radius(8.0)
             .on_click(move |ctx| {

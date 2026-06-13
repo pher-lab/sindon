@@ -28,6 +28,7 @@ mod i18n;
 mod lock_screen;
 mod notice;
 mod preview;
+mod recovery_pdf;
 mod recovery_screen;
 mod settings;
 mod setup_screen;
