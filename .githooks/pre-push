@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+#
+# Pre-push gate mirroring the drift-prone CI jobs (.github/workflows/ci.yml):
+# Rustfmt, Clippy, and Rustdoc. These three repeatedly broke CI after a clean
+# local push (rustfmt drift, clippy lints, and bare intra-doc links under
+# `-D warnings`), costing an ~8 min CI round-trip per slip. Running them here
+# folds the fix into the same push.
+#
+# The heavier Test/Build jobs are intentionally left to CI -- they rarely drift
+# silently and would make every push too slow to tolerate.
+#
+# Bypass once with `git push --no-verify` if you really need to.
+
+set -e
+
+echo "pre-push: cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+echo "pre-push: cargo clippy --workspace --all-targets -- -D warnings"
+cargo clippy --workspace --all-targets -- -D warnings
+
+echo "pre-push: RUSTDOCFLAGS=-D warnings cargo doc --no-deps --workspace"
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
+
+echo "pre-push: all checks passed"
