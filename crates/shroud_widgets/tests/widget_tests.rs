@@ -6308,6 +6308,167 @@ fn ctrl_x_cuts_selection() {
     assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "");
 }
 
+// --- Undo / redo ----------------------------------------------------------
+
+#[test]
+fn undo_reverts_a_typed_run() {
+    // A burst of typing coalesces into one undo step, so a single Ctrl+Z
+    // clears the whole run rather than one character at a time.
+    let (mut tree, idx, mut ctx) = selection_input("");
+    for ch in "abc".chars() {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut ctx);
+    }
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "abc");
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "");
+}
+
+#[test]
+fn redo_restores_an_undone_run() {
+    let (mut tree, idx, mut ctx) = selection_input("");
+    for ch in "abc".chars() {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut ctx);
+    }
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "");
+    dispatch_key(&mut tree, Key::Character('y'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "abc");
+}
+
+#[test]
+fn ctrl_shift_z_also_redoes() {
+    // The mac / browser redo chord. It carries Shift, so it must be matched
+    // ahead of the (Shift-rejecting) command-combo arm in `Input::event`.
+    let (mut tree, idx, mut ctx) = selection_input("");
+    for ch in "abc".chars() {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut ctx);
+    }
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    dispatch_key(
+        &mut tree,
+        Key::Character('z'),
+        Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        },
+        &mut ctx,
+    );
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "abc");
+}
+
+#[test]
+fn caret_move_splits_undo_into_separate_steps() {
+    // Moving the caret ends the coalescing run, so text typed before and after
+    // the move are distinct undo steps.
+    let (mut tree, idx, mut ctx) = selection_input("");
+    for ch in "ab".chars() {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut ctx);
+    }
+    dispatch_key(
+        &mut tree,
+        Key::Named(NamedKey::Home),
+        Modifiers::NONE,
+        &mut ctx,
+    );
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'X' }, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "Xab");
+    // First undo removes only the post-move insert.
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "ab");
+    // Second undo removes the original run.
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "");
+}
+
+#[test]
+fn deletes_coalesce_and_undo_as_one_step() {
+    // A run of Backspaces is one undo step, separate from the preceding typing.
+    let (mut tree, idx, mut ctx) = selection_input("");
+    for ch in "abc".chars() {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut ctx);
+    }
+    for _ in 0..2 {
+        dispatch_key(
+            &mut tree,
+            Key::Named(NamedKey::Backspace),
+            Modifiers::NONE,
+            &mut ctx,
+        );
+    }
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "a");
+    // One undo restores both deleted chars (the delete run), then another
+    // restores the typed run.
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "abc");
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "");
+}
+
+#[test]
+fn typing_over_a_selection_undoes_in_one_step() {
+    let (mut tree, idx, mut ctx) = selection_input("hello");
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx); // select all
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'Z' }, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "Z");
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "hello");
+}
+
+#[test]
+fn new_edit_after_undo_clears_the_redo_stack() {
+    let (mut tree, idx, mut ctx) = selection_input("");
+    for ch in "abc".chars() {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut ctx);
+    }
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx); // -> ""
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'x' }, &mut ctx); // forks history
+    dispatch_key(&mut tree, Key::Character('y'), Modifiers::CTRL, &mut ctx); // redo is inert
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "x");
+}
+
+#[test]
+fn undo_with_empty_history_is_a_noop() {
+    let (mut tree, idx, mut ctx) = selection_input("");
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "");
+}
+
+#[test]
+fn undo_restores_a_multibyte_snapshot() {
+    // Snapshots round-trip multi-byte text without splitting a codepoint.
+    let (mut tree, idx, mut ctx) = selection_input("あ");
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'い' }, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "あい");
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "あ");
+}
+
+#[test]
+fn external_value_change_clears_undo_history() {
+    // A note switch / programmatic set rebases the buffer; undo must not cross
+    // that boundary, so Ctrl+Z afterwards is inert and the buffer keeps the
+    // externally-set text.
+    let sig = Signal::new(String::new());
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().value(sig));
+    tree.compute_layout(400.0, 100.0);
+    let mut ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut ctx);
+
+    for ch in "ab".chars() {
+        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut ctx);
+    }
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "ab");
+
+    // External rewrite (e.g. switching to another note's body). The next event
+    // rebases the buffer and clears history, so the undo is a no-op.
+    sig.set("xyz".to_string());
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "xyz");
+}
+
 #[test]
 fn plain_arrow_left_collapses_selection_to_left_edge() {
     let (mut tree, idx, mut ctx) = selection_input("hello");

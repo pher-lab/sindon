@@ -3306,6 +3306,7 @@ dependencies = [
  "shroud_security",
  "shroud_text",
  "windows 0.61.3",
+ "zeroize",
 ]
 
 [[package]]

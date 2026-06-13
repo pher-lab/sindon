@@ -38,6 +38,7 @@
 //! is mutually exclusive with multi-line mode (the builder asserts in debug).
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
@@ -46,6 +47,7 @@ use crate::widget::Widget;
 use shroud_core::{Color, Point, Rect};
 use shroud_layout::FlexStyle;
 use shroud_reactive::Signal;
+use zeroize::Zeroizing;
 
 /// A standard text input field.
 ///
@@ -77,6 +79,20 @@ fn is_cmd_combo(mods: Modifiers) -> bool {
     ctrl_only || logo_only
 }
 
+/// Like [`is_cmd_combo`] but for the Ctrl/Cmd **+ Shift** chord used by the
+/// redo binding (`Ctrl+Shift+Z`). [`is_cmd_combo`] deliberately rejects Shift,
+/// so the redo path needs its own predicate. The translation layer still
+/// promotes Ctrl+Shift+letter to a `KeyDown { Character }` (Ctrl is a non-shift
+/// modifier), so this chord reaches `Input::event` like the plain command ones.
+fn is_cmd_shift_combo(mods: Modifiers) -> bool {
+    if !mods.shift || mods.alt {
+        return false;
+    }
+    let ctrl_only = mods.ctrl && !mods.logo;
+    let logo_only = mods.logo && !mods.ctrl;
+    ctrl_only || logo_only
+}
+
 /// Maximum gap between two primary-button presses for them to count as a
 /// double-click (word select). Matches the Windows default double-click time.
 const DOUBLE_CLICK_MAX: Duration = Duration::from_millis(500);
@@ -84,6 +100,34 @@ const DOUBLE_CLICK_MAX: Duration = Duration::from_millis(500);
 /// double-click. A press that lands further away starts a fresh selection
 /// instead of extending the first into a word select.
 const DOUBLE_CLICK_SLOP: f32 = 4.0;
+
+/// Maximum number of states the undo / redo history retains. Bounds both the
+/// memory the history holds and — because each [`Snapshot`] keeps a `Zeroizing`
+/// copy of the buffer — the number of plaintext copies kept alive. Older states
+/// past the cap are evicted (and wiped) from the front.
+const UNDO_CAP: usize = 200;
+
+/// Coalescing class for an edit, used to decide whether a new edit folds into
+/// the current undo step or starts a fresh one. Consecutive same-kind inserts
+/// (or deletes) that continue from where the previous edit left the caret merge
+/// into one undo step; a kind change, a caret jump, or a discrete op (selection
+/// replace, cut, Enter) starts a new step. This makes a typing burst — and a
+/// paste, which arrives as a burst of inserts with no caret move — one undo.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditKind {
+    Insert,
+    Delete,
+}
+
+/// A point-in-time snapshot of the editable state held in the undo / redo
+/// history. `text` is `Zeroizing` so an evicted or cleared entry wipes its
+/// plaintext copy rather than leaving it in freed heap — consistent with the
+/// framework's zeroize-first stance (`SecureInput` keeps no history at all).
+struct Snapshot {
+    text: Zeroizing<String>,
+    cursor: usize,
+    anchor: Option<usize>,
+}
 
 /// Character class used by double-click word expansion. A double-click selects
 /// the maximal run of same-class characters under the caret, so a click in a
@@ -282,6 +326,20 @@ pub struct Input {
     /// Override for the selection highlight color. `None` reads
     /// `theme.colors.selection_background` each frame.
     selection_color: Option<Color>,
+    /// Undo history: states to return to, oldest at the front. Bounded to
+    /// [`UNDO_CAP`]; the front is evicted (and wiped) past the cap. `RefCell`
+    /// because a checkpoint can be recorded from the interior-mutable `&self`
+    /// paths (and the history is cleared from `sync_from_source`, also `&self`).
+    undo_stack: RefCell<VecDeque<Snapshot>>,
+    /// Redo history: states undone away from, cleared on any fresh edit.
+    redo_stack: RefCell<VecDeque<Snapshot>>,
+    /// Coalescing tag for the in-progress undo step: the kind of the last edit
+    /// and the caret offset it left behind. A new edit of the same kind whose
+    /// pre-edit caret matches the stored offset folds into the current step
+    /// instead of pushing a checkpoint. `None` forces the next edit to
+    /// checkpoint — set after a discrete op, a caret move, undo/redo, or an
+    /// external value change.
+    last_edit: Cell<Option<(EditKind, usize)>>,
 }
 
 impl Input {
@@ -318,6 +376,9 @@ impl Input {
             border_color: None,
             focus_ring_color: None,
             selection_color: None,
+            undo_stack: RefCell::new(VecDeque::new()),
+            redo_stack: RefCell::new(VecDeque::new()),
+            last_edit: Cell::new(None),
         }
     }
 
@@ -630,6 +691,7 @@ impl Input {
         self.selection_anchor.set(Some(0));
         self.cursor.set(len);
         self.desired_col.set(None);
+        self.last_edit.set(None);
     }
 
     /// Delete the current selection if any: remove `[lo, hi)`, move the caret
@@ -647,6 +709,116 @@ impl Input {
         } else {
             false
         }
+    }
+
+    /// Capture the current editable state for the history.
+    fn current_snapshot(&self) -> Snapshot {
+        Snapshot {
+            text: Zeroizing::new(self.value.borrow().clone()),
+            cursor: self.cursor.get(),
+            anchor: self.selection_anchor.get(),
+        }
+    }
+
+    /// Restore an editable state pulled from the history. The caret / anchor
+    /// came from the same snapshot as the text, so they're already in range —
+    /// no clamping needed. `desired_col` is dropped (vertical-nav state is not
+    /// part of the undo model).
+    fn apply_snapshot(&self, snap: &Snapshot) {
+        self.value.borrow_mut().clear();
+        self.value.borrow_mut().push_str(&snap.text);
+        self.cursor.set(snap.cursor);
+        self.selection_anchor.set(snap.anchor);
+        self.desired_col.set(None);
+    }
+
+    /// Record an undo checkpoint *before* an edit mutates the buffer — unless
+    /// the edit coalesces into the current step. `coalescable` is `false` for
+    /// discrete operations (selection replace, cut, Enter) so they always start
+    /// a fresh step. Clears the redo stack: a new edit forks history.
+    fn begin_edit(&self, kind: EditKind, coalescable: bool) {
+        let coalesce = coalescable
+            && matches!(self.last_edit.get(), Some((k, pos)) if k == kind && pos == self.cursor.get());
+        if coalesce {
+            return;
+        }
+        let snap = self.current_snapshot();
+        let mut undo = self.undo_stack.borrow_mut();
+        undo.push_back(snap);
+        while undo.len() > UNDO_CAP {
+            undo.pop_front();
+        }
+        drop(undo);
+        self.redo_stack.borrow_mut().clear();
+    }
+
+    /// Finish an edit: update the coalescing tag, then push the fresh buffer to
+    /// the bound signal and fire `on_change` — the same tail every edit path
+    /// shares. `break_run` forces the next edit to start a fresh undo step
+    /// (used by discrete ops so they don't absorb the following keystroke).
+    fn commit_edit(&mut self, kind: EditKind, break_run: bool, ctx: &mut EventContext) {
+        self.last_edit.set(if break_run {
+            None
+        } else {
+            Some((kind, self.cursor.get()))
+        });
+        self.push_to_source();
+        if let Some(handler) = self.on_change.as_mut() {
+            let snapshot = self.value.borrow().clone();
+            handler(&snapshot, ctx);
+        }
+    }
+
+    /// Undo the most recent step: stash the current state on the redo stack and
+    /// restore the previous one, then propagate like a normal edit (push to the
+    /// bound signal + fire `on_change`). Returns whether anything was undone.
+    fn undo(&mut self, ctx: &mut EventContext) -> bool {
+        let Some(prev) = self.undo_stack.borrow_mut().pop_back() else {
+            return false;
+        };
+        self.redo_stack
+            .borrow_mut()
+            .push_back(self.current_snapshot());
+        self.apply_snapshot(&prev);
+        self.last_edit.set(None);
+        self.propagate_history_change(ctx);
+        true
+    }
+
+    /// Redo the most recently undone step. Mirror image of [`undo`](Self::undo).
+    fn redo(&mut self, ctx: &mut EventContext) -> bool {
+        let Some(next) = self.redo_stack.borrow_mut().pop_back() else {
+            return false;
+        };
+        self.undo_stack
+            .borrow_mut()
+            .push_back(self.current_snapshot());
+        self.apply_snapshot(&next);
+        self.last_edit.set(None);
+        self.propagate_history_change(ctx);
+        true
+    }
+
+    /// Shared tail for undo / redo: mirror the restored buffer to the bound
+    /// signal and notify `on_change`, exactly as a keystroke would, so the
+    /// bound state / preview / observers see the change. Because this writes the
+    /// source, the next `sync_from_source` sees `source == buffer` and is a
+    /// no-op, so the restore is not immediately clobbered.
+    fn propagate_history_change(&mut self, ctx: &mut EventContext) {
+        self.push_to_source();
+        if let Some(handler) = self.on_change.as_mut() {
+            let snapshot = self.value.borrow().clone();
+            handler(&snapshot, ctx);
+        }
+    }
+
+    /// Drop the entire undo / redo history. Called when the buffer is rebased
+    /// from an external write (note switch, toolbar wrap, programmatic set):
+    /// undo must never cross such a boundary, so history starts fresh after it.
+    fn clear_history(&self) {
+        self.undo_stack.borrow_mut().clear();
+        self.redo_stack.borrow_mut().clear();
+        self.last_edit.set(None);
     }
 
     fn resolve_bg(&self, colors: &shroud_core::Colors) -> Color {
@@ -706,6 +878,10 @@ impl Input {
                 // invalidates the byte offsets the selection was anchored on —
                 // drop it so a stale highlight can't outlive the edit.
                 self.selection_anchor.set(None);
+                // The undo history belongs to the text we just replaced; a note
+                // switch or programmatic set must not be undoable into a
+                // *different* document, so start history fresh after the rebase.
+                self.clear_history();
             }
         }
         if let Some(src) = self.number_source.as_ref() {
@@ -722,6 +898,7 @@ impl Input {
                     if self.cursor.get() > new_len {
                         self.cursor.set(new_len);
                     }
+                    self.clear_history();
                 }
             }
         }
@@ -997,6 +1174,10 @@ impl Widget for Input {
                 self.cursor.set(offset);
             }
             self.desired_col.set(None);
+            // A click / drag moves the caret outside the edit path, so end any
+            // in-progress coalescing run — the next keystroke starts a fresh
+            // undo step rather than merging with text typed before the click.
+            self.last_edit.set(None);
             // Mirror the moved caret + selection so bound signals (and the next
             // event's `sync_from_source`) agree with the paint-resolved hit.
             self.push_cursor_to_source();
@@ -1205,32 +1386,35 @@ impl Widget for Input {
                 if accept {
                     // Typing over a selection replaces it (the caret lands at
                     // `lo` before the insert). No-op when nothing is selected.
+                    // A selection replace is a discrete undo step; plain typing
+                    // coalesces into the current run (so does a paste burst,
+                    // which arrives here as inserts with no caret move between).
+                    let had_selection = self.selection_range().is_some();
+                    self.begin_edit(EditKind::Insert, !had_selection);
                     self.delete_selection();
                     let ch_len = ch.len_utf8();
                     let cursor = self.cursor.get();
                     self.value.borrow_mut().insert(cursor, *ch);
                     self.cursor.set(cursor + ch_len);
                     self.desired_col.set(None);
-
-                    self.push_to_source();
-                    if let Some(handler) = self.on_change.as_mut() {
-                        let snapshot = self.value.borrow().clone();
-                        handler(&snapshot, ctx);
-                    }
+                    // `had_selection` only decided whether this insert *starts*
+                    // a fresh step (above); typing that follows still coalesces
+                    // into it, so the run isn't broken here.
+                    self.commit_edit(EditKind::Insert, false, ctx);
                 }
                 EventResult::Consumed
             }
 
             WidgetEvent::KeyDown { key } if self.focused => match key {
                 Key::Named(NamedKey::Backspace) => {
-                    // A selection is deleted as a unit; otherwise fall back to
-                    // the single-char delete (and the empty-buffer hand-off).
-                    if self.delete_selection() {
-                        self.push_to_source();
-                        if let Some(handler) = self.on_change.as_mut() {
-                            let snapshot = self.value.borrow().clone();
-                            handler(&snapshot, ctx);
-                        }
+                    // A selection is deleted as a unit (a discrete undo step);
+                    // otherwise fall back to the single-char delete (which
+                    // coalesces with a run of Backspaces) and the empty-buffer
+                    // hand-off.
+                    if self.selection_range().is_some() {
+                        self.begin_edit(EditKind::Delete, false);
+                        self.delete_selection();
+                        self.commit_edit(EditKind::Delete, true, ctx);
                     } else {
                         let cursor = self.cursor.get();
                         if cursor > 0 {
@@ -1238,15 +1422,11 @@ impl Widget for Input {
                                 let v = self.value.borrow();
                                 Self::prev_char_boundary(&v, cursor)
                             };
+                            self.begin_edit(EditKind::Delete, true);
                             self.value.borrow_mut().drain(prev..cursor);
                             self.cursor.set(prev);
                             self.desired_col.set(None);
-
-                            self.push_to_source();
-                            if let Some(handler) = self.on_change.as_mut() {
-                                let snapshot = self.value.borrow().clone();
-                                handler(&snapshot, ctx);
-                            }
+                            self.commit_edit(EditKind::Delete, false, ctx);
                         } else if self.value.borrow().is_empty() {
                             // Empty buffer + Backspace: hand off to the app
                             // (e.g. a tag editor removing the last chip). Gated
@@ -1260,14 +1440,13 @@ impl Widget for Input {
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Delete) => {
-                    // A selection is deleted as a unit; otherwise delete the
-                    // single char to the right of the caret.
-                    if self.delete_selection() {
-                        self.push_to_source();
-                        if let Some(handler) = self.on_change.as_mut() {
-                            let snapshot = self.value.borrow().clone();
-                            handler(&snapshot, ctx);
-                        }
+                    // A selection is deleted as a unit (a discrete undo step);
+                    // otherwise delete the single char to the right of the
+                    // caret (coalescing with a run of forward Deletes).
+                    if self.selection_range().is_some() {
+                        self.begin_edit(EditKind::Delete, false);
+                        self.delete_selection();
+                        self.commit_edit(EditKind::Delete, true, ctx);
                     } else {
                         let cursor = self.cursor.get();
                         let len = self.value.borrow().len();
@@ -1276,14 +1455,10 @@ impl Widget for Input {
                                 let v = self.value.borrow();
                                 Self::next_char_boundary(&v, cursor)
                             };
+                            self.begin_edit(EditKind::Delete, true);
                             self.value.borrow_mut().drain(cursor..next);
                             self.desired_col.set(None);
-
-                            self.push_to_source();
-                            if let Some(handler) = self.on_change.as_mut() {
-                                let snapshot = self.value.borrow().clone();
-                                handler(&snapshot, ctx);
-                            }
+                            self.commit_edit(EditKind::Delete, false, ctx);
                         }
                     }
                     EventResult::Consumed
@@ -1316,6 +1491,7 @@ impl Widget for Input {
                         }
                     }
                     self.desired_col.set(None);
+                    self.last_edit.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowRight) => {
@@ -1347,6 +1523,7 @@ impl Widget for Input {
                         }
                     }
                     self.desired_col.set(None);
+                    self.last_edit.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowUp) if self.multiline => {
@@ -1373,6 +1550,7 @@ impl Widget for Input {
                         // restore the original visual column.
                         self.desired_col.set(Some(target_col));
                     }
+                    self.last_edit.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowDown) if self.multiline => {
@@ -1395,6 +1573,7 @@ impl Widget for Input {
                         self.cursor.set(new_cursor);
                         self.desired_col.set(Some(target_col));
                     }
+                    self.last_edit.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Home) => {
@@ -1405,6 +1584,7 @@ impl Widget for Input {
                     }
                     self.cursor.set(0);
                     self.desired_col.set(None);
+                    self.last_edit.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::End) => {
@@ -1415,27 +1595,37 @@ impl Widget for Input {
                     }
                     self.cursor.set(self.value.borrow().len());
                     self.desired_col.set(None);
+                    self.last_edit.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Enter) => {
                     if self.multiline {
                         // Insert a newline at the cursor; on_submit is
-                        // intentionally inert in multi-line mode so the
-                        // field behaves like a textarea.
+                        // intentionally inert in multi-line mode so the field
+                        // behaves like a textarea. A newline is its own discrete
+                        // undo step — it doesn't merge with the typing on either
+                        // side.
                         let cursor = self.cursor.get();
+                        self.begin_edit(EditKind::Insert, false);
                         self.value.borrow_mut().insert(cursor, '\n');
                         self.cursor.set(cursor + 1);
                         self.desired_col.set(None);
-
-                        self.push_to_source();
-                        if let Some(handler) = self.on_change.as_mut() {
-                            let snapshot = self.value.borrow().clone();
-                            handler(&snapshot, ctx);
-                        }
+                        self.commit_edit(EditKind::Insert, true, ctx);
                     } else if let Some(handler) = self.on_submit.as_mut() {
                         let snapshot = self.value.borrow().clone();
                         handler(&snapshot, ctx);
                     }
+                    EventResult::Consumed
+                }
+                // Ctrl/Cmd+Shift+Z = redo (the mac / browser convention). This
+                // chord carries Shift, so it can't match the `is_cmd_combo` arm
+                // below — it needs its own guard ahead of it. Matched
+                // case-insensitively since the promoted char may arrive as
+                // 'z' or 'Z' depending on the platform's shift handling.
+                Key::Character(c)
+                    if is_cmd_shift_combo(ctx.modifiers) && c.eq_ignore_ascii_case(&'z') =>
+                {
+                    self.redo(ctx);
                     EventResult::Consumed
                 }
                 // Clipboard chords arrive here as `Character` KeyDowns because
@@ -1456,17 +1646,27 @@ impl Widget for Input {
                             EventResult::Consumed
                         }
                         'x' => {
-                            // Cut = copy + delete the selection.
+                            // Cut = copy + delete the selection (a discrete
+                            // undo step).
                             if let Some(text) = self.selected_text() {
                                 ctx.write_clipboard(text);
+                                self.begin_edit(EditKind::Delete, false);
                                 if self.delete_selection() {
-                                    self.push_to_source();
-                                    if let Some(handler) = self.on_change.as_mut() {
-                                        let snapshot = self.value.borrow().clone();
-                                        handler(&snapshot, ctx);
-                                    }
+                                    self.commit_edit(EditKind::Delete, true, ctx);
                                 }
                             }
+                            EventResult::Consumed
+                        }
+                        // Undo / redo. Ctrl/Cmd+Z undoes; Ctrl/Cmd+Y redoes
+                        // (the Windows convention). Ctrl/Cmd+Shift+Z also redoes
+                        // — that chord carries Shift so it can't reach this
+                        // `is_cmd_combo` arm; it's handled just above.
+                        'z' => {
+                            self.undo(ctx);
+                            EventResult::Consumed
+                        }
+                        'y' => {
+                            self.redo(ctx);
                             EventResult::Consumed
                         }
                         // Other Ctrl/Cmd+letter combos aren't ours — leave

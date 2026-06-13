@@ -1299,6 +1299,30 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_shift_letter_promotes_to_key_down() {
+        // Ctrl+Shift+Z is Input's redo chord. It must promote to a KeyDown
+        // like any other Ctrl combo even though Shift is also held —
+        // `shift_alone_stays_as_char_input` only applies when Shift is the
+        // *sole* modifier. `Input::event` matches the redo key
+        // case-insensitively, so assert the promotion, not the char's case.
+        let events = translate_character(
+            "z",
+            Modifiers {
+                shift: true,
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            WidgetEvent::KeyDown {
+                key: Key::Character(_)
+            }
+        ));
+    }
+
+    #[test]
     fn system_theme_signal_is_readable_and_writable() {
         // The reactive bridge that publishes `WindowEvent::ThemeChanged`
         // assumes `Signal<Option<SystemTheme>>` round-trips through the
