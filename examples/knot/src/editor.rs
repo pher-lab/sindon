@@ -12,12 +12,14 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::rc::Rc;
 
+use shroud::core::Color;
 use shroud::platform::FileDialog;
 use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, Image, Input, ReactiveChildren, ScrollView, TextWidget};
 
 use crate::backlinks;
+use crate::highlight;
 use crate::i18n::{self, Key};
 use crate::lock_screen;
 use crate::notice;
@@ -27,6 +29,78 @@ use crate::sidebar::SidebarRefresh;
 use crate::state::{AppState, Phase};
 use crate::tag_editor::{self, TagRefresh};
 use crate::toolbar;
+
+/// Live syntax-highlight classifier for the body editor (B-1 ②).
+///
+/// Scans the markdown `body` for fenced code blocks and, for each one in a known
+/// language, runs the same dependency-free tokenizer the preview uses
+/// ([`crate::highlight`]) and maps every non-`Plain` token to an absolute byte
+/// range + theme color via [`preview::token_color`]. Prose, fence markers, and
+/// unknown-language blocks stay the default text color (they emit no range).
+///
+/// Returned ranges are absolute byte offsets into `body` on `char` boundaries
+/// (tokens are slices of the source), exactly what [`Input::highlighter`] wants.
+/// Because this runs every paint and `token_color` reads the live theme, the
+/// editor's code colors track a Light/Dark swap immediately — unlike the
+/// preview's build-time spans.
+fn editor_highlight(body: &str) -> Vec<(usize, usize, Color)> {
+    let lines: Vec<&str> = body.split('\n').collect();
+    // Absolute byte offset of each line's first char. `split('\n')` drops one
+    // `\n` between consecutive lines, so each start is the running sum of the
+    // previous lines' byte lengths plus one separator each.
+    let mut line_start = Vec::with_capacity(lines.len());
+    let mut acc = 0usize;
+    for l in &lines {
+        line_start.push(acc);
+        acc += l.len() + 1;
+    }
+
+    // A fence is a line whose trimmed text opens with ```; the rest is the info
+    // string (language). The same shape closes a block (with empty info).
+    let fence_info = |line: &str| -> Option<String> {
+        line.trim_start()
+            .strip_prefix("```")
+            .map(|rest| rest.trim().to_string())
+    };
+
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(info) = fence_info(lines[i]) else {
+            i += 1;
+            continue;
+        };
+        // Opening fence at line `i`; inner code is lines (i, j) up to the next
+        // fence (the closer) or end of buffer.
+        let inner_start = i + 1;
+        let mut j = inner_start;
+        while j < lines.len() && fence_info(lines[j]).is_none() {
+            j += 1;
+        }
+        if inner_start < j {
+            let inner_source = lines[inner_start..j].join("\n");
+            if let Some(per_line) = highlight::highlight(&inner_source, &info) {
+                // `highlight` splits the inner source back into the same lines,
+                // so token list `k` belongs to `lines[inner_start + k]`; its
+                // tokens concatenate to that line, so summing byte lengths walks
+                // the absolute offset across the line.
+                for (k, tokens) in per_line.iter().enumerate() {
+                    let mut off = line_start[inner_start + k];
+                    for tok in tokens {
+                        let len = tok.text.len();
+                        if let Some(color) = preview::token_color(tok.class) {
+                            ranges.push((off, off + len, color));
+                        }
+                        off += len;
+                    }
+                }
+            }
+        }
+        // Resume after the closing fence (or at EOF if the block was unclosed).
+        i = if j < lines.len() { j + 1 } else { j };
+    }
+    ranges
+}
 
 /// True when the app is unlocked *and* a note is selected — the condition for
 /// showing any editing surface at all (inputs or preview). Shared by the
@@ -319,6 +393,9 @@ pub fn build(
             .multiline()
             .lines(16)
             .value(body_sig)
+            // Live syntax highlight for fenced code blocks, reusing the same
+            // tokenizer + theme colors as the preview (see `editor_highlight`).
+            .highlighter(editor_highlight)
             // Mirror the caret + selection so the toolbar can insert at / wrap
             // them (see `toolbar`).
             .cursor_signal(cursor_sig)
@@ -618,6 +695,63 @@ mod tests {
             preview_token(true, "x\ny"),
             preview_token(true, "x\nz"),
             "an edit while shown changes the token"
+        );
+    }
+
+    #[test]
+    fn editor_highlight_tints_only_fenced_code_at_exact_offsets() {
+        let body = "intro text\n```rust\nfn main() {}\n```\nafter";
+        let ranges = editor_highlight(body);
+        assert!(!ranges.is_empty(), "a rust block should produce ranges");
+        // Nothing outside the code (prose, fence markers) may be tinted, and
+        // every range must be a valid in-bounds slice.
+        for &(lo, hi, _) in &ranges {
+            assert!(lo < hi && hi <= body.len());
+            let slice = &body[lo..hi];
+            assert!(!slice.contains("intro"), "prose tinted: {slice:?}");
+            assert!(!slice.contains("after"), "prose tinted: {slice:?}");
+            assert!(!slice.contains("```"), "fence marker tinted: {slice:?}");
+        }
+        // The `fn` keyword maps to its exact absolute byte offset.
+        let fn_off = body.find("fn main").unwrap();
+        assert!(
+            ranges
+                .iter()
+                .any(|&(lo, hi, _)| lo == fn_off && &body[lo..hi] == "fn"),
+            "the `fn` keyword should be tinted at byte {fn_off}",
+        );
+    }
+
+    #[test]
+    fn editor_highlight_leaves_prose_and_unknown_languages_plain() {
+        // No fences → nothing tinted.
+        assert!(editor_highlight("# Heading\n\n**prose** and `inline`.").is_empty());
+        // Unknown language → the tokenizer returns None, so the block stays plain.
+        assert!(
+            editor_highlight("```wxyz\nfn main() {}\n```").is_empty(),
+            "unknown language must not be tinted",
+        );
+    }
+
+    #[test]
+    fn editor_highlight_offsets_survive_multibyte_prose_above_the_block() {
+        // Multibyte text before the block shifts every byte offset; the keyword
+        // and number inside must still land on their true byte positions.
+        let body = "日本語メモ\n```rust\nlet x = 42;\n```";
+        let ranges = editor_highlight(body);
+        let let_off = body.find("let").unwrap();
+        assert!(
+            ranges
+                .iter()
+                .any(|&(lo, hi, _)| lo == let_off && &body[lo..hi] == "let"),
+            "keyword offset must account for the multibyte prose above it",
+        );
+        let num_off = body.find("42").unwrap();
+        assert!(
+            ranges
+                .iter()
+                .any(|&(lo, hi, _)| lo == num_off && &body[lo..hi] == "42"),
+            "number literal must be tinted at its true offset",
         );
     }
 }

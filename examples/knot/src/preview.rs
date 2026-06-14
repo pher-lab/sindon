@@ -115,7 +115,10 @@ fn inline_accent() -> Color {
 /// Like inline `code`/link spans, these are resolved at build time (TextSpan
 /// colors aren't reactive), so a theme swap mid-preview leaves token tints a
 /// beat stale until the next edit⇄preview toggle — the documented tradeoff.
-fn token_color(class: TokenClass) -> Option<Color> {
+///
+/// `pub(crate)` so the live editor highlighter ([`crate::editor`]) maps the same
+/// token classes to the same theme colors — one source of truth for code color.
+pub(crate) fn token_color(class: TokenClass) -> Option<Color> {
     let colors = settings::current_theme().colors;
     match class {
         TokenClass::Plain => None,
