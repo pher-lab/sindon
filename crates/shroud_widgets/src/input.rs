@@ -47,6 +47,7 @@ use crate::widget::Widget;
 use shroud_core::{Color, Point, Rect};
 use shroud_layout::FlexStyle;
 use shroud_reactive::Signal;
+use shroud_text::TextSpan;
 use zeroize::Zeroizing;
 
 /// A standard text input field.
@@ -65,6 +66,50 @@ type TextCallback = Box<dyn FnMut(&str, &mut EventContext)>;
 /// [`Input::on_backspace_empty`], where the handler reacts to a focus/key
 /// event rather than to the buffer contents.
 type CtxCallback = Box<dyn FnMut(&mut EventContext)>;
+
+/// A syntax-highlight classifier (B-1 spike). Given the current buffer, returns
+/// the byte ranges to tint and the color for each — e.g. a keyword in blue, a
+/// string literal in green. Ranges should be on `char` boundaries and not
+/// overlap; the widget tiles the gaps between them with the default text color
+/// (see [`build_highlight_spans`]). Called on every paint with the live buffer,
+/// so the closure must be cheap and must not retain the `&str` it is handed (it
+/// is the user's plaintext). `Fn` (not `FnMut`) because painting holds `&self`.
+type Highlighter = Box<dyn Fn(&str) -> Vec<(usize, usize, Color)>>;
+
+/// Tile `text` into color-only [`TextSpan`]s from a highlighter's colored
+/// `ranges`, filling every gap with a default-attrs, no-color span so the spans
+/// concatenate back to exactly `text`. That exact tiling is what keeps rich
+/// rendering layout-identical to plain shaping — the spans differ from the plain
+/// buffer only in color, and color never moves a glyph (proven in
+/// `shroud_text/tests/highlight_layout_spike.rs`), so the caret / selection /
+/// click geometry (all computed from plain shaping) stays valid.
+///
+/// Defensive: ranges are sorted, clamped to the buffer, and any that overlap a
+/// previously-emitted range or fall on a non-`char` boundary are skipped rather
+/// than panicking the paint-side slice — a misbehaving highlighter degrades to
+/// less color, never a crash.
+fn build_highlight_spans(text: &str, mut ranges: Vec<(usize, usize, Color)>) -> Vec<TextSpan> {
+    ranges.sort_by_key(|&(lo, _, _)| lo);
+    let mut spans: Vec<TextSpan> = Vec::new();
+    let mut pos = 0usize;
+    for (lo, hi, color) in ranges {
+        let lo = lo.min(text.len());
+        let hi = hi.min(text.len());
+        // Skip empty, out-of-order / overlapping, or boundary-splitting ranges.
+        if lo < pos || lo >= hi || !text.is_char_boundary(lo) || !text.is_char_boundary(hi) {
+            continue;
+        }
+        if lo > pos {
+            spans.push(TextSpan::new(text[pos..lo].to_string()));
+        }
+        spans.push(TextSpan::new(text[lo..hi].to_string()).color(color));
+        pos = hi;
+    }
+    if pos < text.len() {
+        spans.push(TextSpan::new(text[pos..].to_string()));
+    }
+    spans
+}
 
 /// True for the canonical "command" chord used by select-all / copy / cut:
 /// Ctrl-only (Windows/Linux) or Logo/Cmd-only (macOS), with no Shift or Alt.
@@ -340,6 +385,12 @@ pub struct Input {
     /// checkpoint — set after a discrete op, a caret move, undo/redo, or an
     /// external value change.
     last_edit: Cell<Option<(EditKind, usize)>>,
+    /// Optional syntax-highlight classifier (B-1 spike). When `Some`, the
+    /// non-empty render path tiles the buffer into color-only spans via this
+    /// closure and shapes them with `shape_rich` instead of the plain
+    /// `shape_text`. Color-only spans are layout-identical to plain shaping, so
+    /// the (plain-shaped) caret / selection geometry is unaffected.
+    highlighter: Option<Highlighter>,
 }
 
 impl Input {
@@ -379,6 +430,7 @@ impl Input {
             undo_stack: RefCell::new(VecDeque::new()),
             redo_stack: RefCell::new(VecDeque::new()),
             last_edit: Cell::new(None),
+            highlighter: None,
         }
     }
 
@@ -626,6 +678,25 @@ impl Input {
     /// color keeps the selected glyphs legible on top.
     pub fn selection_color(mut self, color: Color) -> Self {
         self.selection_color = Some(color);
+        self
+    }
+
+    /// Attach a syntax-highlight classifier (B-1 spike, experimental).
+    ///
+    /// The closure is called on every paint with the current buffer and returns
+    /// `(start, end, color)` byte ranges to tint; gaps render in the default
+    /// text color. Because the spans differ from the plain buffer only in color
+    /// — and color never moves a glyph — the caret, selection, and click
+    /// hit-testing (all computed from plain shaping) stay correct without any
+    /// rich-aware geometry. Ranges must be on `char` boundaries and not overlap;
+    /// malformed ranges are skipped, never panicked on.
+    ///
+    /// The closure receives the user's plaintext, so it must not retain it. Has
+    /// no effect on `SecureInput`, which keeps no highlighter (a secret must not
+    /// be classified into spans). Pairs naturally with [`multiline`](Self::multiline)
+    /// for a code editor.
+    pub fn highlighter(mut self, f: impl Fn(&str) -> Vec<(usize, usize, Color)> + 'static) -> Self {
+        self.highlighter = Some(Box::new(f));
         self
     }
 
@@ -1242,9 +1313,21 @@ impl Widget for Input {
                 ctx.set_ime_cursor_area(caret);
             }
         } else {
-            let shaped = ctx
-                .text_engine
-                .shape_text(&value, font_size, line_height, wrap_width);
+            // With a highlighter attached, render through the rich path: tile
+            // the buffer into color-only spans and shape them. Color-only spans
+            // shape identically to the plain buffer (see `build_highlight_spans`),
+            // so the caret math below — still computed from the plain string —
+            // lines up with these glyphs. Without one, the plain path is used
+            // unchanged; its glyphs carry no per-glyph color, so the shared draw
+            // loop's `unwrap_or(text_color)` reproduces the old behavior exactly.
+            let shaped = if let Some(hl) = self.highlighter.as_ref() {
+                let spans = build_highlight_spans(&value, hl(&value));
+                ctx.text_engine
+                    .shape_rich(&spans, font_size, line_height, wrap_width)
+            } else {
+                ctx.text_engine
+                    .shape_text(&value, font_size, line_height, wrap_width)
+            };
 
             for glyph in &shaped.glyphs {
                 if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
@@ -1252,7 +1335,7 @@ impl Widget for Input {
                         text_x as i32 + glyph.x,
                         text_y as i32 + glyph.y,
                         image,
-                        text_color,
+                        glyph.color.unwrap_or(text_color),
                         glyph.cache_key,
                     );
                 }
