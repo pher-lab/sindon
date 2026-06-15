@@ -152,6 +152,14 @@ const DOUBLE_CLICK_SLOP: f32 = 4.0;
 /// past the cap are evicted (and wiped) from the front.
 const UNDO_CAP: usize = 200;
 
+/// Width of the multi-line viewport's scrollbar indicator (px). Mirrors
+/// `ScrollView`'s scrollbar metrics so the two controls read as one.
+const SCROLLBAR_WIDTH: f32 = 6.0;
+/// Inset of the scrollbar from the field's inner right edge (px).
+const SCROLLBAR_INSET: f32 = 2.0;
+/// Minimum thumb height (px) so the handle stays grabbable on very long content.
+const SCROLLBAR_THUMB_MIN: f32 = 16.0;
+
 /// Coalescing class for an edit, used to decide whether a new edit folds into
 /// the current undo step or starts a fresh one. Consecutive same-kind inserts
 /// (or deletes) that continue from where the previous edit left the caret merge
@@ -1488,6 +1496,42 @@ impl Widget for Input {
         if self.multiline {
             ctx.pop_offset();
             ctx.pop_clip();
+        }
+
+        // Multi-line scrollbar indicator (overlay). Drawn after the text clip /
+        // offset are popped, so it sits unclipped at viewport coords and never
+        // scrolls with the glyphs. Mirrors `ScrollView::paint_post_children`.
+        //
+        // Overlay choice (option A): the bar rides the field's right edge, just
+        // inside the 1px border. The body wraps at `width - 16` (8px padding per
+        // side), so wrapped lines rarely reach the last few px under the 6px
+        // track. A glyph that does is drawn *over* the rect (the renderer draws
+        // all glyphs above all rects within a layer), which is acceptable for
+        // v1 — no gutter is reserved, so the caret / hit-test / selection
+        // geometry (all keyed off the unchanged `wrap_width`) is left untouched.
+        if self.multiline && max_scroll > 0.0 && viewport_h > 0.0 {
+            let content_h = viewport_h + max_scroll;
+            let track_color = ctx.theme.colors.surface_variant;
+            let thumb_color = ctx.theme.colors.on_surface_variant;
+
+            let track_x = layout.right() - 1.0 - SCROLLBAR_WIDTH - SCROLLBAR_INSET;
+            let track_top = layout.origin.y + 8.0;
+            ctx.fill_rect(
+                Rect::new(track_x, track_top, SCROLLBAR_WIDTH, viewport_h),
+                track_color,
+            );
+
+            // Thumb size proportional to the viewport/content ratio, floored so
+            // it stays grabbable, capped at the track height.
+            let thumb_h = ((viewport_h / content_h) * viewport_h)
+                .max(SCROLLBAR_THUMB_MIN)
+                .min(viewport_h);
+            let progress = (scroll_y / max_scroll).clamp(0.0, 1.0);
+            let thumb_y = track_top + progress * (viewport_h - thumb_h);
+            ctx.fill_rect(
+                Rect::new(track_x, thumb_y, SCROLLBAR_WIDTH, thumb_h),
+                thumb_color,
+            );
         }
 
         if self.focused {

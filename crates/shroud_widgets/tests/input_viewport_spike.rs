@@ -183,3 +183,89 @@ fn single_line_input_does_not_clip_or_scroll() {
         );
     }
 }
+
+// --- Scrollbar indicator -------------------------------------------------
+//
+// Mirrored from `input.rs` (the consts there are private); the indicator draws
+// a `SCROLLBAR_WIDTH`-wide track + thumb at the field's inner right edge.
+const SCROLLBAR_WIDTH: f32 = 6.0;
+const SCROLLBAR_INSET: f32 = 2.0;
+const SCROLLBAR_THUMB_MIN: f32 = 16.0;
+
+/// `(y, height)` of every rect the scrollbar draws: the `SCROLLBAR_WIDTH`-wide
+/// fills sitting at the field's inner right edge (`right - 1 - WIDTH - INSET`).
+/// Filtering on that x keeps the 2px focus-ring strokes (drawn *outside* the
+/// box) and the 1px borders out of the result.
+fn scrollbar_bars(ctx: &PaintContext, field: Rect) -> Vec<(f32, f32)> {
+    let bar_x = field.right() - 1.0 - SCROLLBAR_WIDTH - SCROLLBAR_INSET;
+    ctx.rects
+        .iter()
+        .filter(|r| (r.width - SCROLLBAR_WIDTH).abs() < 0.01 && (r.x - bar_x).abs() < 0.5)
+        .map(|r| (r.y, r.height))
+        .collect()
+}
+
+#[test]
+fn scrollbar_indicator_drawn_when_content_overflows() {
+    let (tree, _idx, rect) = build_and_type(20);
+    let ctx = paint(&tree);
+
+    let viewport_h = rect.size.height - 16.0;
+    let bars = scrollbar_bars(&ctx, rect);
+    assert_eq!(
+        bars.len(),
+        2,
+        "overflowing multi-line field draws a track + thumb at the right edge"
+    );
+
+    // The track spans the full viewport; the thumb is shorter (content taller
+    // than the viewport) but never below the grab-floor, and stays inside the
+    // track.
+    let track = bars.iter().find(|(_, h)| (h - viewport_h).abs() < 0.5);
+    assert!(track.is_some(), "expected a full-height scrollbar track");
+    let (thumb_y, thumb_h) = *bars
+        .iter()
+        .find(|(_, h)| *h < viewport_h - 0.5)
+        .expect("expected a scrollbar thumb shorter than the track");
+    assert!(
+        thumb_h >= SCROLLBAR_THUMB_MIN - 0.01,
+        "thumb must respect the minimum grab height: {thumb_h}"
+    );
+    let top = rect.origin.y + 8.0;
+    assert!(
+        thumb_y >= top - 0.5 && thumb_y + thumb_h <= top + viewport_h + 0.5,
+        "thumb must sit inside the track: y={thumb_y} h={thumb_h} viewport=[{top}, {}]",
+        top + viewport_h
+    );
+}
+
+#[test]
+fn no_scrollbar_when_content_fits() {
+    // One short line fits well within the full-height viewport, so the field
+    // has nothing to scroll and must draw no scrollbar.
+    let (tree, _idx, rect) = build_and_type(1);
+    let ctx = paint(&tree);
+    assert!(
+        scrollbar_bars(&ctx, rect).is_empty(),
+        "a multi-line field whose content fits draws no scrollbar"
+    );
+}
+
+#[test]
+fn single_line_input_draws_no_scrollbar() {
+    // The viewport + scrollbar machinery is multi-line only.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(W).height(H));
+    let idx = tree.add_child(root, Input::new().with_value("hello world"));
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(W, H, &mut engine, &theme);
+    let rect = tree.layout_rect(idx);
+
+    let ctx = paint(&tree);
+    assert!(
+        scrollbar_bars(&ctx, rect).is_empty(),
+        "single-line input must never draw a scrollbar"
+    );
+}
