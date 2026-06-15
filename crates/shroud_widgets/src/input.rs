@@ -391,6 +391,28 @@ pub struct Input {
     /// `shape_text`. Color-only spans are layout-identical to plain shaping, so
     /// the (plain-shaped) caret / selection geometry is unaffected.
     highlighter: Option<Highlighter>,
+    /// Internal vertical scroll offset for multi-line mode (px). The viewport
+    /// shows `[scroll_y, scroll_y + viewport_h]` of the shaped content; glyphs
+    /// are clipped to the field's padding box and translated up by this amount,
+    /// so a long note never bleeds past the border. `Cell` because paint (which
+    /// holds `&self`) clamps and adjusts it. Always 0 in single-line mode.
+    scroll_y: Cell<f32>,
+    /// Set whenever the caret moves (edit, arrow, click, undo) so the next paint
+    /// scrolls the viewport to keep the caret visible. Taken (cleared) by paint.
+    /// A wheel scroll deliberately does *not* set it, so scrolling away from the
+    /// caret with the mouse sticks instead of snapping back.
+    reveal_caret: Cell<bool>,
+    /// Max scroll offset (`content_h - viewport_h`, clamped at 0) computed at the
+    /// last paint. Read by the wheel handler — which has no text engine to
+    /// re-measure — to decide whether the field has anything to scroll (and thus
+    /// whether to consume the wheel). Paint re-clamps authoritatively.
+    last_max_scroll: Cell<f32>,
+    /// Flex-grow factor applied in [`Widget::style`] (`None` = no grow).
+    grow: Option<f32>,
+    /// When set, the field fills its parent's height (`height: 100%`). In
+    /// multi-line mode this turns it into a fixed viewport that scrolls its
+    /// content internally rather than sizing to a fixed [`line_count`].
+    fill_height: bool,
 }
 
 impl Input {
@@ -431,6 +453,11 @@ impl Input {
             redo_stack: RefCell::new(VecDeque::new()),
             last_edit: Cell::new(None),
             highlighter: None,
+            scroll_y: Cell::new(0.0),
+            reveal_caret: Cell::new(false),
+            last_max_scroll: Cell::new(0.0),
+            grow: None,
+            fill_height: false,
         }
     }
 
@@ -540,6 +567,27 @@ impl Input {
     /// 3 lines.
     pub fn lines(mut self, count: usize) -> Self {
         self.line_count = Some(count.max(1));
+        self
+    }
+
+    /// Flex-grow factor — the field claims this share of leftover main-axis
+    /// space from its parent. Pair with [`multiline`](Self::multiline) +
+    /// [`height_full`](Self::height_full) for an editor that fills the pane and
+    /// scrolls its content internally instead of growing without bound.
+    pub fn grow(mut self, factor: f32) -> Self {
+        self.grow = Some(factor);
+        self
+    }
+
+    /// Fill the parent's height (`height: 100%`).
+    ///
+    /// In [`multiline`](Self::multiline) mode this turns the field into a fixed
+    /// viewport: content taller than the viewport scrolls internally (mouse
+    /// wheel, and the caret is auto-revealed on edit / navigation) rather than
+    /// the field growing past its box. Without it a multi-line field sizes to
+    /// [`lines`](Self::lines) line-heights. No effect in single-line mode.
+    pub fn height_full(mut self) -> Self {
+        self.fill_height = true;
         self
     }
 
@@ -953,6 +1001,9 @@ impl Input {
                 // switch or programmatic set must not be undoable into a
                 // *different* document, so start history fresh after the rebase.
                 self.clear_history();
+                // A note switch should show the new body from the top rather
+                // than inheriting the previous note's scroll offset.
+                self.scroll_y.set(0.0);
             }
         }
         if let Some(src) = self.number_source.as_ref() {
@@ -1142,15 +1193,30 @@ impl Widget for Input {
 
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
-        if self.multiline {
+        let mut style = if self.multiline {
             let line_height = font_size * 1.2;
-            let rows = self.line_count.unwrap_or(3) as f32;
+            // When the field fills its parent's height it owns a viewport that
+            // scrolls internally, so a tiny floor (2 rows) is enough to keep it
+            // usable in a small pane; the explicit `lines` count is only the
+            // size when *not* filling.
+            let rows = if self.fill_height {
+                2.0
+            } else {
+                self.line_count.unwrap_or(3) as f32
+            };
             FlexStyle::new()
                 .padding(8.0)
                 .min_height(rows * line_height + 16.0)
         } else {
             FlexStyle::new().padding(8.0).min_height(font_size + 20.0)
+        };
+        if self.fill_height {
+            style = style.height_full();
         }
+        if let Some(factor) = self.grow {
+            style = style.grow(factor);
+        }
+        style
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
@@ -1210,13 +1276,36 @@ impl Widget for Input {
             None
         };
 
+        // Multi-line internal viewport: shape the buffer once to learn its
+        // content height, clamp the stored scroll offset against it, and (after
+        // the hit-test below resolves any click) scroll so a just-moved caret
+        // stays visible. Single-line fields never scroll (`scroll_y` stays 0).
+        let value_is_empty = self.value.borrow().is_empty();
+        let viewport_h = (layout.size.height - 16.0).max(0.0);
+        let mut scroll_y = 0.0_f32;
+        let mut max_scroll = 0.0_f32;
+        if self.multiline {
+            let content_h = if value_is_empty {
+                line_height
+            } else {
+                let v = self.value.borrow();
+                ctx.text_engine
+                    .shape_text(&v, font_size, line_height, wrap_width)
+                    .height
+            };
+            max_scroll = (content_h - viewport_h).max(0.0);
+            scroll_y = self.scroll_y.get().clamp(0.0, max_scroll);
+        }
+
         // Resolve a deferred click / drag against the shaped text now that the
         // engine + geometry are in hand (the event handler has neither — see
         // `pending_hit`). `extend` keeps the anchor and moves only the active
         // end; otherwise the caret collapses to a fresh, selection-free point.
         if let Some((pos, extend)) = self.pending_hit.take() {
             let rel_x = pos.x - text_x;
-            let rel_y = pos.y - text_y;
+            // Add the current scroll offset so a click maps to the character the
+            // user actually sees (the text is drawn shifted up by `scroll_y`).
+            let rel_y = pos.y - text_y + scroll_y;
             let offset = {
                 let v = self.value.borrow();
                 ctx.text_engine.offset_at_point(
@@ -1255,6 +1344,58 @@ impl Widget for Input {
             self.push_selection_to_source();
         }
 
+        // Caret position (focused only), computed once and reused for both the
+        // scroll-to-caret adjustment and the caret draw below. `(0, 0)` for an
+        // empty buffer or a caret at the very start.
+        let caret_xy = if self.focused {
+            let cursor = self.cursor.get();
+            if value_is_empty || cursor == 0 {
+                Some((0.0, 0.0))
+            } else {
+                let v = self.value.borrow();
+                Some(ctx.text_engine.cursor_position(
+                    &v[..cursor],
+                    font_size,
+                    line_height,
+                    wrap_width,
+                ))
+            }
+        } else {
+            None
+        };
+
+        // Scroll-to-caret: after an edit / navigation / click (which set the
+        // reveal flag) nudge the viewport so the caret line is fully visible. A
+        // wheel scroll does not set the flag, so mouse scrolling is not undone.
+        if self.multiline {
+            if self.reveal_caret.take() {
+                if let Some((_cx, cy)) = caret_xy {
+                    if cy < scroll_y {
+                        scroll_y = cy;
+                    } else if cy + line_height > scroll_y + viewport_h {
+                        scroll_y = cy + line_height - viewport_h;
+                    }
+                    scroll_y = scroll_y.clamp(0.0, max_scroll);
+                }
+            }
+            self.scroll_y.set(scroll_y);
+            self.last_max_scroll.set(max_scroll);
+        }
+
+        // Clip the text to the field's padding box and translate it up by the
+        // scroll offset, so overflowing lines never cross the border or bleed
+        // below the field. Single-line fields skip this (nothing to scroll or
+        // clip vertically; horizontal overflow is intentional — see above).
+        if self.multiline {
+            ctx.push_clip(Rect::new(
+                layout.origin.x,
+                text_y,
+                layout.size.width,
+                viewport_h,
+            ));
+            ctx.push_offset(0.0, -scroll_y);
+        }
+
         // Selection highlight, painted behind the glyphs so the (opaque) text
         // stays legible on top of the translucent fill.
         if self.focused {
@@ -1281,85 +1422,72 @@ impl Widget for Input {
             }
         }
 
-        let value = self.value.borrow();
-        if value.is_empty() {
-            if !self.placeholder.is_empty() {
-                let shaped = ctx.text_engine.shape_text(
-                    &self.placeholder,
-                    font_size,
-                    line_height,
-                    wrap_width,
-                );
+        {
+            let value = self.value.borrow();
+            if value.is_empty() {
+                if !self.placeholder.is_empty() {
+                    let shaped = ctx.text_engine.shape_text(
+                        &self.placeholder,
+                        font_size,
+                        line_height,
+                        wrap_width,
+                    );
+                    for glyph in &shaped.glyphs {
+                        if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
+                            ctx.draw_glyph(
+                                text_x as i32 + glyph.x,
+                                text_y as i32 + glyph.y,
+                                image,
+                                placeholder_color,
+                                glyph.cache_key,
+                            );
+                        }
+                    }
+                }
+            } else {
+                // With a highlighter attached, render through the rich path: tile
+                // the buffer into color-only spans and shape them. Color-only spans
+                // shape identically to the plain buffer (see `build_highlight_spans`),
+                // so the caret math — still computed from the plain string — lines
+                // up with these glyphs. Without one, the plain path is used
+                // unchanged; its glyphs carry no per-glyph color, so the shared draw
+                // loop's `unwrap_or(text_color)` reproduces the old behavior exactly.
+                let shaped = if let Some(hl) = self.highlighter.as_ref() {
+                    let spans = build_highlight_spans(&value, hl(&value));
+                    ctx.text_engine
+                        .shape_rich(&spans, font_size, line_height, wrap_width)
+                } else {
+                    ctx.text_engine
+                        .shape_text(&value, font_size, line_height, wrap_width)
+                };
+
                 for glyph in &shaped.glyphs {
                     if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                         ctx.draw_glyph(
                             text_x as i32 + glyph.x,
                             text_y as i32 + glyph.y,
                             image,
-                            placeholder_color,
+                            glyph.color.unwrap_or(text_color),
                             glyph.cache_key,
                         );
                     }
                 }
             }
+        }
 
-            // Cursor at start when focused and empty
-            if self.focused {
-                let caret = Rect::new(text_x, text_y, 2.0, font_size);
-                ctx.fill_rect(caret, text_color);
-                // Anchor the IME candidate window at the caret. The OS
-                // positions composition UI relative to this rect; without
-                // it Win11 IMEs default to a screen-corner location.
-                ctx.set_ime_cursor_area(caret);
-            }
-        } else {
-            // With a highlighter attached, render through the rich path: tile
-            // the buffer into color-only spans and shape them. Color-only spans
-            // shape identically to the plain buffer (see `build_highlight_spans`),
-            // so the caret math below — still computed from the plain string —
-            // lines up with these glyphs. Without one, the plain path is used
-            // unchanged; its glyphs carry no per-glyph color, so the shared draw
-            // loop's `unwrap_or(text_color)` reproduces the old behavior exactly.
-            let shaped = if let Some(hl) = self.highlighter.as_ref() {
-                let spans = build_highlight_spans(&value, hl(&value));
-                ctx.text_engine
-                    .shape_rich(&spans, font_size, line_height, wrap_width)
-            } else {
-                ctx.text_engine
-                    .shape_text(&value, font_size, line_height, wrap_width)
-            };
+        // Caret (on top of the glyphs), shared by the empty and non-empty cases.
+        // Anchors the IME candidate window so the OS composition UI follows the
+        // caret instead of defaulting to a screen corner; the active offset folds
+        // the scroll into the reported (window-relative) rect automatically.
+        if let Some((cx, cy)) = caret_xy {
+            let caret = Rect::new(text_x + cx, text_y + cy, 2.0, font_size);
+            ctx.fill_rect(caret, text_color);
+            ctx.set_ime_cursor_area(caret);
+        }
 
-            for glyph in &shaped.glyphs {
-                if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
-                    ctx.draw_glyph(
-                        text_x as i32 + glyph.x,
-                        text_y as i32 + glyph.y,
-                        image,
-                        glyph.color.unwrap_or(text_color),
-                        glyph.cache_key,
-                    );
-                }
-            }
-
-            if self.focused {
-                let cursor = self.cursor.get();
-                let (cx, cy) = if cursor == 0 {
-                    (0.0, 0.0)
-                } else {
-                    ctx.text_engine.cursor_position(
-                        &value[..cursor],
-                        font_size,
-                        line_height,
-                        wrap_width,
-                    )
-                };
-                let caret = Rect::new(text_x + cx, text_y + cy, 2.0, font_size);
-                ctx.fill_rect(caret, text_color);
-                // See the empty-buffer branch above for the rationale —
-                // every focused paint re-anchors the IME so it follows
-                // the caret as the user types or arrow-keys around.
-                ctx.set_ime_cursor_area(caret);
-            }
+        if self.multiline {
+            ctx.pop_offset();
+            ctx.pop_clip();
         }
 
         if self.focused {
@@ -1367,7 +1495,7 @@ impl Widget for Input {
         }
     }
 
-    fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
+    fn event(&mut self, event: &WidgetEvent, layout: Rect, ctx: &mut EventContext) -> EventResult {
         // Rebase from source before applying the edit so typing stays on
         // top of any external write that landed since the last paint.
         self.sync_from_source();
@@ -1425,6 +1553,24 @@ impl Widget for Input {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
+                }
+            }
+
+            // Mouse wheel over a multi-line field scrolls its internal viewport.
+            // Only consumed when there is actually content to scroll (so a
+            // non-overflowing field lets the wheel bubble to an outer scroller);
+            // `last_max_scroll` is the bound computed by the last paint. Paint
+            // re-clamps authoritatively, so the raw set here is safe.
+            WidgetEvent::Scroll {
+                position, delta_y, ..
+            } if self.multiline => {
+                let max = self.last_max_scroll.get();
+                if !layout.contains(*position) || max <= 0.0 {
+                    EventResult::Ignored
+                } else {
+                    let new_y = (self.scroll_y.get() - delta_y).clamp(0.0, max);
+                    self.scroll_y.set(new_y);
+                    EventResult::Consumed
                 }
             }
 
@@ -1763,6 +1909,15 @@ impl Widget for Input {
 
             _ => EventResult::Ignored,
         };
+        // Any consumed edit / caret move should bring the caret back into view
+        // on the next paint. A wheel scroll is the one consumed event that must
+        // *not* (so scrolling away from the caret with the mouse sticks).
+        if self.multiline
+            && matches!(result, EventResult::Consumed)
+            && !matches!(event, WidgetEvent::Scroll { .. })
+        {
+            self.reveal_caret.set(true);
+        }
         // Mirror the (possibly moved) caret + selection into the bound signals
         // so an external observer — e.g. a formatting toolbar — can read them.
         // No-op when the respective signal isn't bound.

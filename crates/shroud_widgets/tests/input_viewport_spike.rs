@@ -1,0 +1,185 @@
+//! B-1 ⑤ editor-viewport spike: widget-level proof.
+//!
+//! A multi-line `Input` with `height_full` is a fixed viewport that scrolls its
+//! content *internally* instead of overflowing past its border. These tests
+//! pin the three load-bearing behaviors:
+//!
+//! 1. the caret is scrolled back into view after an edit (so a long note stays
+//!    editable at the bottom),
+//! 2. every glyph is clipped to the field's padding box (so overflow never
+//!    crosses the border / bleeds below the field), and
+//! 3. the mouse wheel moves the viewport.
+//!
+//! A fourth test guards that single-line inputs are left completely unchanged
+//! (no clip, no scroll).
+
+use shroud_core::{Point, Rect, Theme};
+use shroud_text::TextEngine;
+use shroud_widgets::event::{EventContext, MouseButton, WidgetEvent};
+use shroud_widgets::paint::PaintContext;
+use shroud_widgets::tree::WidgetTree;
+use shroud_widgets::{Container, Input};
+
+const W: f32 = 400.0;
+const H: f32 = 120.0;
+
+fn rect_close(a: Rect, b: Rect) -> bool {
+    (a.origin.x - b.origin.x).abs() < 0.5
+        && (a.origin.y - b.origin.y).abs() < 0.5
+        && (a.size.width - b.size.width).abs() < 0.5
+        && (a.size.height - b.size.height).abs() < 0.5
+}
+
+fn paint(tree: &WidgetTree) -> PaintContext {
+    let mut ctx = PaintContext::new(Theme::default());
+    tree.paint(&mut ctx);
+    ctx
+}
+
+/// Build a focused, full-height multi-line `Input`, then type `n_lines` short
+/// lines so the content overflows the viewport and the caret ends at the bottom.
+/// Returns the tree, the input's node index, and its laid-out rect. The caret
+/// hit-test from the focusing click is resolved by a throwaway "warm" paint
+/// *before* typing, so the typed caret position (end of buffer) is what the next
+/// paint sees.
+fn build_and_type(n_lines: usize) -> (WidgetTree, usize, Rect) {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(W).height(H));
+    let input_idx = tree.add_child(root, Input::new().multiline().height_full());
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(W, H, &mut engine, &theme);
+    let rect = tree.layout_rect(input_idx);
+
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    // Resolve the focusing click (caret -> start) before typing fills the buffer.
+    let _ = paint(&tree);
+
+    for i in 0..n_lines {
+        for ch in format!("line {i}").chars() {
+            tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut ev);
+        }
+        if i + 1 < n_lines {
+            tree.dispatch_event(&WidgetEvent::CharInput { ch: '\n' }, &mut ev);
+        }
+    }
+    (tree, input_idx, rect)
+}
+
+/// The single caret is the only 2px-wide rect drawn *inside* the clip (the focus
+/// ring's strokes are drawn unclipped, so they have `clip_rect == None`).
+fn caret_rect(ctx: &PaintContext) -> (f32, f32) {
+    let carets: Vec<_> = ctx
+        .rects
+        .iter()
+        .filter(|r| (r.width - 2.0).abs() < 0.01 && r.clip_rect.is_some())
+        .collect();
+    assert_eq!(carets.len(), 1, "expected exactly one caret rect");
+    (carets[0].y, carets[0].height)
+}
+
+#[test]
+fn caret_scrolls_into_view_for_long_content() {
+    let (tree, _idx, rect) = build_and_type(20);
+    let ctx = paint(&tree);
+
+    let top = rect.origin.y + 8.0;
+    let bottom = rect.origin.y + rect.size.height - 8.0;
+    // Sanity: the content really does overflow, or the test proves nothing.
+    assert!(
+        bottom - top < 19.2 * 20.0,
+        "viewport must be shorter than the 20-line content for this test to matter"
+    );
+
+    let (caret_y, caret_h) = caret_rect(&ctx);
+    assert!(
+        caret_y >= top - 1.0 && caret_y + caret_h <= bottom + 1.0,
+        "caret at end of a long note must be scrolled into view: \
+         caret_y={caret_y} h={caret_h} viewport=[{top}, {bottom}]"
+    );
+}
+
+#[test]
+fn overflowing_glyphs_are_clipped_to_the_field_box() {
+    let (tree, _idx, rect) = build_and_type(20);
+    let ctx = paint(&tree);
+
+    let box_clip = Rect::new(
+        rect.origin.x,
+        rect.origin.y + 8.0,
+        rect.size.width,
+        rect.size.height - 16.0,
+    );
+    assert!(
+        !ctx.glyphs.is_empty(),
+        "the body text should produce glyphs"
+    );
+    for g in &ctx.glyphs {
+        match g.clip_rect {
+            Some(c) => assert!(
+                rect_close(c, box_clip),
+                "glyph clip {c:?} should equal the field's padding box {box_clip:?}"
+            ),
+            None => panic!("a multi-line glyph must be clipped to the field box"),
+        }
+    }
+}
+
+#[test]
+fn mouse_wheel_scrolls_the_viewport() {
+    let (mut tree, _idx, rect) = build_and_type(20);
+
+    // First paint: reveal scrolls to the caret (bottom), so the top lines sit
+    // above the viewport (very negative y once the offset is applied).
+    let before = paint(&tree);
+    let min_y_before = before.glyphs.iter().map(|g| g.y).min().unwrap();
+
+    // Scroll up hard; the wheel does not set the reveal flag, so it sticks.
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::Scroll {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            delta_x: 0.0,
+            delta_y: 10_000.0,
+        },
+        &mut ev,
+    );
+
+    let after = paint(&tree);
+    let min_y_after = after.glyphs.iter().map(|g| g.y).min().unwrap();
+    assert!(
+        min_y_after > min_y_before,
+        "scrolling up must move content down (min glyph y rises): \
+         before={min_y_before} after={min_y_after}"
+    );
+}
+
+#[test]
+fn single_line_input_does_not_clip_or_scroll() {
+    // The viewport machinery is multi-line only — a single-line field must push
+    // no clip (it intentionally lets text overflow horizontally).
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(W).height(H));
+    tree.add_child(root, Input::new().with_value("hello world"));
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(W, H, &mut engine, &theme);
+
+    let ctx = paint(&tree);
+    assert!(!ctx.glyphs.is_empty(), "the value should produce glyphs");
+    for g in &ctx.glyphs {
+        assert!(
+            g.clip_rect.is_none(),
+            "single-line input must not push a clip"
+        );
+    }
+}

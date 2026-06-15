@@ -376,10 +376,10 @@ pub fn build(
         Rc::clone(&body_idx),
     );
 
-    // Body input (multiline, grows to fill remaining height).
-    //
-    // Pass `grow(1.0)` via a wrapper container — Input itself doesn't take
-    // flex-grow on its own style, so wrap it.
+    // Body input (multiline). The wrapper claims the pane's leftover height via
+    // `grow(1.0)`; `height_full` makes the Input fill that wrapper and scroll
+    // its content *internally* (mouse wheel + caret auto-reveal), so a long note
+    // stays editable instead of overflowing past the field's border (B-1 ⑤).
     let body_wrap = tree.add_child(
         editor_area,
         Container::column().width_full().grow(1.0).padding(0.0),
@@ -391,7 +391,7 @@ pub fn build(
         Input::new()
             .placeholder(i18n::tr(Key::EditorBodyPlaceholder))
             .multiline()
-            .lines(16)
+            .height_full()
             .value(body_sig)
             // Live syntax highlight for fenced code blocks, reusing the same
             // tokenizer + theme colors as the preview (see `editor_highlight`).
