@@ -781,6 +781,93 @@ impl AppState {
         }
     }
 
+    /// Duplicate a *live* note: a deep copy with a fresh id, a disambiguated
+    /// "{title} ({suffix})" title, copied tags, and deep-copied attachments
+    /// (each referenced image is decrypted and re-sealed under a fresh nonce as
+    /// a new attachment, and the body's `knot-img:` refs are rewritten to the
+    /// new ids). The copy is unpinned and live regardless of the source's pin
+    /// state — matching the upstream Tauri app. Selects the new note and marks
+    /// it dirty. Returns the new id, or `None` when locked or the source is
+    /// missing / trashed (a note in the bin can't be duplicated).
+    ///
+    /// `copy_suffix` is supplied by the caller so the title respects the user's
+    /// locale ("copy" / "コピー"); an empty suffix falls back to `"copy"`.
+    pub fn duplicate_note(&mut self, id: NoteId, copy_suffix: &str) -> Option<NoteId> {
+        // Read the next id before borrowing `self.phase`; the counter is bumped
+        // after the borrow's last field use (NLL), same idiom as `add_note`.
+        let new_id = self.next_id;
+        let Phase::Unlocked {
+            dek,
+            notes,
+            selected,
+            storage,
+            dirty,
+            ..
+        } = &mut self.phase
+        else {
+            return None;
+        };
+
+        // Source must exist and be live — a trashed note isn't duplicated.
+        let src = notes
+            .iter()
+            .find(|n| n.id == id && n.deleted_at.is_none())?;
+        let src_title = src.title.clone();
+        let src_body = src.body.clone();
+        let src_tags = src.tags.clone();
+
+        // Resolve a unique "{title} ({suffix})" against existing live titles
+        // (case-insensitive), bumping to "({suffix} 2)", "({suffix} 3)", …
+        let suffix = match copy_suffix.trim() {
+            "" => "copy",
+            s => s,
+        };
+        let taken: HashSet<String> = notes
+            .iter()
+            .filter(|n| n.deleted_at.is_none())
+            .map(|n| n.title.to_lowercase())
+            .collect();
+        let new_title = next_available_title(&src_title, suffix, &taken);
+
+        // Deep-copy each referenced attachment (decrypt + re-seal under a fresh
+        // nonce), building an old→new id map, then rewrite the body's refs.
+        // Attachments that fail to load / decrypt are skipped — their refs in
+        // the copy stay pointing at the original id, exactly as upstream does.
+        let mut refs: HashSet<AttachmentId> = HashSet::new();
+        extract_attachment_refs(&src_body, &mut refs);
+        let mut id_map: HashMap<AttachmentId, AttachmentId> = HashMap::new();
+        for old in refs {
+            let Ok(Some(enc)) = storage.load_attachment(old) else {
+                continue;
+            };
+            let Some(plain) = open(dek, &enc.nonce, &enc.ciphertext) else {
+                continue;
+            };
+            let plain = Zeroizing::new(plain);
+            let (nonce, ciphertext) = seal(dek, &plain);
+            if let Ok(new_att) = storage.insert_attachment(&nonce, &ciphertext) {
+                id_map.insert(old, new_att);
+            }
+        }
+        let new_body = rewrite_attachment_refs(&src_body, &id_map);
+
+        notes.push(Note {
+            id: new_id,
+            title: new_title,
+            body: new_body,
+            tags: src_tags,
+            pinned: false,
+            deleted_at: None,
+        });
+        *selected = Some(new_id);
+        dirty.insert(new_id);
+
+        // Last phase-field use is above — the `&mut self.phase` borrow is
+        // released here (NLL), so bumping the id counter is allowed.
+        self.next_id = self.next_id.saturating_add(1);
+        Some(new_id)
+    }
+
     // ── Sidebar full-text search ────────────────────────────────────────
     //
     // Session-only UI state paralleling the tag filter: a free-text query the
@@ -1181,6 +1268,57 @@ pub fn extract_attachment_refs(body: &str, out: &mut HashSet<AttachmentId>) {
         }
         rest = &after[digit_len..];
     }
+}
+
+/// Find the first available "{base} ({suffix})" title not already in `taken`
+/// (compared case-insensitively — `taken` holds lowercased titles), falling
+/// back to "{base} ({suffix} 2)", "({suffix} 3)", … on collision. Pure, so the
+/// disambiguation is unit-testable. Mirrors the upstream Tauri duplicate-title
+/// logic.
+fn next_available_title(base: &str, suffix: &str, taken: &HashSet<String>) -> String {
+    let first = format!("{} ({})", base, suffix);
+    if !taken.contains(&first.to_lowercase()) {
+        return first;
+    }
+    for n in 2u32.. {
+        let candidate = format!("{} ({} {})", base, suffix, n);
+        if !taken.contains(&candidate.to_lowercase()) {
+            return candidate;
+        }
+    }
+    unreachable!("the u32 range yields a free title long before exhaustion")
+}
+
+/// Rewrite every `knot-img:<id>` reference in `body` whose id appears in
+/// `id_map` to the mapped id, leaving unmapped refs (and all other text)
+/// untouched. Digit-boundary aware so `knot-img:1` is never matched inside
+/// `knot-img:12` (a naive `str::replace` would corrupt it). Returns `body`
+/// unchanged when the map is empty (the common no-attachment case).
+fn rewrite_attachment_refs(body: &str, id_map: &HashMap<AttachmentId, AttachmentId>) -> String {
+    if id_map.is_empty() {
+        return body.to_string();
+    }
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(pos) = rest.find(IMG_SCHEME) {
+        // Emit everything up to and including the scheme, then handle the digits.
+        let (head, after) = rest.split_at(pos + IMG_SCHEME.len());
+        out.push_str(head);
+        let digit_len = after
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after.len());
+        let (digits, tail) = after.split_at(digit_len);
+        match digits.parse::<AttachmentId>() {
+            Ok(old) if id_map.contains_key(&old) => {
+                out.push_str(&id_map[&old].to_string());
+            }
+            // Unmapped id, or no digits at all — keep the original text verbatim.
+            _ => out.push_str(digits),
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// First byte of a versioned payload. The legacy (pre-tags) format begins
@@ -1814,6 +1952,113 @@ mod tests {
         } else {
             panic!("expected Unlocked");
         }
+    }
+
+    // ── Duplicate ───────────────────────────────────────────────────────
+
+    /// Title of note `id` in an unlocked state, for the duplicate tests.
+    fn title_of(s: &AppState, id: NoteId) -> String {
+        match &s.phase {
+            Phase::Unlocked { notes, .. } => {
+                notes.iter().find(|n| n.id == id).unwrap().title.clone()
+            }
+            _ => unreachable!("expected Unlocked"),
+        }
+    }
+
+    #[test]
+    fn duplicate_copies_content_tags_unpinned_and_selects() {
+        let mut s = unlocked_state_with_two_tagged_notes(); // id1 "a"/work, id2 "b"/personal
+        // Give the source a body and pin it — the copy takes the body, not the pin.
+        if let Phase::Unlocked { notes, .. } = &mut s.phase {
+            notes[0].body = "hello world".into();
+        }
+        s.toggle_pin(1);
+        let next_before = s.next_id;
+
+        let new_id = s.duplicate_note(1, "copy").expect("duplicate succeeds");
+        assert_eq!(new_id, next_before, "uses the current next_id");
+        assert_eq!(s.next_id, next_before + 1, "bumps next_id");
+
+        if let Phase::Unlocked {
+            notes,
+            selected,
+            dirty,
+            ..
+        } = &s.phase
+        {
+            let dup = notes.iter().find(|n| n.id == new_id).expect("copy present");
+            assert_eq!(dup.title, "a (copy)");
+            assert_eq!(dup.body, "hello world");
+            assert_eq!(dup.tags, vec!["work".to_string()]);
+            assert!(!dup.pinned, "the copy is never pinned");
+            assert!(dup.deleted_at.is_none(), "the copy is live");
+            assert_eq!(*selected, Some(new_id), "the copy is selected");
+            assert!(dirty.contains(&new_id), "the copy is dirty for persistence");
+        } else {
+            panic!("expected Unlocked");
+        }
+    }
+
+    #[test]
+    fn duplicate_disambiguates_title_on_collision() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        let first = s.duplicate_note(1, "copy").unwrap();
+        let second = s.duplicate_note(1, "copy").unwrap();
+        assert_eq!(title_of(&s, first), "a (copy)");
+        assert_eq!(title_of(&s, second), "a (copy 2)");
+    }
+
+    #[test]
+    fn duplicate_blank_suffix_falls_back_to_copy() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        let id = s.duplicate_note(1, "   ").unwrap();
+        assert_eq!(title_of(&s, id), "a (copy)");
+    }
+
+    #[test]
+    fn duplicate_rejects_a_trashed_note() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        s.trash_note(1);
+        assert_eq!(
+            s.duplicate_note(1, "copy"),
+            None,
+            "a trashed note can't be duplicated"
+        );
+    }
+
+    #[test]
+    fn duplicate_deep_copies_attachments() {
+        let mut s = unlocked_state_with_one_note(); // id 1
+        let png = tiny_png();
+        let att = s.add_attachment(&png).expect("store attachment");
+        if let Phase::Unlocked { notes, .. } = &mut s.phase {
+            notes[0].body = format!("![pic](knot-img:{att})");
+        }
+
+        let dup_id = s.duplicate_note(1, "copy").expect("duplicate succeeds");
+
+        // The copy's body must reference a *different* attachment id.
+        let dup_body = match &s.phase {
+            Phase::Unlocked { notes, .. } => {
+                notes.iter().find(|n| n.id == dup_id).unwrap().body.clone()
+            }
+            _ => unreachable!(),
+        };
+        let mut refs = HashSet::new();
+        extract_attachment_refs(&dup_body, &mut refs);
+        assert_eq!(refs.len(), 1, "the copy references exactly one attachment");
+        let new_att = *refs.iter().next().unwrap();
+        assert_ne!(new_att, att, "the copy points at a fresh attachment id");
+
+        // Both attachments exist and decode to the same image.
+        let orig = s.resolve_attachment(att).expect("original attachment");
+        let copy = s.resolve_attachment(new_att).expect("copied attachment");
+        assert_eq!(
+            (orig.width(), orig.height()),
+            (copy.width(), copy.height()),
+            "the copied image decodes to the same dimensions"
+        );
     }
 
     // ── Pinning + sort ───────────────────────────────────────────────────

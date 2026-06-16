@@ -24,12 +24,15 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use shroud::core::Color;
+use shroud::core::{Color, Rect};
 use shroud::platform::FileDialog;
 use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::layer::LayerOptions;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, EventContext, Input, ScrollView, TextWidget};
+use shroud::widgets::{
+    Button, Container, EventContext, Input, LayerAnchor, MenuItem, Placement, ScrollView,
+    TextWidget,
+};
 
 use crate::i18n::{self, Key};
 use crate::notice;
@@ -617,15 +620,21 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
         }
     });
 
-    let row = tree.add_child(
-        parent,
-        Container::row()
-            .width_full()
-            .gap(4.0)
-            .padding(2.0)
-            .background(row_bg)
-            .radius(4.0),
-    );
+    let mut row_widget = Container::row()
+        .width_full()
+        .gap(4.0)
+        .padding(2.0)
+        .background(row_bg)
+        .radius(4.0);
+    // Live rows get a right-click menu (Duplicate) — the faithful port of the
+    // upstream context menu. Trash rows expose their actions inline (Restore /
+    // permanent delete), so they don't carry one.
+    if !trash {
+        let w_ctx = w.clone();
+        row_widget = row_widget
+            .on_context_menu(move |pos, ctx| show_note_context_menu(&w_ctx, note_id, pos, ctx));
+    }
+    let row = tree.add_child(parent, row_widget);
 
     // Pin toggle (leftmost) — live view only; pinning is meaningless in the
     // trash. A filled star marks a pinned note, an outline an unpinned one;
@@ -957,6 +966,59 @@ fn rebase_editor_to_selected(w: &SidebarWiring) {
     if let Some((t, b)) = payload {
         w.title.set(t);
         w.body.set(b);
+    }
+}
+
+/// Open the right-click context menu for a live note row at `pos`: a popover
+/// anchored at the cursor with a single "Duplicate" action. Mirrors the
+/// upstream NoteList context menu (the migrated app surfaces pin / delete
+/// inline, so duplicate is the menu's one entry).
+fn show_note_context_menu(
+    w: &SidebarWiring,
+    note_id: NoteId,
+    pos: shroud::core::Point,
+    ctx: &mut EventContext,
+) {
+    let anchor = Rect::new(pos.x, pos.y, 0.0, 0.0);
+    let menu_root = Container::column()
+        .padding(4.0)
+        .gap(2.0)
+        .background(settings::surface())
+        .radius(6.0);
+    let w = w.clone();
+    ctx.push_layer(
+        LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
+            rect: anchor,
+            prefer: Placement::Below,
+        }),
+        menu_root,
+        move |tree, root| {
+            tree.add_child(
+                root,
+                MenuItem::new(i18n::tr(Key::ContextMenuDuplicate), move |c| {
+                    duplicate_selected(&w, note_id, c);
+                    c.pop_top_layer();
+                }),
+            );
+        },
+    );
+}
+
+/// Duplicate `note_id` (deep copy via `AppState::duplicate_note`, with a
+/// locale-aware "(copy)" suffix), select the copy, and rebuild. No-op when the
+/// source is gone or trashed (the menu only appears on live rows, but the
+/// state method guards regardless).
+fn duplicate_selected(w: &SidebarWiring, note_id: NoteId, ctx: &mut EventContext) {
+    let new_id = w
+        .state
+        .borrow_mut()
+        .duplicate_note(note_id, i18n::tr(Key::ContextMenuDuplicateSuffix));
+    if new_id.is_some() {
+        // The copy is now selected — rebase the editor onto it, then rebuild the
+        // list (new row) + filter (copied tags) and refresh the editor's chips.
+        rebase_editor_to_selected(w);
+        rebuild_sidebar(w, ctx);
+        w.tag_refresh.fire(ctx);
     }
 }
 

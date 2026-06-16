@@ -249,6 +249,13 @@ pub enum Key {
     /// `"Couldn't empty the trash: "` — permanent-delete failure (prefix).
     ErrEmptyTrashPrefix,
 
+    // --- Note context menu (right-click) ---
+    /// Right-click menu action: duplicate the note.
+    ContextMenuDuplicate,
+    /// Locale-specific suffix for a duplicated note's title — "Title (copy)" /
+    /// "Title (コピー)". Passed to `AppState::duplicate_note`.
+    ContextMenuDuplicateSuffix,
+
     // --- Sort labels ---
     SortCreated,
     SortTitleAsc,
@@ -469,6 +476,10 @@ impl Key {
             TrashEmptyConfirmBtn => "Empty trash",
             TrashCancel => "Cancel",
             ErrEmptyTrashPrefix => "Couldn't empty the trash: ",
+
+            // Note context menu
+            ContextMenuDuplicate => "Duplicate",
+            ContextMenuDuplicateSuffix => "copy",
 
             // Sort labels
             SortCreated => "Created",
@@ -700,6 +711,10 @@ impl Key {
             TrashEmptyConfirmBtn => "空にする",
             TrashCancel => "キャンセル",
             ErrEmptyTrashPrefix => "ゴミ箱を空にできませんでした: ",
+
+            // Note context menu
+            ContextMenuDuplicate => "複製",
+            ContextMenuDuplicateSuffix => "コピー",
 
             // Sort labels
             SortCreated => "作成順",
@@ -939,6 +954,8 @@ mod tests {
         Key::TrashEmptyConfirmBtn,
         Key::TrashCancel,
         Key::ErrEmptyTrashPrefix,
+        Key::ContextMenuDuplicate,
+        Key::ContextMenuDuplicateSuffix,
         Key::SortCreated,
         Key::SortTitleAsc,
         Key::SortTitleDesc,
