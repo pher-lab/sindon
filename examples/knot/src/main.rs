@@ -33,6 +33,7 @@ mod recovery_screen;
 mod settings;
 mod setup_screen;
 mod sidebar;
+mod smart_keymap;
 mod state;
 mod storage;
 mod tag_editor;

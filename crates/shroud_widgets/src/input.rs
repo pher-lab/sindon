@@ -39,6 +39,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
@@ -75,6 +76,37 @@ type CtxCallback = Box<dyn FnMut(&mut EventContext)>;
 /// so the closure must be cheap and must not retain the `&str` it is handed (it
 /// is the user's plaintext). `Fn` (not `FnMut`) because painting holds `&self`.
 type Highlighter = Box<dyn Fn(&str) -> Vec<(usize, usize, Color)>>;
+
+/// A smart-keymap hook (B-1 ③). Given the live buffer and the caret byte
+/// offset, returns an optional [`KeyEdit`] to perform instead of the key's
+/// default behavior — e.g. continuing a markdown list on Enter, or deleting a
+/// whole list marker on Backspace. Returning `None` falls through to the
+/// default. `Fn` (not `FnMut`): the hook is pure structural analysis of the
+/// buffer it is handed, called from the event path while `&self` borrows the
+/// buffer.
+type KeymapHandler = Box<dyn Fn(&str, usize) -> Option<KeyEdit>>;
+
+/// A structural edit produced by a smart-keymap hook ([`Input::on_enter`] /
+/// [`Input::on_backspace`]). The widget applies it as one discrete undo step:
+/// the byte range `replace` in the current buffer is replaced with `insert`,
+/// then the caret moves to `caret` (a byte offset into the buffer *after* the
+/// edit).
+///
+/// The widget validates the edit before applying it — `replace` must be a
+/// well-formed, in-bounds range on `char` boundaries — and ignores a malformed
+/// one (falling through to the key's default behavior) rather than panicking.
+/// `caret` is clamped into the resulting buffer and snapped to a char boundary,
+/// so an off-by-one in the hook can't crash the editor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyEdit {
+    /// Byte range in the *current* buffer to replace. For a pure insertion use
+    /// an empty range at the caret (`cursor..cursor`).
+    pub replace: Range<usize>,
+    /// Replacement text spliced in where `replace` was.
+    pub insert: String,
+    /// Caret byte offset measured in the buffer *after* the edit is applied.
+    pub caret: usize,
+}
 
 /// Tile `text` into color-only [`TextSpan`]s from a highlighter's colored
 /// `ranges`, filling every gap with a default-attrs, no-color span so the spans
@@ -399,6 +431,16 @@ pub struct Input {
     /// `shape_text`. Color-only spans are layout-identical to plain shaping, so
     /// the (plain-shaped) caret / selection geometry is unaffected.
     highlighter: Option<Highlighter>,
+    /// Smart-keymap hook for Enter in multi-line mode (B-1 ③). When `Some` and
+    /// there is no active selection, Enter consults this for a structural edit
+    /// (e.g. continue a markdown list) before falling back to a plain newline.
+    enter_handler: Option<KeymapHandler>,
+    /// Smart-keymap hook for Backspace (B-1 ③). When `Some`, a no-selection
+    /// Backspace with `cursor > 0` consults this for a structural edit (e.g.
+    /// delete a whole list marker) before falling back to the single-char
+    /// delete. Independent of [`on_backspace_empty`](Self::on_backspace_empty),
+    /// which only fires on an empty buffer.
+    backspace_handler: Option<KeymapHandler>,
     /// Internal vertical scroll offset for multi-line mode (px). The viewport
     /// shows `[scroll_y, scroll_y + viewport_h]` of the shaped content; glyphs
     /// are clipped to the field's padding box and translated up by this amount,
@@ -461,6 +503,8 @@ impl Input {
             redo_stack: RefCell::new(VecDeque::new()),
             last_edit: Cell::new(None),
             highlighter: None,
+            enter_handler: None,
+            backspace_handler: None,
             scroll_y: Cell::new(0.0),
             reveal_caret: Cell::new(false),
             last_max_scroll: Cell::new(0.0),
@@ -756,6 +800,47 @@ impl Input {
         self
     }
 
+    /// Intercept Enter in [`multiline`](Self::multiline) mode with a smart-keymap
+    /// hook (B-1 ③).
+    ///
+    /// When set, pressing Enter with no active selection calls the closure with
+    /// the current buffer and caret byte offset. If it returns a [`KeyEdit`],
+    /// that edit is applied as one discrete undo step instead of inserting a
+    /// plain newline; returning `None` — or a malformed edit — falls through to
+    /// the newline. Typical use is continuing a markdown list / blockquote on
+    /// the next line, or clearing an empty list item. No effect in single-line
+    /// mode (where Enter fires [`on_submit`](Self::on_submit)) or while text is
+    /// selected.
+    ///
+    /// The closure receives the user's plaintext, so it must not retain it — the
+    /// same posture as [`highlighter`](Self::highlighter). Pairs naturally with
+    /// [`on_backspace`](Self::on_backspace) for a markdown editor.
+    pub fn on_enter(mut self, f: impl Fn(&str, usize) -> Option<KeyEdit> + 'static) -> Self {
+        self.enter_handler = Some(Box::new(f));
+        self
+    }
+
+    /// Intercept Backspace with a smart-keymap hook (B-1 ③).
+    ///
+    /// When set, pressing Backspace with no selection and a non-empty prefix
+    /// (`cursor > 0`) calls the closure with the current buffer and caret byte
+    /// offset. If it returns a [`KeyEdit`], that edit is applied as one discrete
+    /// undo step instead of deleting the single preceding character; `None` — or
+    /// a malformed edit — falls through to the single-char delete (which still
+    /// coalesces with a run of Backspaces). Typical use is deleting a whole
+    /// markdown list marker in one stroke.
+    ///
+    /// Distinct from [`on_backspace_empty`](Self::on_backspace_empty), which
+    /// fires only on an *empty* buffer and produces no edit (it lets a tag
+    /// editor remove the last chip). The two never overlap — this hook requires
+    /// `cursor > 0`, that one requires an empty buffer.
+    ///
+    /// The closure receives the user's plaintext, so it must not retain it.
+    pub fn on_backspace(mut self, f: impl Fn(&str, usize) -> Option<KeyEdit> + 'static) -> Self {
+        self.backspace_handler = Some(Box::new(f));
+        self
+    }
+
     /// Get a clone of the current value.
     pub fn value_clone(&self) -> String {
         self.value.borrow().clone()
@@ -894,6 +979,49 @@ impl Input {
             let snapshot = self.value.borrow().clone();
             handler(&snapshot, ctx);
         }
+    }
+
+    /// Apply a [`KeyEdit`] from a smart-keymap hook as one discrete undo step:
+    /// splice `insert` over the `replace` range and move the caret to `caret`
+    /// (clamped + char-boundary-snapped against the resulting buffer). Returns
+    /// `false` — mutating nothing — when the edit's range is reversed, out of
+    /// bounds, or splits a multi-byte char, so the caller can fall through to
+    /// the key's default behavior. A misbehaving hook degrades; it never panics
+    /// the editor. `kind` only tags the (non-coalescing) undo step.
+    fn apply_key_edit(&mut self, kind: EditKind, edit: KeyEdit, ctx: &mut EventContext) -> bool {
+        let KeyEdit {
+            replace,
+            insert,
+            caret,
+        } = edit;
+        {
+            let buf = self.value.borrow();
+            if replace.start > replace.end
+                || replace.end > buf.len()
+                || !buf.is_char_boundary(replace.start)
+                || !buf.is_char_boundary(replace.end)
+            {
+                return false;
+            }
+        }
+        // A structural edit is its own discrete undo step — like a typed newline
+        // or a selection replace, it never coalesces with surrounding typing.
+        self.begin_edit(kind, false);
+        self.value.borrow_mut().replace_range(replace, &insert);
+        // Clamp the requested caret into the new buffer and snap it down to a
+        // char boundary so a miscounted offset can't panic the paint-side slice.
+        let mut target = caret.min(self.value.borrow().len());
+        {
+            let buf = self.value.borrow();
+            while target > 0 && !buf.is_char_boundary(target) {
+                target -= 1;
+            }
+        }
+        self.cursor.set(target);
+        self.selection_anchor.set(None);
+        self.desired_col.set(None);
+        self.commit_edit(kind, true, ctx);
+        true
     }
 
     /// Undo the most recent step: stash the current state on the redo stack and
@@ -1691,15 +1819,30 @@ impl Widget for Input {
                     } else {
                         let cursor = self.cursor.get();
                         if cursor > 0 {
-                            let prev = {
+                            // Smart keymap (B-1 ③): a hook may delete a whole
+                            // structural prefix (e.g. a markdown list marker) as
+                            // one step. `None` (or a malformed edit) falls
+                            // through to the single-char delete, which coalesces
+                            // with a run of Backspaces.
+                            let smart = self.backspace_handler.as_ref().and_then(|h| {
                                 let v = self.value.borrow();
-                                Self::prev_char_boundary(&v, cursor)
+                                h(&v, cursor)
+                            });
+                            let handled = match smart {
+                                Some(edit) => self.apply_key_edit(EditKind::Delete, edit, ctx),
+                                None => false,
                             };
-                            self.begin_edit(EditKind::Delete, true);
-                            self.value.borrow_mut().drain(prev..cursor);
-                            self.cursor.set(prev);
-                            self.desired_col.set(None);
-                            self.commit_edit(EditKind::Delete, false, ctx);
+                            if !handled {
+                                let prev = {
+                                    let v = self.value.borrow();
+                                    Self::prev_char_boundary(&v, cursor)
+                                };
+                                self.begin_edit(EditKind::Delete, true);
+                                self.value.borrow_mut().drain(prev..cursor);
+                                self.cursor.set(prev);
+                                self.desired_col.set(None);
+                                self.commit_edit(EditKind::Delete, false, ctx);
+                            }
                         } else if self.value.borrow().is_empty() {
                             // Empty buffer + Backspace: hand off to the app
                             // (e.g. a tag editor removing the last chip). Gated
@@ -1873,17 +2016,37 @@ impl Widget for Input {
                 }
                 Key::Named(NamedKey::Enter) => {
                     if self.multiline {
-                        // Insert a newline at the cursor; on_submit is
-                        // intentionally inert in multi-line mode so the field
-                        // behaves like a textarea. A newline is its own discrete
-                        // undo step — it doesn't merge with the typing on either
-                        // side.
-                        let cursor = self.cursor.get();
-                        self.begin_edit(EditKind::Insert, false);
-                        self.value.borrow_mut().insert(cursor, '\n');
-                        self.cursor.set(cursor + 1);
-                        self.desired_col.set(None);
-                        self.commit_edit(EditKind::Insert, true, ctx);
+                        // Smart keymap (B-1 ③): with no active selection, let an
+                        // app-supplied hook turn Enter into a structural edit —
+                        // continuing a markdown list, or clearing an empty list
+                        // item — instead of a plain newline. `None` (or a
+                        // malformed edit) falls through. A selection always falls
+                        // through to the newline insert below.
+                        let smart = if self.selection_range().is_none() {
+                            self.enter_handler.as_ref().and_then(|h| {
+                                let v = self.value.borrow();
+                                h(&v, self.cursor.get())
+                            })
+                        } else {
+                            None
+                        };
+                        let handled = match smart {
+                            Some(edit) => self.apply_key_edit(EditKind::Insert, edit, ctx),
+                            None => false,
+                        };
+                        if !handled {
+                            // Insert a newline at the cursor; on_submit is
+                            // intentionally inert in multi-line mode so the field
+                            // behaves like a textarea. A newline is its own
+                            // discrete undo step — it doesn't merge with the
+                            // typing on either side.
+                            let cursor = self.cursor.get();
+                            self.begin_edit(EditKind::Insert, false);
+                            self.value.borrow_mut().insert(cursor, '\n');
+                            self.cursor.set(cursor + 1);
+                            self.desired_col.set(None);
+                            self.commit_edit(EditKind::Insert, true, ctx);
+                        }
                     } else if let Some(handler) = self.on_submit.as_mut() {
                         let snapshot = self.value.borrow().clone();
                         handler(&snapshot, ctx);

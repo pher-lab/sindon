@@ -26,6 +26,7 @@ use crate::notice;
 use crate::preview;
 use crate::settings;
 use crate::sidebar::SidebarRefresh;
+use crate::smart_keymap;
 use crate::state::{AppState, Phase};
 use crate::tag_editor::{self, TagRefresh};
 use crate::toolbar;
@@ -396,6 +397,11 @@ pub fn build(
             // Live syntax highlight for fenced code blocks, reusing the same
             // tokenizer + theme colors as the preview (see `editor_highlight`).
             .highlighter(editor_highlight)
+            // Smart keymap (B-1 ③): Enter continues / exits a markdown list or
+            // quote, Backspace deletes a whole marker. Markdown policy lives in
+            // `smart_keymap`; the Input owns applying the edit as one undo step.
+            .on_enter(smart_keymap::smart_enter)
+            .on_backspace(smart_keymap::smart_backspace)
             // Mirror the caret + selection so the toolbar can insert at / wrap
             // them (see `toolbar`).
             .cursor_signal(cursor_sig)

@@ -32,7 +32,7 @@ pub use dropdown::Dropdown;
 pub use event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
 pub use focus::{FocusDirection, FocusManager};
 pub use image::{Image, ImageFit};
-pub use input::Input;
+pub use input::{Input, KeyEdit};
 pub use layer::{LayerAnchor, LayerOptions, Placement};
 pub use menu_item::MenuItem;
 pub use paint::PaintContext;
