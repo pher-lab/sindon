@@ -197,6 +197,16 @@ pub enum Key {
     ToolbarList,
     ToolbarLink,
 
+    // --- Editor find / replace (B-1 ④) ---
+    // The bar toggled with Ctrl+H. Prev/Next/Close use fixed glyph labels
+    // (↑ / ↓ / ✕), so only the field placeholders, the two buttons, and the
+    // "no matches" counter are localized.
+    FindReplaceFindPlaceholder,
+    FindReplaceReplacePlaceholder,
+    FindReplaceReplaceBtn,
+    FindReplaceReplaceAllBtn,
+    FindReplaceNoMatches,
+
     // --- Sidebar ---
     SidebarImport,
     SidebarNewNote,
@@ -390,6 +400,13 @@ impl Key {
             ToolbarQuote => "Quote",
             ToolbarList => "List",
             ToolbarLink => "Link",
+
+            // Editor find / replace
+            FindReplaceFindPlaceholder => "Find",
+            FindReplaceReplacePlaceholder => "Replace with",
+            FindReplaceReplaceBtn => "Replace",
+            FindReplaceReplaceAllBtn => "Replace all",
+            FindReplaceNoMatches => "No matches",
 
             // Sidebar
             SidebarImport => "Import",
@@ -593,6 +610,13 @@ impl Key {
             ToolbarQuote => "引用",
             ToolbarList => "リスト",
             ToolbarLink => "リンク",
+
+            // Editor find / replace
+            FindReplaceFindPlaceholder => "検索",
+            FindReplaceReplacePlaceholder => "置換後の文字列",
+            FindReplaceReplaceBtn => "置換",
+            FindReplaceReplaceAllBtn => "すべて置換",
+            FindReplaceNoMatches => "一致なし",
 
             // Sidebar
             SidebarImport => "インポート",

@@ -133,6 +133,18 @@ pub struct AppState {
     /// index after a screen rebuild is harmless: `EventContext::focus` drops
     /// silently if the target is gone, and the handler only acts while unlocked.
     pub search_input_idx: Option<usize>,
+    /// Tree index of the editor's find-replace *Find* `Input`, recorded by
+    /// `find_replace::build`, so the global Ctrl+H shortcut can focus it when it
+    /// opens the bar. Same lifetime / staleness story as
+    /// [`Self::search_input_idx`]: `None` until the vault screen builds the
+    /// editor, and a stale index after a screen rebuild is harmless
+    /// (`EventContext::focus` drops silently).
+    pub find_input_idx: Option<usize>,
+    /// Tree index of the editor's body `Input`, recorded by `editor::build`, so
+    /// the Ctrl+H shortcut can return focus to the body when it *closes* the
+    /// find-replace bar. Same lifetime / staleness story as
+    /// [`Self::find_input_idx`].
+    pub body_input_idx: Option<usize>,
     /// Consecutive failed unlock attempts since the last success. Drives the
     /// escalating lockout (see [`lockout_for`]); reset to 0 on a successful
     /// unlock. In-memory only — a process restart clears it, which matches the
@@ -158,6 +170,8 @@ impl AppState {
             next_id,
             phase: Phase::Locked { error: None },
             search_input_idx: None,
+            find_input_idx: None,
+            body_input_idx: None,
             failed_attempts: 0,
             locked_until: None,
         }
@@ -173,6 +187,8 @@ impl AppState {
             next_id: 1,
             phase: Phase::Setup { error: None },
             search_input_idx: None,
+            find_input_idx: None,
+            body_input_idx: None,
             failed_attempts: 0,
             locked_until: None,
         }
@@ -1200,6 +1216,8 @@ mod tests {
             salt: [0u8; SALT_SIZE],
             next_id: 2,
             search_input_idx: None,
+            find_input_idx: None,
+            body_input_idx: None,
             failed_attempts: 0,
             locked_until: None,
             phase: Phase::Unlocked {
@@ -1236,6 +1254,8 @@ mod tests {
             salt: [0u8; SALT_SIZE],
             next_id: 3,
             search_input_idx: None,
+            find_input_idx: None,
+            body_input_idx: None,
             failed_attempts: 0,
             locked_until: None,
             phase: Phase::Unlocked {

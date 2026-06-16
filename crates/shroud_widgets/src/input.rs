@@ -1120,6 +1120,23 @@ impl Input {
     /// jump the cursor and prevent deletion). The text-source path keeps its
     /// always-rebase behavior since `Signal<String>` is symmetric.
     fn sync_from_source(&self) {
+        // Whether the caller is *also* setting a fresh caret / selection this
+        // sync — a deliberate programmatic move (a toolbar insert, a
+        // find-replace jump) rather than a passive rebase. A note switch leaves
+        // these signals untouched, so they still equal what the widget last
+        // reported (the tail of every event mirrors them out), and this stays
+        // `false`. It drives two things below: a deliberate move keeps the
+        // scroll position and reveals the new caret, whereas a passive rebase
+        // snaps to the top.
+        let caret_incoming = self
+            .cursor_source
+            .as_ref()
+            .is_some_and(|c| c.get() != self.cursor.get())
+            || self
+                .selection_source
+                .as_ref()
+                .is_some_and(|s| s.get() != self.selection_range());
+
         if let Some(src) = self.source.as_ref() {
             let remote = src.get_clone();
             let mut buf = self.value.borrow_mut();
@@ -1138,8 +1155,14 @@ impl Input {
                 // *different* document, so start history fresh after the rebase.
                 self.clear_history();
                 // A note switch should show the new body from the top rather
-                // than inheriting the previous note's scroll offset.
-                self.scroll_y.set(0.0);
+                // than inheriting the previous note's scroll offset — but only
+                // for a passive rebase. When the caller moves the caret in the
+                // same update (a toolbar insert, a find-replace replacement),
+                // the caret-reveal below positions the viewport instead, so a
+                // mid-document edit doesn't snap back to the top.
+                if !caret_incoming {
+                    self.scroll_y.set(0.0);
+                }
             }
         }
         if let Some(src) = self.number_source.as_ref() {
@@ -1209,6 +1232,16 @@ impl Input {
                     None => self.selection_anchor.set(None),
                 }
             }
+        }
+
+        // A programmatic caret / selection move (find-replace jumping to a
+        // match, the toolbar repositioning after an insert) should scroll into
+        // view on the next paint, exactly like a keyboard caret move does. The
+        // paint-side scroll-to-caret honors this flag only while focused +
+        // multi-line, so setting it here is inert for single-line / unfocused
+        // fields.
+        if caret_incoming {
+            self.reveal_caret.set(true);
         }
     }
 

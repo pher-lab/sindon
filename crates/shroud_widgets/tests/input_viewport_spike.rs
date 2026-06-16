@@ -163,6 +163,67 @@ fn mouse_wheel_scrolls_the_viewport() {
 }
 
 #[test]
+fn external_caret_jump_scrolls_into_view() {
+    // A *programmatic* caret move — the find-replace bar jumping to a match by
+    // setting the bound cursor / selection signals — must scroll the match into
+    // view, not leave the viewport at the top, even though the field isn't being
+    // typed into. This guards the `sync_from_source` reveal extended in B-1 ④.
+    use shroud_reactive::Signal;
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(W).height(H));
+
+    // 30 short lines so the content overflows the viewport several times over.
+    let body: String = (0..30).map(|i| format!("line {i}\n")).collect();
+    let value = Signal::new(body.clone());
+    let cursor = Signal::new(0usize);
+    let selection: Signal<Option<(usize, usize)>> = Signal::new(None);
+    let input_idx = tree.add_child(
+        root,
+        Input::new()
+            .multiline()
+            .height_full()
+            .value(value)
+            .cursor_signal(cursor)
+            .selection_signal(selection),
+    );
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(W, H, &mut engine, &theme);
+    let rect = tree.layout_rect(input_idx);
+
+    // Focus the field (so the caret renders and scroll-to-caret runs) and paint
+    // once: the caret is at the top, so the content sits at the top.
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    let _ = paint(&tree);
+
+    // Jump to a match deep in the buffer via the bound signals, exactly as the
+    // find-replace bar does (selection range + caret at its end).
+    let lo = body.find("line 28").expect("the body contains line 28");
+    let hi = lo + "line 28".len();
+    cursor.set(hi);
+    selection.set(Some((lo, hi)));
+
+    let ctx = paint(&tree);
+    let top = rect.origin.y + 8.0;
+    let bottom = rect.origin.y + rect.size.height - 8.0;
+    let (caret_y, caret_h) = caret_rect(&ctx);
+    assert!(
+        caret_y >= top - 1.0 && caret_y + caret_h <= bottom + 1.0,
+        "an externally-set caret deep in the buffer must scroll into view: \
+         caret_y={caret_y} h={caret_h} viewport=[{top}, {bottom}]"
+    );
+}
+
+#[test]
 fn single_line_input_does_not_clip_or_scroll() {
     // The viewport machinery is multi-line only — a single-line field must push
     // no clip (it intentionally lets text overflow horizontally).

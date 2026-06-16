@@ -19,6 +19,7 @@ use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, Image, Input, ReactiveChildren, ScrollView, TextWidget};
 
 use crate::backlinks;
+use crate::find_replace;
 use crate::highlight;
 use crate::i18n::{self, Key};
 use crate::lock_screen;
@@ -377,6 +378,21 @@ pub fn build(
         Rc::clone(&body_idx),
     );
 
+    // Find / replace bar (B-1 ④), toggled with Ctrl+H. Sits between the toolbar
+    // and the body so a match it jumps to is visible just below it; collapses to
+    // nothing (`display: none`) until toggled. Like the toolbar, it drives the
+    // body through the shared body/cursor/selection signals and re-focuses the
+    // body to highlight + scroll to a match.
+    find_replace::build(
+        tree,
+        editor_area,
+        Rc::clone(&state),
+        body_sig,
+        cursor_sig,
+        selection_sig,
+        Rc::clone(&body_idx),
+    );
+
     // Body input (multiline). The wrapper claims the pane's leftover height via
     // `grow(1.0)`; `height_full` makes the Input fill that wrapper and scroll
     // its content *internally* (mouse wheel + caret auto-reveal), so a long note
@@ -413,6 +429,9 @@ pub fn build(
             }),
     );
     body_idx.set(body_node);
+    // Record the body input so the Ctrl+H shortcut can return focus to it when
+    // it closes the find-replace bar (mirrors `search_input_idx` for Ctrl+F).
+    state.borrow_mut().body_input_idx = Some(body_node);
 
     // Preview area: a scrollable, live-rendered markdown view beside the
     // editor. Visible only while a note is selected *and* the preview is

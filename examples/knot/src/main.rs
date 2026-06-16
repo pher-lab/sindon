@@ -23,6 +23,7 @@ mod backup;
 mod change_password;
 mod crypto;
 mod editor;
+mod find_replace;
 mod highlight;
 mod i18n;
 mod lock_screen;
@@ -125,6 +126,41 @@ fn main() {
                     };
                     if let Some(idx) = target {
                         ctx.event_ctx.focus(idx);
+                    }
+                },
+            );
+
+            // Ctrl+H toggles the editor's find-replace bar. Global so it fires
+            // from anywhere (including while the body Input has focus — the
+            // Input leaves Ctrl+letter combos other than its own undo/redo for
+            // the shortcut router). Opening focuses the Find field; closing
+            // returns focus to the body. Both node indices are recorded on the
+            // app state by the editor build; we only act while unlocked with a
+            // note selected (the bar lives in the editor area, hidden otherwise).
+            let find_state = Rc::clone(&state);
+            scope.on_shortcut(
+                Shortcut::global(Modifiers::CTRL, Key::Character('h')),
+                move |ctx| {
+                    let (find_idx, body_idx) = {
+                        let s = find_state.borrow();
+                        match &s.phase {
+                            Phase::Unlocked {
+                                selected: Some(_), ..
+                            } => (s.find_input_idx, s.body_input_idx),
+                            _ => (None, None),
+                        }
+                    };
+                    // No editor in scope (locked / no note selected) → ignore.
+                    let Some(find_idx) = find_idx else {
+                        return;
+                    };
+                    let sigs = find_replace::signals();
+                    let now_visible = !sigs.visible.get();
+                    sigs.visible.set(now_visible);
+                    if now_visible {
+                        ctx.event_ctx.focus(find_idx);
+                    } else if let Some(body_idx) = body_idx {
+                        ctx.event_ctx.focus(body_idx);
                     }
                 },
             );
