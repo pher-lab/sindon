@@ -246,6 +246,9 @@ pub(crate) fn find_note_id_by_title(notes: &[Note], target: &str) -> Option<Note
     let target = target.trim();
     notes
         .iter()
+        // Trashed notes aren't valid wikilink/backlink targets — a note in the
+        // bin shouldn't be reachable by `[[Title]]` until it's restored.
+        .filter(|n| n.deleted_at.is_none())
         .find(|n| n.title.trim().eq_ignore_ascii_case(target))
         .map(|n| n.id)
 }
@@ -1595,6 +1598,7 @@ fn main() {}
             body: String::new(),
             tags: Vec::new(),
             pinned: false,
+            deleted_at: None,
         }
     }
 

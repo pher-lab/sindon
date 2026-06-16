@@ -224,6 +224,31 @@ pub enum Key {
     ErrReadFilePrefix,
     ErrDeleteNotePrefix,
 
+    // --- Trash / soft-delete ---
+    /// Sidebar view toggle: the live note list.
+    SidebarViewNotes,
+    /// Sidebar view toggle: the trash. A count is appended by the caller, e.g.
+    /// "Trash (3)".
+    SidebarViewTrash,
+    /// Row action in the trash view: restore a note to the live list.
+    TrashRestore,
+    /// Button that permanently empties the whole trash.
+    TrashEmptyBtn,
+    /// Shown in place of the list when the trash view is empty.
+    TrashEmptyHint,
+    /// Confirmation dialog before permanently deleting one note.
+    TrashDeleteConfirmTitle,
+    TrashDeleteConfirmBody,
+    TrashDeleteConfirmBtn,
+    /// Confirmation dialog before emptying the whole trash.
+    TrashEmptyConfirmTitle,
+    TrashEmptyConfirmBody,
+    TrashEmptyConfirmBtn,
+    /// Shared "Cancel" for the two trash confirmation dialogs.
+    TrashCancel,
+    /// `"Couldn't empty the trash: "` — permanent-delete failure (prefix).
+    ErrEmptyTrashPrefix,
+
     // --- Sort labels ---
     SortCreated,
     SortTitleAsc,
@@ -423,6 +448,27 @@ impl Key {
             ErrImportTooLarge => "That file is too large to import (max {n} MiB).",
             ErrReadFilePrefix => "Couldn't read that file: ",
             ErrDeleteNotePrefix => "Couldn't delete note: ",
+
+            // Trash / soft-delete
+            SidebarViewNotes => "Notes",
+            SidebarViewTrash => "Trash",
+            TrashRestore => "Restore",
+            TrashEmptyBtn => "Empty trash",
+            TrashEmptyHint => "Trash is empty.",
+            TrashDeleteConfirmTitle => "Delete forever?",
+            TrashDeleteConfirmBody => {
+                "This permanently deletes the note and any images it contains. \
+                 This can't be undone."
+            }
+            TrashDeleteConfirmBtn => "Delete forever",
+            TrashEmptyConfirmTitle => "Empty the trash?",
+            TrashEmptyConfirmBody => {
+                "This permanently deletes every note in the trash, along with any \
+                 images they contain. This can't be undone."
+            }
+            TrashEmptyConfirmBtn => "Empty trash",
+            TrashCancel => "Cancel",
+            ErrEmptyTrashPrefix => "Couldn't empty the trash: ",
 
             // Sort labels
             SortCreated => "Created",
@@ -633,6 +679,27 @@ impl Key {
             ErrImportTooLarge => "そのファイルはインポートするには大きすぎます（最大{n} MiB）。",
             ErrReadFilePrefix => "そのファイルを読み込めませんでした: ",
             ErrDeleteNotePrefix => "ノートを削除できませんでした: ",
+
+            // Trash / soft-delete
+            SidebarViewNotes => "ノート",
+            SidebarViewTrash => "ゴミ箱",
+            TrashRestore => "復元",
+            TrashEmptyBtn => "ゴミ箱を空にする",
+            TrashEmptyHint => "ゴミ箱は空です。",
+            TrashDeleteConfirmTitle => "完全に削除しますか?",
+            TrashDeleteConfirmBody => {
+                "このノートと、含まれる画像を完全に削除します。\
+                 この操作は取り消せません。"
+            }
+            TrashDeleteConfirmBtn => "完全に削除",
+            TrashEmptyConfirmTitle => "ゴミ箱を空にしますか?",
+            TrashEmptyConfirmBody => {
+                "ゴミ箱内のすべてのノートと、含まれる画像を完全に削除します。\
+                 この操作は取り消せません。"
+            }
+            TrashEmptyConfirmBtn => "空にする",
+            TrashCancel => "キャンセル",
+            ErrEmptyTrashPrefix => "ゴミ箱を空にできませんでした: ",
 
             // Sort labels
             SortCreated => "作成順",
@@ -859,6 +926,19 @@ mod tests {
         Key::ErrImportTooLarge,
         Key::ErrReadFilePrefix,
         Key::ErrDeleteNotePrefix,
+        Key::SidebarViewNotes,
+        Key::SidebarViewTrash,
+        Key::TrashRestore,
+        Key::TrashEmptyBtn,
+        Key::TrashEmptyHint,
+        Key::TrashDeleteConfirmTitle,
+        Key::TrashDeleteConfirmBody,
+        Key::TrashDeleteConfirmBtn,
+        Key::TrashEmptyConfirmTitle,
+        Key::TrashEmptyConfirmBody,
+        Key::TrashEmptyConfirmBtn,
+        Key::TrashCancel,
+        Key::ErrEmptyTrashPrefix,
         Key::SortCreated,
         Key::SortTitleAsc,
         Key::SortTitleDesc,

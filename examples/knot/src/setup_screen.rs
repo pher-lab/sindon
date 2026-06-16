@@ -271,6 +271,7 @@ fn welcome_notes() -> Vec<Note> {
         body: WELCOME_BODY.to_string(),
         tags: Vec::new(),
         pinned: false,
+        deleted_at: None,
     }]
 }
 

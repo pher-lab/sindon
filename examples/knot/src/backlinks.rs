@@ -165,6 +165,10 @@ pub fn compute_backlinks(notes: &[Note], target_id: NoteId) -> Vec<NoteId> {
     notes
         .iter()
         .filter(|src| src.id != target_id)
+        // A trashed note isn't a live backlink source — it shouldn't show up
+        // under "what links here" until it's restored. (The target side is
+        // already excluded by `find_note_id_by_title`, which skips trash.)
+        .filter(|src| src.deleted_at.is_none())
         .filter(|src| {
             preview::wikilink_targets(&src.body)
                 .iter()
@@ -251,6 +255,7 @@ mod tests {
             body: body.to_string(),
             tags: Vec::new(),
             pinned: false,
+            deleted_at: None,
         }
     }
 

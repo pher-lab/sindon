@@ -11,7 +11,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use shroud::render::DecodedImage;
 use zeroize::Zeroizing;
@@ -62,6 +62,15 @@ pub struct Note {
     /// payload (a flags byte in the v2 layout) so the pin state, like tags,
     /// never leaks as plaintext metadata.
     pub pinned: bool,
+    /// When `Some(unix_secs)`, the note is in the trash (soft-deleted at that
+    /// time); `None` means a live note. Trashed notes are hidden from the
+    /// normal sidebar list, from tag filters/autocomplete, and from wikilink /
+    /// backlink resolution — they only appear in the trash view, from which
+    /// they can be restored or permanently deleted. The timestamp also drives
+    /// the 30-day auto-purge on unlock (see [`AppState::become_unlocked`]).
+    /// Persisted inside the encrypted payload (v3 layout) so deletion state,
+    /// like tags and pin, never leaks as plaintext metadata.
+    pub deleted_at: Option<u64>,
 }
 
 // The `Unlocked` variant is much larger than the others — it carries the
@@ -113,6 +122,11 @@ pub enum Phase {
         /// `filter_tags` by intersection — a note shows only if it matches
         /// *both*. Same session-only lifetime as `filter_tags`; never persisted.
         search_query: String,
+        /// Whether the sidebar is showing the trash (soft-deleted notes) rather
+        /// than the live note list. Pure session UI state, like `filter_tags` /
+        /// `search_query`: it resets to `false` on every unlock and is never
+        /// persisted. The tag filter and search apply only in the live view.
+        trash_view: bool,
         /// Decoded preview images, keyed by attachment id. Populated lazily by
         /// [`AppState::resolve_attachment`] the first time a `knot-img:<id>`
         /// reference is rendered, so only images actually viewed this session
@@ -198,12 +212,36 @@ impl AppState {
     /// the data-encryption key (unwrapped from `dek.enc` / `recovery.enc`),
     /// not the password. Called by the lock screen, the recovery screen,
     /// and the first-launch setup path.
-    pub fn become_unlocked(&mut self, dek: MasterKey, notes: Vec<Note>, storage: VaultStorage) {
+    pub fn become_unlocked(
+        &mut self,
+        dek: MasterKey,
+        mut notes: Vec<Note>,
+        mut storage: VaultStorage,
+    ) {
         // Pick the highest existing id + 1 as the next allocation point
         // so a relaunch doesn't recycle ids that crashed before saving.
+        // Computed over *all* loaded notes (before the purge below) so a
+        // freshly purged id can't be recycled within this session either.
         let max_id = notes.iter().map(|n| n.id).max().unwrap_or(0);
         self.next_id = max_id.saturating_add(1);
-        let selected = notes.first().map(|n| n.id);
+
+        // Auto-purge trash older than the retention window. Best-effort: a
+        // failed row delete just leaves the (still-encrypted) note to be swept
+        // on a later unlock, so it must not block opening the vault. Done here,
+        // the single chokepoint for unlock / recovery / setup, so every entry
+        // path purges exactly once.
+        let now = unix_now();
+        notes.retain(|n| match n.deleted_at {
+            Some(t) if now.saturating_sub(t) >= TRASH_RETENTION_SECS => {
+                let _ = storage.delete_note(n.id);
+                false
+            }
+            _ => true,
+        });
+
+        // Select the first *live* note — a trashed note is never the landing
+        // selection (the editor opens on real content, not something in the bin).
+        let selected = notes.iter().find(|n| n.deleted_at.is_none()).map(|n| n.id);
         self.phase = Phase::Unlocked {
             dek,
             notes,
@@ -212,6 +250,7 @@ impl AppState {
             dirty: HashSet::new(),
             filter_tags: Vec::new(),
             search_query: String::new(),
+            trash_view: false,
             image_cache: HashMap::new(),
         };
     }
@@ -321,6 +360,7 @@ impl AppState {
             body,
             tags: Vec::new(),
             pinned: false,
+            deleted_at: None,
         });
         *selected = Some(id);
         self.next_id = self.next_id.saturating_add(1);
@@ -355,7 +395,7 @@ impl AppState {
             return Vec::new();
         };
         let mut out: Vec<String> = Vec::new();
-        for note in notes {
+        for note in notes.iter().filter(|n| n.deleted_at.is_none()) {
             for tag in &note.tags {
                 if !out.contains(tag) {
                     out.push(tag.clone());
@@ -474,7 +514,8 @@ impl AppState {
     /// anything to filter by at all. Lets the sidebar hide the filter row
     /// entirely on a vault with no tags yet.
     pub fn has_any_tags(&self) -> bool {
-        matches!(&self.phase, Phase::Unlocked { notes, .. } if notes.iter().any(|n| !n.tags.is_empty()))
+        matches!(&self.phase, Phase::Unlocked { notes, .. }
+            if notes.iter().any(|n| n.deleted_at.is_none() && !n.tags.is_empty()))
     }
 
     /// Toggle a tag in the sidebar filter, normalizing it first so it
@@ -529,14 +570,24 @@ impl AppState {
             notes,
             filter_tags,
             search_query,
+            trash_view,
             ..
         } = &self.phase
         else {
             return Vec::new();
         };
+        // Trash view: just the soft-deleted notes, most-recently-trashed first.
+        // The tag filter and search are live-view concerns and don't apply here.
+        if *trash_view {
+            let mut matched: Vec<&Note> = notes.iter().filter(|n| n.deleted_at.is_some()).collect();
+            matched.sort_by(|a, b| compare_trash(a, b));
+            return matched.iter().map(|n| n.id).collect();
+        }
+        // Live view: skip trashed notes, then narrow by tag filter + search.
         let query = search_query.trim().to_lowercase();
         let mut matched: Vec<&Note> = notes
             .iter()
+            .filter(|n| n.deleted_at.is_none())
             .filter(|n| note_matches_filter(&n.tags, filter_tags))
             .filter(|n| note_matches_search(&n.title, &n.body, &query))
             .collect();
@@ -550,6 +601,183 @@ impl AppState {
         match &self.phase {
             Phase::Unlocked { notes, .. } => notes.len(),
             _ => 0,
+        }
+    }
+
+    // ── Trash / soft-delete ─────────────────────────────────────────────
+    //
+    // A delete moves a note to the trash (sets `deleted_at`) rather than
+    // dropping its row, so it can be restored. The trash view lists these,
+    // offering restore + permanent delete; an unlock auto-purges anything past
+    // the retention window. Trashed notes are excluded from the live list,
+    // tag filter/autocomplete, search, and wikilink/backlink resolution.
+
+    /// Number of live (non-trashed) notes. Drives the sidebar's "no notes yet"
+    /// empty state and the sort-row visibility — both of which are about the
+    /// live list, so a vault holding only trashed notes still reads as empty.
+    pub fn live_note_count(&self) -> usize {
+        match &self.phase {
+            Phase::Unlocked { notes, .. } => {
+                notes.iter().filter(|n| n.deleted_at.is_none()).count()
+            }
+            _ => 0,
+        }
+    }
+
+    /// Number of notes currently in the trash. Drives the "Trash (n)" toggle
+    /// label and whether the "Empty trash" action is offered.
+    pub fn trash_count(&self) -> usize {
+        match &self.phase {
+            Phase::Unlocked { notes, .. } => {
+                notes.iter().filter(|n| n.deleted_at.is_some()).count()
+            }
+            _ => 0,
+        }
+    }
+
+    /// Whether note `id` is in the trash. False when locked or the id is gone.
+    pub fn is_trashed(&self, id: NoteId) -> bool {
+        matches!(&self.phase, Phase::Unlocked { notes, .. }
+            if notes.iter().any(|n| n.id == id && n.deleted_at.is_some()))
+    }
+
+    /// Whether the sidebar is currently showing the trash rather than the live
+    /// note list. False when locked.
+    pub fn is_trash_view(&self) -> bool {
+        matches!(&self.phase, Phase::Unlocked { trash_view, .. } if *trash_view)
+    }
+
+    /// Switch the sidebar between the live list and the trash. No-op when
+    /// locked. The caller rebuilds the sidebar afterwards.
+    pub fn set_trash_view(&mut self, on: bool) {
+        if let Phase::Unlocked { trash_view, .. } = &mut self.phase {
+            *trash_view = on;
+        }
+    }
+
+    /// Move note `id` to the trash: stamp `deleted_at` with the current time
+    /// and mark it dirty so the auto-save tick persists the new state (the flag
+    /// rides in the encrypted payload, like pin/tags). If the trashed note was
+    /// selected, selection moves to the first remaining live note (or `None`).
+    /// Returns whether a note was actually trashed (false when locked, the id
+    /// is unknown, or it was already trashed).
+    pub fn trash_note(&mut self, id: NoteId) -> bool {
+        let now = unix_now();
+        let trashed = if let Phase::Unlocked {
+            notes, selected, ..
+        } = &mut self.phase
+        {
+            if let Some(note) = notes
+                .iter_mut()
+                .find(|n| n.id == id && n.deleted_at.is_none())
+            {
+                note.deleted_at = Some(now);
+                if *selected == Some(id) {
+                    *selected = notes.iter().find(|n| n.deleted_at.is_none()).map(|n| n.id);
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if trashed {
+            self.mark_dirty(id);
+        }
+        trashed
+    }
+
+    /// Restore note `id` from the trash (clear `deleted_at`) and mark it dirty.
+    /// Returns whether a note was actually restored (false when locked, the id
+    /// is unknown, or it wasn't trashed).
+    pub fn restore_note(&mut self, id: NoteId) -> bool {
+        let restored = if let Phase::Unlocked { notes, .. } = &mut self.phase {
+            if let Some(note) = notes
+                .iter_mut()
+                .find(|n| n.id == id && n.deleted_at.is_some())
+            {
+                note.deleted_at = None;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if restored {
+            self.mark_dirty(id);
+        }
+        restored
+    }
+
+    /// Permanently delete a *trashed* note — removing it from the resident vec
+    /// and the on-disk store. Guarded to trashed notes so a stray call can't
+    /// hard-delete a live note (the live ✕ path goes through [`trash_note`]).
+    /// Errors propagate; the in-memory removal still happens on storage failure
+    /// (same defensive stance as the bulk paths). Returns whether a row was
+    /// removed.
+    pub fn permanent_delete_note(&mut self, id: NoteId) -> Result<bool, StorageError> {
+        if !self.is_trashed(id) {
+            return Ok(false);
+        }
+        let Phase::Unlocked {
+            notes,
+            selected,
+            storage,
+            dirty,
+            ..
+        } = &mut self.phase
+        else {
+            return Ok(false);
+        };
+        let before = notes.len();
+        notes.retain(|n| n.id != id);
+        let removed = notes.len() < before;
+        dirty.remove(&id);
+        if *selected == Some(id) {
+            *selected = notes.iter().find(|n| n.deleted_at.is_none()).map(|n| n.id);
+        }
+        if removed {
+            storage.delete_note(id)?;
+        }
+        Ok(removed)
+    }
+
+    /// Permanently delete every trashed note in one sweep. Removes each from the
+    /// resident vec and the store; orphaned attachments are reclaimed by the
+    /// usual lock-time sweep. Returns the number of notes removed. Storage
+    /// errors propagate (the in-memory removal still happens).
+    pub fn empty_trash(&mut self) -> Result<usize, StorageError> {
+        let Phase::Unlocked {
+            notes,
+            selected,
+            storage,
+            dirty,
+            ..
+        } = &mut self.phase
+        else {
+            return Ok(0);
+        };
+        let doomed: Vec<NoteId> = notes
+            .iter()
+            .filter(|n| n.deleted_at.is_some())
+            .map(|n| n.id)
+            .collect();
+        notes.retain(|n| n.deleted_at.is_none());
+        if matches!(selected, Some(id) if doomed.contains(id)) {
+            *selected = notes.iter().find(|n| n.deleted_at.is_none()).map(|n| n.id);
+        }
+        let mut first_err: Option<StorageError> = None;
+        for id in &doomed {
+            dirty.remove(id);
+            if let Err(e) = storage.delete_note(*id) {
+                first_err.get_or_insert(e);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(doomed.len()),
         }
     }
 
@@ -692,7 +920,13 @@ impl AppState {
                 dirty.remove(&id);
                 continue;
             };
-            let payload = join_payload(&note.title, &note.body, &note.tags, note.pinned);
+            let payload = join_payload(
+                &note.title,
+                &note.body,
+                &note.tags,
+                note.pinned,
+                note.deleted_at,
+            );
             let (nonce, ciphertext) = seal(dek, &payload);
             let row = EncryptedNote {
                 id: note.id,
@@ -724,7 +958,13 @@ impl AppState {
         let rows: Vec<EncryptedNote> = notes
             .iter()
             .map(|note| {
-                let payload = join_payload(&note.title, &note.body, &note.tags, note.pinned);
+                let payload = join_payload(
+                    &note.title,
+                    &note.body,
+                    &note.tags,
+                    note.pinned,
+                    note.deleted_at,
+                );
                 let (nonce, ciphertext) = seal(dek, &payload);
                 EncryptedNote {
                     id: note.id,
@@ -736,37 +976,6 @@ impl AppState {
         storage.save_all_notes(&rows)?;
         dirty.clear();
         Ok(())
-    }
-
-    /// Remove `id` from both the resident notes vec and the on-disk
-    /// store. The sidebar's ✕ button calls this so a delete is durable
-    /// even without waiting for the auto-save tick.
-    ///
-    /// Errors propagate to the caller. The in-memory removal still
-    /// happens on storage failure (defensive: don't leave the user
-    /// staring at a row they thought they deleted).
-    pub fn delete_note_persisted(&mut self, id: NoteId) -> Result<bool, StorageError> {
-        let Phase::Unlocked {
-            notes,
-            selected,
-            storage,
-            dirty,
-            ..
-        } = &mut self.phase
-        else {
-            return Ok(false);
-        };
-        let before = notes.len();
-        notes.retain(|n| n.id != id);
-        let removed = notes.len() < before;
-        dirty.remove(&id);
-        if *selected == Some(id) {
-            *selected = notes.first().map(|n| n.id);
-        }
-        if removed {
-            storage.delete_note(id)?;
-        }
-        Ok(removed)
     }
 
     /// Drop the unlocked session **without flushing to storage**, closing the
@@ -823,13 +1032,14 @@ pub fn decrypt_all(dek: &MasterKey, vault: &[EncryptedNote]) -> Option<Vec<Note>
     let mut out = Vec::with_capacity(vault.len());
     for enc in vault {
         let pt = open(dek, &enc.nonce, &enc.ciphertext)?;
-        let (title, body, tags, pinned) = split_payload(&pt)?;
+        let (title, body, tags, pinned, deleted_at) = split_payload(&pt)?;
         out.push(Note {
             id: enc.id,
             title,
             body,
             tags,
             pinned,
+            deleted_at,
         });
     }
     Some(out)
@@ -858,6 +1068,17 @@ fn title_key(title: &str) -> String {
     title.to_lowercase()
 }
 
+/// Ordering for the trash view: most-recently-trashed first, with note id as a
+/// stable tiebreak. Independent of the live list's [`SortMode`] / pin float —
+/// in the bin, "what did I just delete?" is the useful order. A `None`
+/// `deleted_at` (shouldn't occur here — the caller pre-filters to trashed
+/// notes) sorts last.
+fn compare_trash(a: &Note, b: &Note) -> Ordering {
+    b.deleted_at
+        .cmp(&a.deleted_at)
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 /// Number of wrong passwords allowed before any cooldown kicks in. A typo or
 /// two shouldn't lock anyone out, but a sustained run should.
 const FREE_UNLOCK_ATTEMPTS: u32 = 5;
@@ -877,6 +1098,22 @@ fn lockout_for(attempts: u32) -> Option<Duration> {
     // (≥ 64 → None → saturate to the cap below).
     let secs = 15u64.checked_shl(over).unwrap_or(u64::MAX).min(300);
     Some(Duration::from_secs(secs))
+}
+
+/// How long a note lingers in the trash before an unlock auto-purges it.
+/// 30 days, matching the upstream Tauri app's `purge_old_trash` cutoff — long
+/// enough to undo a mistaken delete, short enough that the bin doesn't grow
+/// unbounded.
+const TRASH_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Current Unix time in whole seconds (saturating to 0 before the epoch — a
+/// clock set before 1970 just reads as "live" for trash purposes). Used to
+/// stamp `deleted_at` and to measure trash age at unlock.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Normalize a raw tag input to its stored form: trimmed and lowercased.
@@ -955,20 +1192,24 @@ pub fn extract_attachment_refs(body: &str, out: &mut HashSet<AttachmentId>) {
 ///
 /// - v1 — added tags (a `[2] tag_count` block before the body).
 /// - v2 — added a flags byte (bit 0 = pinned) right after the version.
+/// - v3 — added an 8-byte `deleted_at` field (0 = live) after the flags, for
+///   the trash / soft-delete state.
 ///
-/// Old vaults stay readable (v1 → `pinned = false`, legacy → no tags either);
-/// new writes always use v2.
+/// Old vaults stay readable (v2 → `deleted_at = None`, v1 → also `pinned =
+/// false`, legacy → no tags either); new writes always use v3.
 const PAYLOAD_V1: u8 = 1;
 const PAYLOAD_V2: u8 = 2;
+const PAYLOAD_V3: u8 = 3;
 
 /// Per-note flag bits carried in the v2 flags byte.
 const FLAG_PINNED: u8 = 0b0000_0001;
 
-/// Payload encoding (v2):
+/// Payload encoding (v3):
 ///
 /// ```text
-/// [1]  version = PAYLOAD_V2
+/// [1]  version = PAYLOAD_V3
 /// [1]  flags (bit 0 = pinned; other bits reserved, written 0)
+/// [8]  deleted_at, big-endian unix seconds (0 = live / not trashed)
 /// [4]  title length, big-endian
 /// [N]  title bytes
 /// [2]  tag count, big-endian
@@ -978,12 +1219,21 @@ const FLAG_PINNED: u8 = 0b0000_0001;
 ///
 /// Switch to bincode/postcard if this grows much further — the manual layout
 /// is still fine for these few fields plus a flags byte.
-fn join_payload(title: &str, body: &str, tags: &[String], pinned: bool) -> Vec<u8> {
+fn join_payload(
+    title: &str,
+    body: &str,
+    tags: &[String],
+    pinned: bool,
+    deleted_at: Option<u64>,
+) -> Vec<u8> {
     let tb = title.as_bytes();
     let bb = body.as_bytes();
-    let mut out = Vec::with_capacity(1 + 1 + 4 + tb.len() + 2 + bb.len());
-    out.push(PAYLOAD_V2);
+    let mut out = Vec::with_capacity(1 + 1 + 8 + 4 + tb.len() + 2 + bb.len());
+    out.push(PAYLOAD_V3);
     out.push(if pinned { FLAG_PINNED } else { 0 });
+    // 0 is the "live" sentinel — no note is ever trashed at the Unix epoch, so
+    // it can't collide with a real deletion timestamp.
+    out.extend_from_slice(&deleted_at.unwrap_or(0).to_be_bytes());
     let title_len = u32::try_from(tb.len()).expect("title under 4GB");
     out.extend_from_slice(&title_len.to_be_bytes());
     out.extend_from_slice(tb);
@@ -999,14 +1249,46 @@ fn join_payload(title: &str, body: &str, tags: &[String], pinned: bool) -> Vec<u
     out
 }
 
-fn split_payload(bytes: &[u8]) -> Option<(String, String, Vec<String>, bool)> {
+/// Decoded note fields: title, body, tags, pinned, deleted_at. Older on-disk
+/// versions fill the newer fields with their defaults (v2 → `deleted_at =
+/// None`, v1 → also `pinned = false`, legacy → no tags either).
+type DecodedPayload = (String, String, Vec<String>, bool, Option<u64>);
+
+fn split_payload(bytes: &[u8]) -> Option<DecodedPayload> {
     match bytes.first() {
-        Some(&PAYLOAD_V2) => split_payload_v2(&bytes[1..]),
-        // v1: tags but no flags byte → never pinned.
-        Some(&PAYLOAD_V1) => split_payload_v1(&bytes[1..]).map(|(t, b, g)| (t, b, g, false)),
+        Some(&PAYLOAD_V3) => split_payload_v3(&bytes[1..]),
+        // v2: pinned flag but no deleted_at → never trashed.
+        Some(&PAYLOAD_V2) => split_payload_v2(&bytes[1..]).map(|(t, b, g, p)| (t, b, g, p, None)),
+        // v1: tags but no flags byte → never pinned, never trashed.
+        Some(&PAYLOAD_V1) => split_payload_v1(&bytes[1..]).map(|(t, b, g)| (t, b, g, false, None)),
         // Legacy: no version byte, no tags, never pinned. (A pre-tags vault.)
-        _ => split_payload_legacy(bytes).map(|(t, b)| (t, b, Vec::new(), false)),
+        _ => split_payload_legacy(bytes).map(|(t, b)| (t, b, Vec::new(), false, None)),
     }
+}
+
+/// Parse the v3 body (the slice *after* the version byte): a flags byte, an
+/// 8-byte `deleted_at`, then the same title/tags/body layout as v2.
+fn split_payload_v3(bytes: &[u8]) -> Option<DecodedPayload> {
+    let mut pos = 0usize;
+    let flags = *bytes.get(pos)?;
+    pos += 1;
+    let pinned = flags & FLAG_PINNED != 0;
+
+    let raw_deleted = read_u64(bytes, &mut pos)?;
+    let deleted_at = (raw_deleted != 0).then_some(raw_deleted);
+
+    let title_len = read_u32(bytes, &mut pos)? as usize;
+    let title = read_str(bytes, &mut pos, title_len)?;
+
+    let tag_count = read_u16(bytes, &mut pos)? as usize;
+    let mut tags = Vec::with_capacity(tag_count);
+    for _ in 0..tag_count {
+        let tag_len = read_u16(bytes, &mut pos)? as usize;
+        tags.push(read_str(bytes, &mut pos, tag_len)?);
+    }
+
+    let body = String::from_utf8(bytes[pos..].to_vec()).ok()?;
+    Some((title, body, tags, pinned, deleted_at))
 }
 
 /// Parse the v2 body (the slice *after* the version byte): a flags byte, then
@@ -1077,6 +1359,13 @@ fn read_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
     Some(v)
 }
 
+fn read_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
+    let end = pos.checked_add(8)?;
+    let v = u64::from_be_bytes(bytes.get(*pos..end)?.try_into().ok()?);
+    *pos = end;
+    Some(v)
+}
+
 fn read_str(bytes: &[u8], pos: &mut usize, len: usize) -> Option<String> {
     let end = pos.checked_add(len)?;
     let s = String::from_utf8(bytes.get(*pos..end)?.to_vec()).ok()?;
@@ -1139,23 +1428,52 @@ mod tests {
     #[test]
     fn payload_round_trips_title_body_tags_and_pin() {
         let tags = vec!["work".to_string(), "日本語".to_string()];
-        let bytes = join_payload("My Title", "Body\nwith newline", &tags, true);
-        // v2 always carries the version marker so legacy parsing is skipped.
-        assert_eq!(bytes[0], PAYLOAD_V2);
-        let (title, body, got_tags, pinned) = split_payload(&bytes).expect("v2 payload parses");
+        let bytes = join_payload(
+            "My Title",
+            "Body\nwith newline",
+            &tags,
+            true,
+            Some(1_700_000_000),
+        );
+        // v3 always carries the version marker so legacy parsing is skipped.
+        assert_eq!(bytes[0], PAYLOAD_V3);
+        let (title, body, got_tags, pinned, deleted_at) =
+            split_payload(&bytes).expect("v3 payload parses");
         assert_eq!(title, "My Title");
         assert_eq!(body, "Body\nwith newline");
         assert_eq!(got_tags, tags);
         assert!(pinned, "the pinned flag round-trips");
+        assert_eq!(deleted_at, Some(1_700_000_000), "deleted_at round-trips");
     }
 
     #[test]
-    fn payload_round_trips_with_no_tags_unpinned() {
-        let bytes = join_payload("t", "b", &[], false);
-        let (title, body, tags, pinned) = split_payload(&bytes).expect("parses");
+    fn payload_round_trips_with_no_tags_unpinned_live() {
+        let bytes = join_payload("t", "b", &[], false, None);
+        let (title, body, tags, pinned, deleted_at) = split_payload(&bytes).expect("parses");
         assert_eq!((title.as_str(), body.as_str()), ("t", "b"));
         assert!(tags.is_empty());
         assert!(!pinned);
+        assert_eq!(deleted_at, None, "a live note has no deleted_at");
+    }
+
+    #[test]
+    fn legacy_v2_payload_reads_back_live() {
+        // A v2 note (flags byte but no deleted_at) must read back as live —
+        // the deletion field didn't exist when it was written.
+        let mut v2 = vec![PAYLOAD_V2, FLAG_PINNED];
+        let title = "V2 Note";
+        v2.extend_from_slice(&(title.len() as u32).to_be_bytes());
+        v2.extend_from_slice(title.as_bytes());
+        v2.extend_from_slice(&0u16.to_be_bytes()); // zero tags
+        v2.extend_from_slice(b"body");
+
+        let (got_title, got_body, tags, pinned, deleted_at) =
+            split_payload(&v2).expect("v2 parses");
+        assert_eq!(got_title, title);
+        assert_eq!(got_body, "body");
+        assert!(tags.is_empty());
+        assert!(pinned, "the v2 pinned flag still round-trips");
+        assert_eq!(deleted_at, None, "a v2 note reads back live");
     }
 
     #[test]
@@ -1170,11 +1488,13 @@ mod tests {
         v1.extend_from_slice(&0u16.to_be_bytes()); // zero tags
         v1.extend_from_slice(body.as_bytes());
 
-        let (got_title, got_body, tags, pinned) = split_payload(&v1).expect("v1 parses");
+        let (got_title, got_body, tags, pinned, deleted_at) =
+            split_payload(&v1).expect("v1 parses");
         assert_eq!(got_title, title);
         assert_eq!(got_body, body);
         assert!(tags.is_empty());
         assert!(!pinned, "a v1 note (no flags byte) reads back unpinned");
+        assert_eq!(deleted_at, None, "a v1 note reads back live");
     }
 
     #[test]
@@ -1190,11 +1510,13 @@ mod tests {
         // High byte of a short title length is 0, never a version marker.
         assert_eq!(legacy[0], 0);
 
-        let (got_title, got_body, tags, pinned) = split_payload(&legacy).expect("legacy parses");
+        let (got_title, got_body, tags, pinned, deleted_at) =
+            split_payload(&legacy).expect("legacy parses");
         assert_eq!(got_title, title);
         assert_eq!(got_body, body);
         assert!(tags.is_empty(), "legacy notes have no tags");
         assert!(!pinned, "legacy notes are never pinned");
+        assert_eq!(deleted_at, None, "legacy notes read back live");
     }
 
     #[test]
@@ -1211,6 +1533,7 @@ mod tests {
             body: "b".into(),
             tags: Vec::new(),
             pinned: false,
+            deleted_at: None,
         }];
         AppState {
             salt: [0u8; SALT_SIZE],
@@ -1228,6 +1551,7 @@ mod tests {
                 dirty: HashSet::new(),
                 filter_tags: Vec::new(),
                 search_query: String::new(),
+                trash_view: false,
                 image_cache: HashMap::new(),
             },
         }
@@ -1241,6 +1565,7 @@ mod tests {
                 body: String::new(),
                 tags: vec!["work".into()],
                 pinned: false,
+                deleted_at: None,
             },
             Note {
                 id: 2,
@@ -1248,6 +1573,7 @@ mod tests {
                 body: String::new(),
                 tags: vec!["personal".into()],
                 pinned: false,
+                deleted_at: None,
             },
         ];
         AppState {
@@ -1266,6 +1592,7 @@ mod tests {
                 dirty: HashSet::new(),
                 filter_tags: Vec::new(),
                 search_query: String::new(),
+                trash_view: false,
                 image_cache: HashMap::new(),
             },
         }
@@ -1382,6 +1709,111 @@ mod tests {
         s.prune_filter();
         assert!(!s.is_filter_active("work"));
         assert!(!s.is_filtering());
+    }
+
+    // ── Trash / soft-delete ─────────────────────────────────────────────
+
+    #[test]
+    fn trash_hides_note_from_live_list_and_moves_selection() {
+        let mut s = unlocked_state_with_two_tagged_notes(); // ids 1,2; selected 1
+        assert!(s.trash_note(1), "first trash succeeds");
+        assert!(
+            !s.trash_note(1),
+            "re-trashing an already-trashed note is a no-op"
+        );
+
+        assert!(s.is_trashed(1));
+        assert!(!s.is_trashed(2));
+        // The live list now shows only the surviving note.
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![2]);
+        assert_eq!(s.live_note_count(), 1);
+        assert_eq!(s.trash_count(), 1);
+        // Selection moved off the trashed note to the remaining live one.
+        if let Phase::Unlocked { selected, .. } = &s.phase {
+            assert_eq!(*selected, Some(2));
+        } else {
+            panic!("expected Unlocked");
+        }
+        // Trashing marks the note dirty so the new state persists.
+        if let Phase::Unlocked { dirty, .. } = &s.phase {
+            assert!(dirty.contains(&1));
+        }
+    }
+
+    #[test]
+    fn trashed_note_drops_out_of_tags_and_search() {
+        let mut s = unlocked_state_with_two_tagged_notes(); // 1="work", 2="personal"
+        // Before: both tags visible.
+        assert_eq!(
+            s.all_tags(),
+            vec!["personal".to_string(), "work".to_string()]
+        );
+        assert!(s.has_any_tags());
+
+        s.trash_note(1); // removes the only "work" note
+        assert_eq!(
+            s.all_tags(),
+            vec!["personal".to_string()],
+            "a trashed note's tags no longer populate the filter set"
+        );
+        assert!(s.has_any_tags(), "note 2 still carries a tag");
+    }
+
+    #[test]
+    fn trash_view_lists_only_trashed_notes() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        s.trash_note(1);
+        // Live view: only note 2.
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![2]);
+        // Trash view: only note 1.
+        s.set_trash_view(true);
+        assert!(s.is_trash_view());
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![1]);
+    }
+
+    #[test]
+    fn restore_brings_a_note_back_to_the_live_list() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        s.trash_note(1);
+        assert!(s.restore_note(1), "restore succeeds for a trashed note");
+        assert!(!s.restore_note(1), "restoring a live note is a no-op");
+        assert!(!s.is_trashed(1));
+        assert_eq!(s.filtered_note_ids(SortMode::Created), vec![1, 2]);
+        assert_eq!(s.trash_count(), 0);
+    }
+
+    #[test]
+    fn permanent_delete_is_guarded_to_trashed_notes() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        // A live note can't be permanently deleted — the live ✕ trashes instead.
+        assert!(
+            !s.permanent_delete_note(1).expect("no storage error"),
+            "permanent delete refuses a live note"
+        );
+        assert_eq!(s.note_count(), 2, "the live note is untouched");
+
+        // Once trashed, it can be permanently removed.
+        s.trash_note(1);
+        assert!(s.permanent_delete_note(1).expect("delete ok"));
+        assert_eq!(s.note_count(), 1, "the row is gone from the vec");
+        assert!(!s.is_trashed(1));
+    }
+
+    #[test]
+    fn empty_trash_removes_every_trashed_note() {
+        let mut s = unlocked_state_with_two_tagged_notes();
+        s.trash_note(1);
+        s.trash_note(2);
+        assert_eq!(s.live_note_count(), 0);
+        let removed = s.empty_trash().expect("empty ok");
+        assert_eq!(removed, 2);
+        assert_eq!(s.note_count(), 0, "the vault is now empty");
+        // Selection fell through to None once the last note was trashed.
+        if let Phase::Unlocked { selected, .. } = &s.phase {
+            assert_eq!(*selected, None);
+        } else {
+            panic!("expected Unlocked");
+        }
     }
 
     // ── Pinning + sort ───────────────────────────────────────────────────

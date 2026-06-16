@@ -190,15 +190,94 @@ pub fn build(
         );
     }
 
-    // Search box, between the header and the tag filter. Always visible while
-    // unlocked; typing narrows the list (title + body substring, intersected
-    // with the tag filter — see `state::note_matches_search`). Its tree index
-    // is recorded on the app state so the global Ctrl+F shortcut (wired in
-    // `main`) can focus it from anywhere, including mid-edit.
+    // View toggle: live notes vs trash. The active view highlights like the
+    // sort / filter chips; switching rebuilds the list (and, via reactive
+    // visibility, hides the search / sort / filter rows in the trash view). The
+    // "Empty trash" action sits at the right, shown only in a non-empty trash.
+    let view_row = tree.add_child(pane, Container::row().gap(6.0).align_center());
+    for trash in [false, true] {
+        let bg_state = Rc::clone(&w.state);
+        let bg = Reactive::derive(move || {
+            let t = settings::current_theme();
+            if bg_state.borrow().is_trash_view() == trash {
+                t.colors.primary
+            } else {
+                t.colors.surface_variant
+            }
+        });
+        let fg_state = Rc::clone(&w.state);
+        let fg = Reactive::derive(move || {
+            let t = settings::current_theme();
+            if fg_state.borrow().is_trash_view() == trash {
+                t.colors.on_primary
+            } else {
+                t.colors.on_surface
+            }
+        });
+        let label_state = Rc::clone(&w.state);
+        let w_btn = w.clone();
+        tree.add_child(
+            view_row,
+            Button::reactive_label(move || {
+                if trash {
+                    // "Trash (n)" — the count tracks the bin reactively.
+                    format!(
+                        "{} ({})",
+                        i18n::tr(Key::SidebarViewTrash),
+                        label_state.borrow().trash_count()
+                    )
+                } else {
+                    i18n::tr(Key::SidebarViewNotes).to_string()
+                }
+            })
+            .font_size(13.0)
+            .radius(10.0)
+            .background(bg)
+            .text_color(fg)
+            .on_click(move |ctx| {
+                w_btn.state.borrow_mut().set_trash_view(trash);
+                rebuild_sidebar(&w_btn, ctx);
+            }),
+        );
+    }
+    tree.add_child(view_row, Container::row().grow(1.0));
+    {
+        let vis_state = Rc::clone(&w.state);
+        let w_empty = w.clone();
+        tree.add_child(
+            view_row,
+            Button::reactive_label(|| i18n::tr(Key::TrashEmptyBtn).to_string())
+                .font_size(13.0)
+                .radius(6.0)
+                .background(settings::error())
+                .visible(Reactive::derive(move || {
+                    let s = vis_state.borrow();
+                    s.is_trash_view() && s.trash_count() > 0
+                }))
+                .on_click(move |ctx| empty_trash(&w_empty, ctx)),
+        );
+    }
+
+    // Search box, between the view toggle and the tag filter. Hidden in the
+    // trash view (search narrows the live list only). Typing narrows the list
+    // (title + body substring, intersected with the tag filter — see
+    // `state::note_matches_search`). Its tree index is recorded on the app
+    // state so the global Ctrl+F shortcut (wired in `main`) can focus it from
+    // anywhere, including mid-edit. The Input rides in a full-width column
+    // wrapper because `Input` itself carries no `.visible()` builder.
     {
         let w_change = w.clone();
-        let search_input = tree.add_child(
+        let search_vis = Rc::clone(&w.state);
+        let search_wrap = tree.add_child(
             pane,
+            Container::column()
+                .width_full()
+                .visible(Reactive::derive(move || {
+                    !search_vis.borrow().is_trash_view()
+                })),
+        );
+        let search_input = tree.add_child(
+            search_wrap,
             Input::new()
                 .placeholder(i18n::tr(Key::SidebarSearchPlaceholder))
                 .value(w.search)
@@ -223,7 +302,8 @@ pub fn build(
             .gap(6.0)
             .align_center()
             .visible(Reactive::derive(move || {
-                sort_visible_state.borrow().note_count() > 0
+                let s = sort_visible_state.borrow();
+                !s.is_trash_view() && s.live_note_count() > 0
             })),
     );
     tree.add_child(
@@ -280,7 +360,8 @@ pub fn build(
             .gap(6.0)
             .align_center()
             .visible(Reactive::derive(move || {
-                filter_visible_state.borrow().has_any_tags()
+                let s = filter_visible_state.borrow();
+                !s.is_trash_view() && s.has_any_tags()
             })),
     );
     w.filter.set(filter_row);
@@ -432,17 +513,36 @@ fn populate_filter(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
 /// active tag filter. Called at initial build and from `rebuild_children`
 /// after add / delete / filter changes.
 fn populate_list(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
-    let (ids, total, searching, filtering) = {
+    let (ids, trash_view, live_total, searching, filtering) = {
         let s = w.state.borrow();
         (
             s.filtered_note_ids(settings::current_sort()),
-            s.note_count(),
+            s.is_trash_view(),
+            s.live_note_count(),
             s.is_searching(),
             s.is_filtering(),
         )
     };
 
-    if total == 0 {
+    // Trash view: just the soft-deleted notes (search / tag filter don't apply),
+    // or an "empty" line when the bin is clear.
+    if trash_view {
+        if ids.is_empty() {
+            tree.add_child(
+                parent,
+                TextWidget::reactive(|| i18n::tr(Key::TrashEmptyHint).to_string())
+                    .color(settings::on_surface_variant()),
+            );
+            return;
+        }
+        for id in ids {
+            add_row(tree, parent, id, w, true);
+        }
+        return;
+    }
+
+    // Live view.
+    if live_total == 0 {
         tree.add_child(
             parent,
             TextWidget::reactive(|| i18n::tr(Key::SidebarNoNotesYet).to_string())
@@ -451,8 +551,8 @@ fn populate_list(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
         return;
     }
     if ids.is_empty() {
-        // Notes exist but the active search and/or tag filter hid them all —
-        // name whichever is active so the user knows it's a narrowing, not an
+        // Live notes exist but the active search and/or tag filter hid them all
+        // — name whichever is active so the user knows it's a narrowing, not an
         // empty vault.
         let key = match (searching, filtering) {
             (true, true) => Key::SidebarNoMatchSearchTags,
@@ -468,7 +568,7 @@ fn populate_list(tree: &mut WidgetTree, parent: usize, w: &SidebarWiring) {
     }
 
     for id in ids {
-        add_row(tree, parent, id, w);
+        add_row(tree, parent, id, w, false);
     }
 }
 
@@ -496,11 +596,12 @@ fn row_hover_bg(state: &Rc<RefCell<AppState>>, note_id: NoteId) -> Reactive<Colo
     })
 }
 
-// Tree-builder for one note row. The row container holds the click-target
-// button and a "✕" delete button side by side and reads selection state to
+// Tree-builder for one note row. The row container reads selection state to
 // flip its background, so hover and selection coexist without per-button
-// gymnastics.
-fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWiring) {
+// gymnastics. The trailing actions depend on the view: a live row carries a
+// pin toggle and a "✕" that moves the note to the trash; a trash row carries a
+// "Restore" and a "✕" that permanently deletes it (behind a confirmation).
+fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWiring, trash: bool) {
     let row_state = Rc::clone(&w.state);
     let row_bg = Reactive::derive(move || {
         let s = row_state.borrow();
@@ -526,13 +627,14 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
             .radius(4.0),
     );
 
-    // Pin toggle (leftmost). A filled star marks a pinned note, an outline an
-    // unpinned one; clicking flips it and rebuilds the list so the row floats
-    // to (or drops from) the top immediately. Star glyphs (U+2605/2606) render
-    // in the text font, unlike astral-plane pin emoji.
-    let pin_label_state = Rc::clone(&w.state);
-    let pin_color_state = Rc::clone(&w.state);
-    {
+    // Pin toggle (leftmost) — live view only; pinning is meaningless in the
+    // trash. A filled star marks a pinned note, an outline an unpinned one;
+    // clicking flips it and rebuilds the list so the row floats to (or drops
+    // from) the top immediately. Star glyphs (U+2605/2606) render in the text
+    // font, unlike astral-plane pin emoji.
+    if !trash {
+        let pin_label_state = Rc::clone(&w.state);
+        let pin_color_state = Rc::clone(&w.state);
         let w = w.clone();
         tree.add_child(
             row,
@@ -601,25 +703,59 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
         );
     }
 
-    let w = w.clone();
-    tree.add_child(
-        row,
-        // Themed red so the destructive action stays legible on both light
-        // and dark surfaces.
-        Button::new("✕")
-            .radius(4.0)
-            .background(settings::error())
-            .on_click(move |ctx| {
-                delete_note(&w.state, note_id, &w.title, &w.body);
-                // The row set changed, and the deleted note's tags may have
-                // been the last of their kind — rebuild the list + filter row
-                // (the latter prunes any now-orphaned filter tags).
-                rebuild_sidebar(&w, ctx);
-                // Selection may have moved to a sibling (or none) — sync the
-                // editor's chip row to whatever note is active now.
-                w.tag_refresh.fire(ctx);
-            }),
-    );
+    if trash {
+        // Restore: pull the note back into the live list.
+        {
+            let w = w.clone();
+            tree.add_child(
+                row,
+                Button::reactive_label(|| i18n::tr(Key::TrashRestore).to_string())
+                    .font_size(13.0)
+                    .radius(4.0)
+                    .background(Color::TRANSPARENT)
+                    .hover_background(row_hover_bg(&w.state, note_id))
+                    .text_color(settings::on_surface())
+                    .on_click(move |ctx| {
+                        w.state.borrow_mut().restore_note(note_id);
+                        // The note rejoins the live list (and may bring a tag
+                        // back) — rebuild both subtrees and refresh the editor.
+                        rebuild_sidebar(&w, ctx);
+                        w.tag_refresh.fire(ctx);
+                    }),
+            );
+        }
+        // Permanent delete: behind a confirmation — it can't be undone.
+        let w = w.clone();
+        tree.add_child(
+            row,
+            Button::new("\u{2715}")
+                .radius(4.0)
+                .background(settings::error())
+                .on_click(move |ctx| permanent_delete(&w, note_id, ctx)),
+        );
+    } else {
+        // Move to trash. Reversible (restorable from the trash view), so unlike
+        // the permanent delete it isn't gated behind a confirmation.
+        let w = w.clone();
+        tree.add_child(
+            row,
+            // Themed red so the destructive action stays legible on both light
+            // and dark surfaces.
+            Button::new("\u{2715}")
+                .radius(4.0)
+                .background(settings::error())
+                .on_click(move |ctx| {
+                    move_note_to_trash(&w, note_id);
+                    // The row left the live list, and its tags may have been the
+                    // last of their kind — rebuild the list + filter row (the
+                    // latter prunes any now-orphaned filter tags).
+                    rebuild_sidebar(&w, ctx);
+                    // Selection may have moved to a sibling (or none) — sync the
+                    // editor's chip row to whatever note is active now.
+                    w.tag_refresh.fire(ctx);
+                }),
+        );
+    }
 }
 
 fn select_note(
@@ -734,41 +870,145 @@ fn import_note(w: &SidebarWiring, ctx: &mut EventContext) {
     w.tag_refresh.fire(ctx);
 }
 
-fn delete_note(
-    state: &Rc<RefCell<AppState>>,
-    note_id: NoteId,
-    title_sig: &Signal<String>,
-    body_sig: &Signal<String>,
-) {
-    // `delete_note_persisted` updates the in-memory vec, drops the
-    // row from SQLCipher, and re-selects a sibling if the deleted
-    // note was the active one — all atomically under one borrow_mut.
-    let was_selected_before = matches!(&state.borrow().phase, Phase::Unlocked { selected, .. } if *selected == Some(note_id));
-
-    if let Err(e) = state.borrow_mut().delete_note_persisted(note_id) {
-        notice::show(format!("{}{e}", i18n::tr(Key::ErrDeleteNotePrefix)));
-        return;
+/// Move a note to the trash — a reversible soft delete (`AppState::trash_note`
+/// stamps `deleted_at` and re-selects a live sibling). If the trashed note was
+/// the active one, the editor rebases onto whatever is selected now (or an
+/// empty editor when the bin took the last live note). The caller rebuilds the
+/// sidebar + fires the tag refresh.
+fn move_note_to_trash(w: &SidebarWiring, note_id: NoteId) {
+    let was_selected = matches!(
+        &w.state.borrow().phase,
+        Phase::Unlocked { selected, .. } if *selected == Some(note_id)
+    );
+    w.state.borrow_mut().trash_note(note_id);
+    if was_selected {
+        rebase_editor_to_selected(w);
     }
+}
 
-    if was_selected_before {
-        let payload = {
-            let s = state.borrow();
-            match &s.phase {
-                Phase::Unlocked {
-                    notes, selected, ..
-                } => selected
-                    .and_then(|sel| notes.iter().find(|n| n.id == sel))
-                    .map(|n| (n.title.clone(), n.body.clone()))
-                    .or(Some((String::new(), String::new()))),
-                _ => None,
+/// Permanently delete a trashed note, behind a confirmation — it can't be
+/// undone. On confirm the row and its on-disk blob are dropped, the editor
+/// rebases if the deleted note was showing, and the sidebar rebuilds.
+fn permanent_delete(w: &SidebarWiring, note_id: NoteId, ctx: &mut EventContext) {
+    let w = w.clone();
+    confirm_dialog(
+        ctx,
+        Key::TrashDeleteConfirmTitle,
+        Key::TrashDeleteConfirmBody,
+        Key::TrashDeleteConfirmBtn,
+        move |ctx| {
+            let was_selected = matches!(
+                &w.state.borrow().phase,
+                Phase::Unlocked { selected, .. } if *selected == Some(note_id)
+            );
+            if let Err(e) = w.state.borrow_mut().permanent_delete_note(note_id) {
+                notice::show(format!("{}{e}", i18n::tr(Key::ErrDeleteNotePrefix)));
+                return;
             }
-        };
-        if let Some((t, b)) = payload {
-            title_sig.set(t);
-            body_sig.set(b);
+            if was_selected {
+                rebase_editor_to_selected(&w);
+            }
+            rebuild_sidebar(&w, ctx);
+            w.tag_refresh.fire(ctx);
+        },
+    );
+}
+
+/// Permanently delete every trashed note, behind a confirmation. Rebases the
+/// editor (the selection may have been a trashed note) and rebuilds the
+/// sidebar.
+fn empty_trash(w: &SidebarWiring, ctx: &mut EventContext) {
+    let w = w.clone();
+    confirm_dialog(
+        ctx,
+        Key::TrashEmptyConfirmTitle,
+        Key::TrashEmptyConfirmBody,
+        Key::TrashEmptyConfirmBtn,
+        move |ctx| {
+            if let Err(e) = w.state.borrow_mut().empty_trash() {
+                notice::show(format!("{}{e}", i18n::tr(Key::ErrEmptyTrashPrefix)));
+                return;
+            }
+            rebase_editor_to_selected(&w);
+            rebuild_sidebar(&w, ctx);
+            w.tag_refresh.fire(ctx);
+        },
+    );
+}
+
+/// Rebase the editor's title / body signals onto the currently selected note,
+/// or clear them to an empty editor when nothing is selected. Called after a
+/// delete (trash / permanent / empty) that may have moved or cleared the
+/// selection. Setting `body` also re-renders the live preview, so no stale
+/// preview of a just-removed note can linger.
+fn rebase_editor_to_selected(w: &SidebarWiring) {
+    let payload = {
+        let s = w.state.borrow();
+        match &s.phase {
+            Phase::Unlocked {
+                notes, selected, ..
+            } => selected
+                .and_then(|sel| notes.iter().find(|n| n.id == sel))
+                .map(|n| (n.title.clone(), n.body.clone()))
+                .or(Some((String::new(), String::new()))),
+            _ => None,
         }
-        // Setting `body_sig` above re-renders the live preview for whatever
-        // note is current now, so the stale preview of the deleted note can't
-        // linger — no explicit reset required.
+    };
+    if let Some((t, b)) = payload {
+        w.title.set(t);
+        w.body.set(b);
     }
+}
+
+/// Push a modal confirmation: a title, a body, and Cancel / `<confirm>`
+/// buttons. `on_confirm` runs when the user confirms, then the layer is
+/// dismissed; Cancel just dismisses. Used for the two destructive trash
+/// actions (permanent delete + empty trash), mirroring the backup-restore
+/// confirmation idiom.
+fn confirm_dialog(
+    ctx: &mut EventContext,
+    title: Key,
+    body: Key,
+    confirm: Key,
+    on_confirm: impl Fn(&mut EventContext) + 'static,
+) {
+    ctx.push_layer(
+        LayerOptions::modal(),
+        Container::column()
+            .width(420.0)
+            .padding(24.0)
+            .gap(16.0)
+            .background(settings::surface())
+            .radius(12.0),
+        move |tree, dialog| {
+            tree.add_child(
+                dialog,
+                TextWidget::reactive(move || i18n::tr(title).to_string())
+                    .font_size(20.0)
+                    .color(settings::on_surface()),
+            );
+            tree.add_child(
+                dialog,
+                TextWidget::reactive(move || i18n::tr(body).to_string())
+                    .color(settings::on_surface_variant()),
+            );
+            let buttons = tree.add_child(dialog, Container::row().gap(8.0).justify_center());
+            tree.add_child(
+                buttons,
+                Button::reactive_label(|| i18n::tr(Key::TrashCancel).to_string())
+                    .radius(6.0)
+                    .on_click(|ctx| ctx.pop_top_layer()),
+            );
+            tree.add_child(
+                buttons,
+                Button::reactive_label(move || i18n::tr(confirm).to_string())
+                    .radius(6.0)
+                    .background(settings::error())
+                    .on_click(move |ctx| {
+                        on_confirm(ctx);
+                        ctx.pop_top_layer();
+                    }),
+            );
+        },
+    );
 }
