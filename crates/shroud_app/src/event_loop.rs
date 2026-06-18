@@ -665,6 +665,42 @@ fn translate_named_key(named: &WinitNamedKey) -> Option<WidgetEvent> {
     }
 }
 
+/// Translate a winit `Ime` event into the widget events to dispatch, in order.
+///
+/// Pure (no `self`) so the platform→widget translation can be unit-tested
+/// without a winit event loop. Mirrors [`translate_character`] /
+/// [`translate_named_key`].
+///
+/// - `Preedit` → a single [`WidgetEvent::ImePreedit`] carrying the
+///   composition text + caret range. The focused text widget renders it
+///   inline; an empty preedit clears it.
+/// - `Commit` → clear any active preedit first, then splat the committed
+///   chars through the existing [`WidgetEvent::CharInput`] path (so widgets
+///   need no commit-specific handling).
+/// - `Enabled` / `Disabled` → clear any lingering preedit. Harmless no-op
+///   when nothing is composing; on `Disabled` (focus loss / IME bypass) it
+///   guarantees a half-composed string doesn't stick on screen.
+fn translate_ime(ime: &Ime) -> Vec<WidgetEvent> {
+    match ime {
+        Ime::Preedit(text, cursor) => vec![WidgetEvent::ImePreedit {
+            text: text.clone(),
+            cursor: *cursor,
+        }],
+        Ime::Commit(text) => {
+            let mut out = vec![WidgetEvent::ImePreedit {
+                text: String::new(),
+                cursor: None,
+            }];
+            out.extend(text.chars().map(|ch| WidgetEvent::CharInput { ch }));
+            out
+        }
+        Ime::Enabled | Ime::Disabled => vec![WidgetEvent::ImePreedit {
+            text: String::new(),
+            cursor: None,
+        }],
+    }
+}
+
 struct ShroudEventLoop {
     config: AppConfig,
     #[allow(dead_code)] // retained so user clones stay valid; future phases may read it
@@ -1053,25 +1089,20 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
 
             // ── IME events ───────────────────────────────────────
             //
-            // Composed text from an IME (Japanese, Chinese, Korean, …)
-            // arrives as `Ime::Commit(text)` after the user finishes
-            // composing. We splat each char into the existing
-            // `CharInput` path so Input / SecureInput don't need a new
-            // event variant. Preedit / Enabled / Disabled are ignored
-            // for M1 — Preedit display is a polish item (the OS still
-            // shows its native composition window in the meantime).
-            WindowEvent::Ime(Ime::Commit(text)) => {
+            // Composed text from an IME (Japanese, Chinese, Korean, …).
+            // Once IME is app-driven (`set_ime_allowed(true)`) winit stops
+            // drawing an inline composition string and expects us to render
+            // the preedit ourselves — so we forward `Preedit` as an
+            // `ImePreedit` event the focused text widget paints inline, and
+            // splat the final `Commit` through the existing `CharInput`
+            // path. See `translate_ime` for the full mapping.
+            WindowEvent::Ime(ime) => {
                 if let Some(tree) = &mut self.tree {
-                    for ch in text.chars() {
-                        tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut self.event_ctx);
+                    for event in translate_ime(&ime) {
+                        tree.dispatch_event(&event, &mut self.event_ctx);
                     }
                     self.request_redraw();
                 }
-            }
-            WindowEvent::Ime(_) => {
-                // Preedit / Enabled / Disabled are ignored for M1. The OS
-                // shows its native composition window during typing, and
-                // the final Commit lands via the arm above.
             }
 
             // ── File drop (drag-and-drop from the OS) ─────────────
@@ -1257,6 +1288,57 @@ mod tests {
         // should pass straight through without spurious events.
         assert!(translate_named_key(&WinitNamedKey::Shift).is_none());
         assert!(translate_named_key(&WinitNamedKey::F1).is_none());
+    }
+
+    #[test]
+    fn ime_preedit_translates_to_preedit_event() {
+        // FW-1: a composition update becomes one ImePreedit carrying the text
+        // and the IME caret range, which the focused widget renders inline.
+        let events = translate_ime(&Ime::Preedit("か".to_string(), Some((3, 3))));
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            WidgetEvent::ImePreedit { text, cursor } => {
+                assert_eq!(text.as_str(), "か");
+                assert_eq!(*cursor, Some((3, 3)));
+            }
+            other => panic!("expected ImePreedit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ime_commit_clears_preedit_then_emits_chars() {
+        // A commit first clears any active preedit (so the underlined
+        // composition vanishes), then splats the committed chars through the
+        // existing CharInput path — one event per code point.
+        let events = translate_ime(&Ime::Commit("ねこ".to_string()));
+        assert_eq!(events.len(), 3, "one clear + one char per code point");
+        match &events[0] {
+            WidgetEvent::ImePreedit { text, cursor } => {
+                assert!(text.is_empty(), "commit must lead with a preedit clear");
+                assert_eq!(*cursor, None);
+            }
+            other => panic!("expected leading ImePreedit clear, got {other:?}"),
+        }
+        assert!(matches!(events[1], WidgetEvent::CharInput { ch: 'ね' }));
+        assert!(matches!(events[2], WidgetEvent::CharInput { ch: 'こ' }));
+    }
+
+    #[test]
+    fn ime_enabled_and_disabled_clear_any_preedit() {
+        // Enabled / Disabled carry no text; both clear any lingering preedit so
+        // a half-composed string can't stick when the IME toggles (e.g. a
+        // SecureInput's Tier-2 bypass disables IME on focus).
+        for ime in [Ime::Enabled, Ime::Disabled] {
+            let events = translate_ime(&ime);
+            assert_eq!(events.len(), 1);
+            match &events[0] {
+                WidgetEvent::ImePreedit { text, cursor } => {
+                    assert!(text.is_empty());
+                    assert_eq!(*cursor, None);
+                }
+                other => panic!("expected ImePreedit clear, got {other:?}"),
+            }
+        }
     }
 
     #[test]

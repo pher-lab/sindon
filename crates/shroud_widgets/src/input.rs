@@ -463,6 +463,22 @@ pub struct Input {
     /// multi-line mode this turns it into a fixed viewport that scrolls its
     /// content internally rather than sizing to a fixed [`line_count`].
     fill_height: bool,
+    /// IME preedit (composition) text — the uncommitted characters the user
+    /// is currently composing via an IME. Spliced into the buffer *for
+    /// display only* at the caret (with an underline) so the user can see
+    /// what they're typing; it never enters [`value`](Self::value) until the
+    /// IME commits, which arrives as a burst of [`CharInput`]. Empty when not
+    /// composing. Set from [`WidgetEvent::ImePreedit`] and cleared on commit
+    /// (empty preedit) or `FocusLost`.
+    ///
+    /// [`CharInput`]: crate::event::WidgetEvent::CharInput
+    /// [`WidgetEvent::ImePreedit`]: crate::event::WidgetEvent::ImePreedit
+    preedit: String,
+    /// Caret byte range within [`preedit`](Self::preedit) reported by the IME
+    /// (`None` = caret hidden during composition). The displayed caret sits at
+    /// `cursor + preedit_cursor.start`, so it tracks the composition's own
+    /// cursor rather than jumping to the end of the preedit.
+    preedit_cursor: Option<(usize, usize)>,
 }
 
 impl Input {
@@ -510,6 +526,8 @@ impl Input {
             last_max_scroll: Cell::new(0.0),
             grow: None,
             fill_height: false,
+            preedit: String::new(),
+            preedit_cursor: None,
         }
     }
 
@@ -1445,17 +1463,54 @@ impl Widget for Input {
             None
         };
 
+        // IME preedit: while composing (focused + non-empty preedit), splice the
+        // uncommitted composition text into the buffer *for display only* at the
+        // caret. The real `value` is untouched until the IME commits. All the
+        // shaping below (content height, caret geometry, glyphs) runs on this
+        // display string so the composition is visible and the caret tracks it;
+        // the committed text is what later lands in `value` via CharInput.
+        //
+        // `composed_caret` is the byte offset of the displayed caret within the
+        // composed string (the IME's own cursor inside the preedit, defaulting
+        // to its end). `preedit_span` is the composed-string byte range the
+        // preedit occupies, used to underline it.
+        let composing = self.focused && !self.preedit.is_empty();
+        let mut composed_text: Option<String> = None;
+        let mut composed_caret = 0usize;
+        let mut preedit_span: Option<(usize, usize)> = None;
+        if composing {
+            let v = self.value.borrow();
+            let cur = self.cursor.get().min(v.len());
+            let mut s = String::with_capacity(v.len() + self.preedit.len());
+            s.push_str(&v[..cur]);
+            s.push_str(&self.preedit);
+            s.push_str(&v[cur..]);
+            let span = (cur, cur + self.preedit.len());
+            composed_caret = match self.preedit_cursor {
+                Some((cs, _ce)) => cur + cs.min(self.preedit.len()),
+                None => span.1,
+            };
+            preedit_span = Some(span);
+            composed_text = Some(s);
+        }
+
         // Multi-line internal viewport: shape the buffer once to learn its
         // content height, clamp the stored scroll offset against it, and (after
         // the hit-test below resolves any click) scroll so a just-moved caret
         // stays visible. Single-line fields never scroll (`scroll_y` stays 0).
-        let value_is_empty = self.value.borrow().is_empty();
+        // While composing, the (non-empty) preedit means there is always
+        // something to draw, so the placeholder path is suppressed.
+        let value_is_empty = self.value.borrow().is_empty() && !composing;
         let viewport_h = (layout.size.height - 16.0).max(0.0);
         let mut scroll_y = 0.0_f32;
         let mut max_scroll = 0.0_f32;
         if self.multiline {
             let content_h = if value_is_empty {
                 line_height
+            } else if let Some(ct) = composed_text.as_deref() {
+                ctx.text_engine
+                    .shape_text(ct, font_size, line_height, wrap_width)
+                    .height
             } else {
                 let v = self.value.borrow();
                 ctx.text_engine
@@ -1515,19 +1570,34 @@ impl Widget for Input {
 
         // Caret position (focused only), computed once and reused for both the
         // scroll-to-caret adjustment and the caret draw below. `(0, 0)` for an
-        // empty buffer or a caret at the very start.
+        // empty buffer or a caret at the very start. While composing, the caret
+        // is measured against the composed (preedit-spliced) string at
+        // `composed_caret`, so it sits inside / after the composition.
         let caret_xy = if self.focused {
-            let cursor = self.cursor.get();
-            if value_is_empty || cursor == 0 {
-                Some((0.0, 0.0))
+            if let Some(ct) = composed_text.as_deref() {
+                if composed_caret == 0 {
+                    Some((0.0, 0.0))
+                } else {
+                    Some(ctx.text_engine.cursor_position(
+                        &ct[..composed_caret],
+                        font_size,
+                        line_height,
+                        wrap_width,
+                    ))
+                }
             } else {
-                let v = self.value.borrow();
-                Some(ctx.text_engine.cursor_position(
-                    &v[..cursor],
-                    font_size,
-                    line_height,
-                    wrap_width,
-                ))
+                let cursor = self.cursor.get();
+                if value_is_empty || cursor == 0 {
+                    Some((0.0, 0.0))
+                } else {
+                    let v = self.value.borrow();
+                    Some(ctx.text_engine.cursor_position(
+                        &v[..cursor],
+                        font_size,
+                        line_height,
+                        wrap_width,
+                    ))
+                }
             }
         } else {
             None
@@ -1566,8 +1636,10 @@ impl Widget for Input {
         }
 
         // Selection highlight, painted behind the glyphs so the (opaque) text
-        // stays legible on top of the translucent fill.
-        if self.focused {
+        // stays legible on top of the translucent fill. Suppressed while
+        // composing — the composed string has its own (preedit) byte layout, so
+        // a stale `value`-based selection range would land on the wrong glyphs.
+        if self.focused && !composing {
             if let Some((lo, hi)) = self.selection_range() {
                 let sel_color = self
                     .selection_color
@@ -1593,7 +1665,7 @@ impl Widget for Input {
 
         {
             let value = self.value.borrow();
-            if value.is_empty() {
+            if value_is_empty {
                 if !self.placeholder.is_empty() {
                     let shaped = ctx.text_engine.shape_text(
                         &self.placeholder,
@@ -1614,14 +1686,20 @@ impl Widget for Input {
                     }
                 }
             } else {
-                // With a highlighter attached, render through the rich path: tile
-                // the buffer into color-only spans and shape them. Color-only spans
-                // shape identically to the plain buffer (see `build_highlight_spans`),
-                // so the caret math — still computed from the plain string — lines
-                // up with these glyphs. Without one, the plain path is used
-                // unchanged; its glyphs carry no per-glyph color, so the shared draw
-                // loop's `unwrap_or(text_color)` reproduces the old behavior exactly.
-                let shaped = if let Some(hl) = self.highlighter.as_ref() {
+                // While composing, shape the preedit-spliced display string
+                // plainly. The highlighter is intentionally bypassed mid-
+                // composition (its color comes back the moment the IME commits)
+                // — it tiles `value`, whose byte layout the preedit splice has
+                // shifted, so reusing it here would miscolor. With a highlighter
+                // and no composition, render through the rich path: tile the
+                // buffer into color-only spans and shape them. Color-only spans
+                // shape identically to the plain buffer (see
+                // `build_highlight_spans`), so the caret math lines up with these
+                // glyphs. Otherwise the plain path is used unchanged.
+                let shaped = if let Some(ct) = composed_text.as_deref() {
+                    ctx.text_engine
+                        .shape_text(ct, font_size, line_height, wrap_width)
+                } else if let Some(hl) = self.highlighter.as_ref() {
                     let spans = build_highlight_spans(&value, hl(&value));
                     ctx.text_engine
                         .shape_rich(&spans, font_size, line_height, wrap_width)
@@ -1644,6 +1722,29 @@ impl Widget for Input {
             }
         }
 
+        // IME composition underline: draw a thin rule under the preedit run so
+        // the user can tell the uncommitted text apart from committed text (the
+        // standard inline-composition affordance). Reuses `selection_rects` to
+        // get one rect per visual line the preedit spans; the underline sits at
+        // the bottom of each. Inside the multi-line clip/offset, so it scrolls
+        // with the glyphs.
+        if let (Some(ct), Some((ps, pe))) = (composed_text.as_deref(), preedit_span) {
+            let rects =
+                ctx.text_engine
+                    .selection_rects(ct, ps, pe, font_size, line_height, wrap_width);
+            for r in rects {
+                ctx.fill_rect(
+                    Rect::new(
+                        text_x + r.origin.x,
+                        text_y + r.origin.y + r.size.height - 1.0,
+                        r.size.width,
+                        1.0,
+                    ),
+                    text_color,
+                );
+            }
+        }
+
         // Caret (on top of the glyphs), shared by the empty and non-empty cases.
         // Anchors the IME candidate window so the OS composition UI follows the
         // caret instead of defaulting to a screen corner; the active offset folds
@@ -1651,7 +1752,18 @@ impl Widget for Input {
         if let Some((cx, cy)) = caret_xy {
             let caret = Rect::new(text_x + cx, text_y + cy, 2.0, font_size);
             ctx.fill_rect(caret, text_color);
-            ctx.set_ime_cursor_area(caret);
+            // Report the cursor area to the OS. While composing, extend it down
+            // past the preedit's underline (which sits at the line bottom,
+            // `line_height` below the caret top) plus a small gap, so the OS
+            // drops the candidate window *below* the underline instead of
+            // landing its top edge on it. A `font_size`-tall box would end above
+            // the underline and let the popup overlap it.
+            let ime_h = if composing {
+                line_height + 2.0
+            } else {
+                font_size
+            };
+            ctx.set_ime_cursor_area(Rect::new(caret.origin.x, caret.origin.y, 2.0, ime_h));
         }
 
         if self.multiline {
@@ -1791,6 +1903,10 @@ impl Widget for Input {
                 if self.selecting.replace(false) {
                     ctx.release_pointer();
                 }
+                // Drop any half-composed IME preedit so it can't linger on
+                // screen after the field is no longer focused.
+                self.preedit.clear();
+                self.preedit_cursor = None;
                 self.pending_word_select.set(false);
                 self.desired_col.set(None);
                 if self.numeric {
@@ -1836,6 +1952,19 @@ impl Widget for Input {
                     // into it, so the run isn't broken here.
                     self.commit_edit(EditKind::Insert, false, ctx);
                 }
+                EventResult::Consumed
+            }
+
+            WidgetEvent::ImePreedit { text, cursor } if self.focused => {
+                // Store the in-progress composition for display only — `value`
+                // is untouched until the IME commits (which arrives via
+                // CharInput). An empty `text` clears the preedit (commit /
+                // cancel). Reveal the caret so a composition that grows past
+                // the viewport stays visible.
+                self.preedit.clear();
+                self.preedit.push_str(text);
+                self.preedit_cursor = *cursor;
+                self.reveal_caret.set(true);
                 EventResult::Consumed
             }
 

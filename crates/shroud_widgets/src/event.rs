@@ -53,6 +53,23 @@ pub enum WidgetEvent {
     KeyUp { key: Key },
     /// Character input (after IME processing).
     CharInput { ch: char },
+    /// IME preedit (composition) update: the in-progress, *uncommitted* text
+    /// the user is composing via an IME (Japanese / Chinese / Korean, dead
+    /// keys, …), plus an optional caret byte range within that text.
+    ///
+    /// winit delivers this while composing, and once the IME is app-driven
+    /// (`set_ime_allowed(true)`) the OS no longer draws an inline composition
+    /// string — the application must render the preedit itself. The committed
+    /// result arrives separately as a burst of [`CharInput`](Self::CharInput).
+    /// An empty `text` clears the preedit (composition cancelled or just
+    /// committed). The focused text widget renders it inline at the caret;
+    /// widgets that don't accept text ignore it.
+    ImePreedit {
+        text: String,
+        /// Caret byte range `(start, end)` within `text`, or `None` to hide
+        /// the caret during composition (winit's own convention).
+        cursor: Option<(usize, usize)>,
+    },
     /// Scroll wheel (or trackpad scroll).
     ///
     /// `position` is the cursor location at the time of the scroll, used to
