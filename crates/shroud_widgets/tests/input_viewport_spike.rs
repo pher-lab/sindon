@@ -330,3 +330,57 @@ fn single_line_input_draws_no_scrollbar() {
         "single-line input must never draw a scrollbar"
     );
 }
+
+#[test]
+fn text_clears_the_scrollbar_lane() {
+    // FW-2 dogfood follow-up (#34): a full row of text used to run under the
+    // scrollbar overlay, so a caret at the row end was buried in the bar. The
+    // wrap width now reserves the bar's lane, so no glyph is drawn in the bar's
+    // column — and since the caret sits at a content boundary (<= the wrap
+    // width), it clears the bar too.
+    use shroud_reactive::Signal;
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(W).height(H));
+    // A long unbroken run wraps into full rows; extra lines overflow the
+    // viewport so the scrollbar is shown.
+    let body = format!("{}\n{}", "W".repeat(120), "tail\n".repeat(12));
+    let idx = tree.add_child(
+        root,
+        Input::new()
+            .multiline()
+            .height_full()
+            .value(Signal::new(body)),
+    );
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(W, H, &mut engine, &theme);
+    let rect = tree.layout_rect(idx);
+
+    // Focus so the caret renders (the dogfood report was about the caret).
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    let ctx = paint(&tree);
+
+    // The test only proves something while the bar is actually up.
+    assert!(
+        !scrollbar_bars(&ctx, rect).is_empty(),
+        "the content must overflow so the scrollbar is visible"
+    );
+
+    let track_x = rect.right() - 1.0 - SCROLLBAR_WIDTH - SCROLLBAR_INSET;
+    for g in &ctx.glyphs {
+        let right = g.x as f32 + g.image.width as f32;
+        assert!(
+            right <= track_x,
+            "no glyph may enter the scrollbar lane: right={right} track_x={track_x}"
+        );
+    }
+}

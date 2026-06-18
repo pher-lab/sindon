@@ -192,6 +192,11 @@ const SCROLLBAR_WIDTH: f32 = 6.0;
 const SCROLLBAR_INSET: f32 = 2.0;
 /// Minimum thumb height (px) so the handle stays grabbable on very long content.
 const SCROLLBAR_THUMB_MIN: f32 = 16.0;
+/// Horizontal lane reserved on the right of a multi-line field for the
+/// scrollbar overlay. Subtracted from the wrap width so text wraps — and the
+/// caret stops — *before* the bar instead of being drawn under it (#34).
+/// Covers the bar's width plus its inset from the inner right edge.
+const SCROLLBAR_LANE: f32 = SCROLLBAR_WIDTH + SCROLLBAR_INSET;
 
 /// Coalescing class for an edit, used to decide whether a new edit folds into
 /// the current undo step or starts a fresh one. Consecutive same-kind inserts
@@ -1437,8 +1442,14 @@ impl Widget for Input {
         // (and don't draw outside their bounds because the wgpu pipeline
         // clips to the widget — adding wrap here would unexpectedly stack
         // text into multiple visual rows inside a one-line input).
+        //
+        // Reserve the scrollbar lane on the right so a full line wraps before
+        // the bar's column and a caret at the line end never lands under the
+        // overlay (#34). Always reserved (not only when the bar is visible) so
+        // the wrap width — which the caret, hit-test and selection geometry all
+        // key off — stays stable instead of jumping when the bar appears.
         let wrap_width = if self.multiline {
-            Some(max_width)
+            Some((max_width - SCROLLBAR_LANE).max(0.0))
         } else {
             None
         };
@@ -1814,13 +1825,12 @@ impl Widget for Input {
         // offset are popped, so it sits unclipped at viewport coords and never
         // scrolls with the glyphs. Mirrors `ScrollView::paint_post_children`.
         //
-        // Overlay choice (option A): the bar rides the field's right edge, just
-        // inside the 1px border. The body wraps at `width - 16` (8px padding per
-        // side), so wrapped lines rarely reach the last few px under the 6px
-        // track. A glyph that does is drawn *over* the rect (the renderer draws
-        // all glyphs above all rects within a layer), which is acceptable for
-        // v1 — no gutter is reserved, so the caret / hit-test / selection
-        // geometry (all keyed off the unchanged `wrap_width`) is left untouched.
+        // The bar rides the field's right edge, just inside the 1px border, in
+        // the `SCROLLBAR_LANE` reserved out of `wrap_width` above. Because the
+        // text wraps before that lane, no glyph or caret is drawn under the bar
+        // (#34) — the lane is reserved unconditionally so the wrap width (and
+        // thus the caret / hit-test / selection geometry keyed off it) doesn't
+        // shift when the bar appears or disappears.
         if self.multiline && max_scroll > 0.0 && viewport_h > 0.0 {
             let content_h = viewport_h + max_scroll;
             let track_color = ctx.theme.colors.surface_variant;

@@ -40,8 +40,8 @@
 - **✅ FW-2 [fw] P1 — soft-wrap 折り返し後の ↑↓ 移動が壊れる (元 #26, #27, #29) = 完了**
   真因: ↑↓ が **hard line(段落)単位**で視覚的な折り返し行を見ていなかった + sticky column が文字 index 基準。さらに caret 描画が prefix シェイプで**折り返し境界で1行ズレる**既存バグ(クリックでも発症)も同根。
   対応: ①↑↓ を視覚行 + sticky-**x** ベースに、`event` は net 行数を貯めて `paint` で engine 解決(`pending_vmove`/`desired_x`)。#29 端ジャンプ同梱。②`shroud_text::caret_at_offset` 新設 — 全文シェイプで offset→(x,y) を出し折り返し境界の caret ズレを解消(`cursor_position` の prefix シェイプを置換)。vnav spike 4 + engine 2 テスト緑、既存 241+ 回帰なし、実機 OK。
-- **FW-3 [fw] P2 — 右端 caret がスクロールバーに被る** (元 #34)
-  [input.rs:1667 周辺](../crates/shroud_widgets/src/input.rs) の wrap_width / scrollbar gutter の見直し。FW-2 と同じ viewport 領域。
+- **✅ FW-3 [fw] P2 — 右端 caret がスクロールバーに被る (元 #34) = 完了**
+  multiline の wrap 幅から `SCROLLBAR_LANE` (= `SCROLLBAR_WIDTH + SCROLLBAR_INSET` = 8px) を**常時**差し引き、本文・caret・ヒットテスト・選択をバー手前で止める(バー出入りで幅が揺れないよう常時予約)。viewport spike に「glyph がレーンに入らない」テスト追加、実機 OK。
 - **FW-4 [fw] P2 — color emoji が真っ白** (元 #28)
   text engine が monochrome alpha glyph のみ。COLR/bitmap emoji 非対応。**大きめ**(atlas に color glyph 経路追加)・優先度中。
 - **FW-5 [fw] P2 — 画像が荒い** (元 #40)
