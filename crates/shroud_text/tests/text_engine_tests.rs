@@ -218,6 +218,62 @@ fn cursor_position_soft_wraps_into_extra_lines() {
 }
 
 #[test]
+fn caret_at_offset_places_wrap_boundary_on_the_next_row() {
+    // The offset that begins the second *visual* row of a soft-wrapped block
+    // must place the caret at the start of that row — not at the end of the
+    // previous one (the off-by-one-row that prefix shaping produces). This is
+    // the FW-2 fix: vertical nav / clicks land on wrapped rows correctly.
+    let mut engine = TextEngine::new();
+    let text = "Hello World Test Here";
+    let wrap = Some(60.0);
+    let lh = 20.0;
+
+    // Where row 2 begins: hit-test the far-left of the second row.
+    let off = engine.offset_at_point(text, 0.0, lh + 1.0, 16.0, lh, wrap);
+    assert!(
+        off > 0 && off < text.len(),
+        "the string must wrap so row 2 starts mid-string (got offset {off})"
+    );
+
+    let (cx, cy) = engine.caret_at_offset(text, off, 16.0, lh, wrap);
+    assert!(
+        cy >= lh - 0.5,
+        "a wrap-boundary caret must sit on the next visual row: cy={cy}"
+    );
+    assert!(
+        cx < 5.0,
+        "a wrap-boundary caret must sit near the row's left edge: cx={cx}"
+    );
+
+    // Contrast: prefix shaping reports the *previous* row for the same offset —
+    // exactly the bug `caret_at_offset` exists to avoid.
+    let (_px, py) = engine.cursor_position(&text[..off], 16.0, lh, wrap);
+    assert!(
+        py < cy,
+        "prefix shaping lands a row higher than the true caret row \
+         (py={py} cy={cy}) — caret_at_offset must not"
+    );
+}
+
+#[test]
+fn caret_at_offset_matches_prefix_shaping_mid_line() {
+    // Away from wrap boundaries, the offset caret agrees with prefix shaping
+    // (and with cursor_position at the very end of the text).
+    let mut engine = TextEngine::new();
+    let text = "abcdef";
+    let at3 = engine.caret_at_offset(text, 3, 16.0, 20.0, None);
+    let pre3 = engine.cursor_position("abc", 16.0, 20.0, None);
+    assert_eq!(at3, pre3, "mid-line caret must match prefix shaping");
+
+    let at_end = engine.caret_at_offset(text, text.len(), 16.0, 20.0, None);
+    let pre_end = engine.cursor_position(text, 16.0, 20.0, None);
+    assert_eq!(
+        at_end, pre_end,
+        "end-of-text caret must match prefix shaping"
+    );
+}
+
+#[test]
 fn shape_text_delegates_to_shape_text_attrs_with_default() {
     // Regression guard: the no-attrs `shape_text` must produce byte-for-byte
     // the same glyph stream as `shape_text_attrs(.., &TextAttrs::default())`.

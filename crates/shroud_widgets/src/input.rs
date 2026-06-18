@@ -18,10 +18,11 @@
 //!
 //! Calling [`Input::multiline`] flips the widget into a textarea: Enter
 //! inserts `\n` (instead of firing `on_submit`), text soft-wraps at the
-//! widget's content width, ArrowUp / ArrowDown navigate between hard
-//! lines preserving the visual column, and the default height grows to
-//! [`Input::lines`] line-heights. All other behavior (signal binding,
-//! placeholder, focus ring, on_change) carries over unchanged.
+//! widget's content width, ArrowUp / ArrowDown navigate by *visual* row
+//! (following soft wraps, not just `\n`-delimited paragraphs) holding a
+//! sticky x column, and the default height grows to [`Input::lines`]
+//! line-heights. All other behavior (signal binding, placeholder, focus
+//! ring, on_change) carries over unchanged.
 //!
 //! ## Numeric mode (Phase 28)
 //!
@@ -364,11 +365,22 @@ pub struct Input {
     /// `None` = a small built-in default (3 lines). Ignored in single-line
     /// mode where `min_height` derives from `font_size`.
     line_count: Option<usize>,
-    /// "Sticky" column tracked across ArrowUp / ArrowDown so vertical
-    /// navigation through ragged lines lands the cursor at the same
-    /// visual offset as where the user originally started navigating.
-    /// Cleared by any non-vertical edit or motion.
-    desired_col: Cell<Option<usize>>,
+    /// "Sticky" target *x* (px, in the text's local space) tracked across
+    /// ArrowUp / ArrowDown so vertical navigation through ragged / wrapped
+    /// lines lands the caret at the same visual column it started from — even
+    /// when it passes through shorter lines. Seeded from the caret's x on the
+    /// first vertical move of a run and reused by later ones. Cleared by any
+    /// non-vertical edit or motion. An x (not a char column) is what makes the
+    /// caret track *visual* rows correctly through soft wraps and variable
+    /// glyph widths.
+    desired_x: Cell<Option<f32>>,
+    /// Net vertical move (visual rows) requested by ArrowUp/ArrowDown and not
+    /// yet resolved: negative = up, positive = down. `Input::event` has no text
+    /// engine, so — like [`pending_hit`](Self::pending_hit) — the move is
+    /// deferred to `paint`, which walks it one wrapped row at a time against the
+    /// shaped layout. Accumulates so a burst of key-repeat presses arriving
+    /// before the next paint are not dropped.
+    pending_vmove: Cell<i32>,
     /// Numeric (digit-only) input mode. When `true`, [`CharInput`] events
     /// only commit ASCII digits and [`min_value`] / [`max_value`] clamp
     /// the parsed integer on each edit.
@@ -500,7 +512,8 @@ impl Input {
             focused: false,
             multiline: false,
             line_count: None,
-            desired_col: Cell::new(None),
+            desired_x: Cell::new(None),
+            pending_vmove: Cell::new(0),
             numeric: false,
             min_value: None,
             max_value: None,
@@ -619,9 +632,12 @@ impl Input {
     ///
     /// In multi-line mode, Enter inserts a newline at the cursor instead of
     /// firing [`on_submit`](Self::on_submit), text soft-wraps at the field's
-    /// content width, and ArrowUp / ArrowDown navigate between hard lines
-    /// while preserving the visual column. Tab is *not* captured — the focus
-    /// manager keeps owning it — so the field stays a friendly form citizen.
+    /// content width, and ArrowUp / ArrowDown navigate by *visual* row —
+    /// following soft wraps, not just `\n`-delimited paragraphs — holding a
+    /// sticky x column (so passing through a short row keeps the caret's
+    /// column), and snapping to the buffer start / end at the top / bottom
+    /// edge. Tab is *not* captured — the focus manager keeps owning it — so
+    /// the field stays a friendly form citizen.
     pub fn multiline(mut self) -> Self {
         debug_assert!(
             !self.numeric,
@@ -920,7 +936,7 @@ impl Input {
         let len = self.value.borrow().len();
         self.selection_anchor.set(Some(0));
         self.cursor.set(len);
-        self.desired_col.set(None);
+        self.desired_x.set(None);
         self.last_edit.set(None);
     }
 
@@ -934,7 +950,7 @@ impl Input {
             self.value.borrow_mut().drain(lo..hi);
             self.cursor.set(lo);
             self.selection_anchor.set(None);
-            self.desired_col.set(None);
+            self.desired_x.set(None);
             true
         } else {
             false
@@ -952,14 +968,14 @@ impl Input {
 
     /// Restore an editable state pulled from the history. The caret / anchor
     /// came from the same snapshot as the text, so they're already in range —
-    /// no clamping needed. `desired_col` is dropped (vertical-nav state is not
+    /// no clamping needed. `desired_x` is dropped (vertical-nav state is not
     /// part of the undo model).
     fn apply_snapshot(&self, snap: &Snapshot) {
         self.value.borrow_mut().clear();
         self.value.borrow_mut().push_str(&snap.text);
         self.cursor.set(snap.cursor);
         self.selection_anchor.set(snap.anchor);
-        self.desired_col.set(None);
+        self.desired_x.set(None);
     }
 
     /// Record an undo checkpoint *before* an edit mutates the buffer — unless
@@ -1037,7 +1053,7 @@ impl Input {
         }
         self.cursor.set(target);
         self.selection_anchor.set(None);
-        self.desired_col.set(None);
+        self.desired_x.set(None);
         self.commit_edit(kind, true, ctx);
         true
     }
@@ -1325,42 +1341,6 @@ impl Input {
             }
         }
     }
-
-    /// Hard-line index + byte column within that line for the current
-    /// cursor. Hard-line model: navigation treats each `\n`-separated
-    /// paragraph as one line, regardless of soft wrap. Mirrors what most
-    /// simple textareas (and `<textarea>`) do for ArrowUp/Down.
-    fn line_col_for_cursor(value: &str, cursor: usize) -> (usize, usize) {
-        let prefix = &value[..cursor];
-        let line = prefix.matches('\n').count();
-        let col = match prefix.rfind('\n') {
-            Some(nl) => cursor - (nl + 1),
-            None => cursor,
-        };
-        (line, col)
-    }
-
-    /// Inverse of [`line_col_for_cursor`]. Snaps `col` down to the chosen
-    /// line's length (so ArrowDown into a shorter line lands at end-of-line)
-    /// and to the nearest preceding char boundary (so we never split a
-    /// multi-byte codepoint).
-    fn cursor_for_line_col(value: &str, line: usize, col: usize) -> usize {
-        let mut line_start = 0;
-        for _ in 0..line {
-            match value[line_start..].find('\n') {
-                Some(rel) => line_start += rel + 1,
-                None => return value.len(),
-            }
-        }
-        let line_end = value[line_start..]
-            .find('\n')
-            .map_or(value.len(), |rel| line_start + rel);
-        let mut target = (line_start + col).min(line_end);
-        while target > line_start && !value.is_char_boundary(target) {
-            target -= 1;
-        }
-        target
-    }
 }
 
 impl Default for Input {
@@ -1557,7 +1537,7 @@ impl Widget for Input {
                 }
                 self.cursor.set(offset);
             }
-            self.desired_col.set(None);
+            self.desired_x.set(None);
             // A click / drag moves the caret outside the edit path, so end any
             // in-progress coalescing run — the next keystroke starts a fresh
             // undo step rather than merging with text typed before the click.
@@ -1568,36 +1548,95 @@ impl Widget for Input {
             self.push_selection_to_source();
         }
 
-        // Caret position (focused only), computed once and reused for both the
-        // scroll-to-caret adjustment and the caret draw below. `(0, 0)` for an
-        // empty buffer or a caret at the very start. While composing, the caret
-        // is measured against the composed (preedit-spliced) string at
-        // `composed_caret`, so it sits inside / after the composition.
-        let caret_xy = if self.focused {
-            if let Some(ct) = composed_text.as_deref() {
-                if composed_caret == 0 {
-                    Some((0.0, 0.0))
-                } else {
-                    Some(ctx.text_engine.cursor_position(
-                        &ct[..composed_caret],
+        // Resolve any deferred vertical move (ArrowUp/Down). Like the click
+        // above, this needs the engine to map the caret to a visual (x, y) and
+        // back, so `event` only accumulates a net row delta and we walk it here
+        // against the *wrapped* layout — the caret follows soft-wrapped visual
+        // rows, not `\n`-delimited paragraphs (the FW-2 fix). `desired_x` is the
+        // sticky column: seeded from the caret on the first step of a run and
+        // reused after, so passing through a short row doesn't drag it left.
+        let vmove = self.pending_vmove.replace(0);
+        if vmove != 0 {
+            let down = vmove > 0;
+            let mut steps = vmove.unsigned_abs();
+            while steps > 0 {
+                let cursor = self.cursor.get();
+                let (cx, cy) = {
+                    let v = self.value.borrow();
+                    ctx.text_engine
+                        .caret_at_offset(&v, cursor, font_size, line_height, wrap_width)
+                };
+                let target_x = self.desired_x.get().unwrap_or(cx);
+                self.desired_x.set(Some(target_x));
+                let new_cursor = if down {
+                    // One visual row down at the sticky column. A `y` past the
+                    // last row makes `offset_at_point` return the buffer end —
+                    // exactly the wanted "ArrowDown on the last line jumps to
+                    // end" behavior.
+                    let v = self.value.borrow();
+                    ctx.text_engine.offset_at_point(
+                        &v,
+                        target_x,
+                        cy + line_height,
                         font_size,
                         line_height,
                         wrap_width,
-                    ))
-                }
-            } else {
-                let cursor = self.cursor.get();
-                if value_is_empty || cursor == 0 {
-                    Some((0.0, 0.0))
+                    )
+                } else if cy < line_height {
+                    // Already on the first visual row: ArrowUp jumps to start.
+                    0
                 } else {
                     let v = self.value.borrow();
-                    Some(ctx.text_engine.cursor_position(
-                        &v[..cursor],
+                    ctx.text_engine.offset_at_point(
+                        &v,
+                        target_x,
+                        cy - line_height,
                         font_size,
                         line_height,
                         wrap_width,
-                    ))
+                    )
+                };
+                if new_cursor == cursor {
+                    // No progress (already at the top/bottom edge): stop so a
+                    // held arrow doesn't spin in place.
+                    break;
                 }
+                self.cursor.set(new_cursor);
+                steps -= 1;
+            }
+            self.last_edit.set(None);
+            self.reveal_caret.set(true);
+            self.push_cursor_to_source();
+            self.push_selection_to_source();
+        }
+
+        // Caret position (focused only), computed once and reused for both the
+        // scroll-to-caret adjustment and the caret draw below. Measured against
+        // the full (wrapped) block via `caret_at_offset`, so a caret at a
+        // soft-wrap boundary sits at the start of the next visual row rather
+        // than the end of the previous one. While composing, it's measured
+        // against the composed (preedit-spliced) string at `composed_caret`.
+        let caret_xy = if self.focused {
+            if let Some(ct) = composed_text.as_deref() {
+                Some(ctx.text_engine.caret_at_offset(
+                    ct,
+                    composed_caret,
+                    font_size,
+                    line_height,
+                    wrap_width,
+                ))
+            } else if value_is_empty {
+                Some((0.0, 0.0))
+            } else {
+                let cursor = self.cursor.get();
+                let v = self.value.borrow();
+                Some(ctx.text_engine.caret_at_offset(
+                    &v,
+                    cursor,
+                    font_size,
+                    line_height,
+                    wrap_width,
+                ))
             }
         } else {
             None
@@ -1844,7 +1883,7 @@ impl Widget for Input {
                     self.pending_hit.set(Some((*position, ctx.modifiers.shift)));
                     self.pending_word_select.set(is_double);
                     self.selecting.set(true);
-                    self.desired_col.set(None);
+                    self.desired_x.set(None);
                     // Capture the pointer so the drag keeps being delivered
                     // (and is reliably ended) even when the cursor leaves the
                     // field's rect — the tree routes MouseMove/Up straight here.
@@ -1908,7 +1947,7 @@ impl Widget for Input {
                 self.preedit.clear();
                 self.preedit_cursor = None;
                 self.pending_word_select.set(false);
-                self.desired_col.set(None);
+                self.desired_x.set(None);
                 if self.numeric {
                     self.canonicalize_numeric_buffer();
                 }
@@ -1946,7 +1985,7 @@ impl Widget for Input {
                     let cursor = self.cursor.get();
                     self.value.borrow_mut().insert(cursor, *ch);
                     self.cursor.set(cursor + ch_len);
-                    self.desired_col.set(None);
+                    self.desired_x.set(None);
                     // `had_selection` only decided whether this insert *starts*
                     // a fresh step (above); typing that follows still coalesces
                     // into it, so the run isn't broken here.
@@ -2002,7 +2041,7 @@ impl Widget for Input {
                                 self.begin_edit(EditKind::Delete, true);
                                 self.value.borrow_mut().drain(prev..cursor);
                                 self.cursor.set(prev);
-                                self.desired_col.set(None);
+                                self.desired_x.set(None);
                                 self.commit_edit(EditKind::Delete, false, ctx);
                             }
                         } else if self.value.borrow().is_empty() {
@@ -2035,7 +2074,7 @@ impl Widget for Input {
                             };
                             self.begin_edit(EditKind::Delete, true);
                             self.value.borrow_mut().drain(cursor..next);
-                            self.desired_col.set(None);
+                            self.desired_x.set(None);
                             self.commit_edit(EditKind::Delete, false, ctx);
                         }
                     }
@@ -2068,7 +2107,7 @@ impl Widget for Input {
                             self.cursor.set(prev);
                         }
                     }
-                    self.desired_col.set(None);
+                    self.desired_x.set(None);
                     self.last_edit.set(None);
                     EventResult::Consumed
                 }
@@ -2100,34 +2139,23 @@ impl Widget for Input {
                             self.cursor.set(next);
                         }
                     }
-                    self.desired_col.set(None);
+                    self.desired_x.set(None);
                     self.last_edit.set(None);
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::ArrowUp) if self.multiline => {
                     // Shift extends the selection; a plain vertical move drops
-                    // it.
+                    // it. The caret relocation itself needs the text engine to
+                    // map to/from visual rows, so it's deferred to paint via
+                    // `pending_vmove` (like a click's `pending_hit`); `desired_x`
+                    // is left untouched here so a run of Up/Down keeps its
+                    // sticky column.
                     if ctx.modifiers.shift {
                         self.ensure_anchor();
                     } else {
                         self.clear_selection();
                     }
-                    let (line, col) = {
-                        let v = self.value.borrow();
-                        Self::line_col_for_cursor(&v, self.cursor.get())
-                    };
-                    if line > 0 {
-                        let target_col = self.desired_col.get().unwrap_or(col);
-                        let new_cursor = {
-                            let v = self.value.borrow();
-                            Self::cursor_for_line_col(&v, line - 1, target_col)
-                        };
-                        self.cursor.set(new_cursor);
-                        // Stash the original column so repeated Up moves
-                        // through a short line and back into a longer one
-                        // restore the original visual column.
-                        self.desired_col.set(Some(target_col));
-                    }
+                    self.pending_vmove.set(self.pending_vmove.get() - 1);
                     self.last_edit.set(None);
                     EventResult::Consumed
                 }
@@ -2137,20 +2165,7 @@ impl Widget for Input {
                     } else {
                         self.clear_selection();
                     }
-                    let (line, col) = {
-                        let v = self.value.borrow();
-                        Self::line_col_for_cursor(&v, self.cursor.get())
-                    };
-                    let total_lines = self.value.borrow().matches('\n').count() + 1;
-                    if line + 1 < total_lines {
-                        let target_col = self.desired_col.get().unwrap_or(col);
-                        let new_cursor = {
-                            let v = self.value.borrow();
-                            Self::cursor_for_line_col(&v, line + 1, target_col)
-                        };
-                        self.cursor.set(new_cursor);
-                        self.desired_col.set(Some(target_col));
-                    }
+                    self.pending_vmove.set(self.pending_vmove.get() + 1);
                     self.last_edit.set(None);
                     EventResult::Consumed
                 }
@@ -2161,7 +2176,7 @@ impl Widget for Input {
                         self.clear_selection();
                     }
                     self.cursor.set(0);
-                    self.desired_col.set(None);
+                    self.desired_x.set(None);
                     self.last_edit.set(None);
                     EventResult::Consumed
                 }
@@ -2172,7 +2187,7 @@ impl Widget for Input {
                         self.clear_selection();
                     }
                     self.cursor.set(self.value.borrow().len());
-                    self.desired_col.set(None);
+                    self.desired_x.set(None);
                     self.last_edit.set(None);
                     EventResult::Consumed
                 }
@@ -2206,7 +2221,7 @@ impl Widget for Input {
                             self.begin_edit(EditKind::Insert, false);
                             self.value.borrow_mut().insert(cursor, '\n');
                             self.cursor.set(cursor + 1);
-                            self.desired_col.set(None);
+                            self.desired_x.set(None);
                             self.commit_edit(EditKind::Insert, true, ctx);
                         }
                     } else if let Some(handler) = self.on_submit.as_mut() {

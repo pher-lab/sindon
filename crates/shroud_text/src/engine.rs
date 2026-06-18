@@ -754,6 +754,54 @@ impl TextEngine {
         rects
     }
 
+    /// Block-relative `(x, y)` of the caret at byte `offset` into `text`,
+    /// shaped as one block so soft wraps are accounted for — the
+    /// position-by-offset companion to [`offset_at_point`](Self::offset_at_point).
+    ///
+    /// Unlike [`cursor_position`](Self::cursor_position), which shapes only the
+    /// prefix `text[..offset]` and therefore reports the *end of the prefix's*
+    /// last line, this shapes the full `text`. An `offset` at a soft-wrap
+    /// boundary lands at the **start of the next visual row** — where the glyph
+    /// at `offset` actually sits — instead of the end of the previous row,
+    /// which is what a vertical caret move / a click on a wrapped row needs.
+    /// `max_width` must match the render wrap configuration. Coordinates are in
+    /// the same block-relative space as the painted glyphs. Empty `text`
+    /// returns `(0, 0)`.
+    pub fn caret_at_offset(
+        &mut self,
+        text: &str,
+        offset: usize,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> (f32, f32) {
+        if text.is_empty() {
+            return (0.0, 0.0);
+        }
+        let off = offset.min(text.len());
+        if off < text.len() {
+            // The caret sits at the left edge of the glyph that begins at `off`.
+            // `selection_rects` shapes the full block and uses cosmic-text's
+            // cursor model, so it resolves the wrap-boundary affinity correctly
+            // (the glyph at `off` belongs to the next visual row). One char of
+            // range is enough to get that glyph's leading edge.
+            let mut next = off + 1;
+            while next < text.len() && !text.is_char_boundary(next) {
+                next += 1;
+            }
+            if let Some(r) = self
+                .selection_rects(text, off, next, font_size, line_height, max_width)
+                .first()
+            {
+                return (r.origin.x, r.origin.y);
+            }
+        }
+        // End of text, or the next char carries no glyph (a hard `\n`): the end
+        // of the prefix's last line is the right answer, and prefix shaping
+        // gives it without a wrap-boundary ambiguity.
+        self.cursor_position(&text[..off], font_size, line_height, max_width)
+    }
+
     /// Rasterize a glyph into an alpha mask.
     ///
     /// Returns `None` if the glyph has no visible pixels (e.g. space).

@@ -5346,80 +5346,11 @@ fn single_line_enter_still_fires_on_submit() {
     let _ = idx; // silence dead-code warning
 }
 
-#[test]
-fn multiline_arrow_down_keeps_visual_column() {
-    // "abc\ndefgh" — cursor starts at byte 9 (end), Left × 7 → byte 2.
-    // ArrowDown should land at byte 6 = (line 1, col 2). Probe by typing
-    // 'M' there and checking the buffer becomes "abc\ndeMfgh".
-    let (mut tree, _idx, mut ctx, sig) = build_input_with_signal("abc\ndefgh", true);
-
-    for _ in 0..7 {
-        tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowLeft), &mut ctx);
-    }
-    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowDown), &mut ctx);
-
-    assert_cursor_inserts_at(&mut tree, &mut ctx, &sig, "abc\ndeMfgh");
-}
-
-#[test]
-fn multiline_arrow_up_returns_to_origin_column() {
-    // "abcdef\nghi" — cursor at byte 10 (end of "ghi", col=3). ArrowUp
-    // takes it to byte 3 (line 0, col 3). Probe with 'M' → "abcMdef\nghi".
-    let (mut tree, _idx, mut ctx, sig) = build_input_with_signal("abcdef\nghi", true);
-
-    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowUp), &mut ctx);
-
-    assert_cursor_inserts_at(&mut tree, &mut ctx, &sig, "abcMdef\nghi");
-}
-
-#[test]
-fn multiline_arrow_down_into_shorter_line_clamps_to_end() {
-    // "abcdef\ngh" — cursor at byte 9 (line 1, col 2 — end of "gh").
-    // ArrowUp → line 0, col 2 = byte 2 (no desired_col seeded yet).
-    // Right × 3 → byte 5 (line 0, col 5), clearing desired_col each press.
-    // ArrowDown into "gh" clamps to byte 9 (end of line 1).
-    // Probe 'M' at byte 9 → "abcdef\nghM".
-    let (mut tree, _idx, mut ctx, sig) = build_input_with_signal("abcdef\ngh", true);
-
-    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowUp), &mut ctx);
-    for _ in 0..3 {
-        tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowRight), &mut ctx);
-    }
-    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowDown), &mut ctx);
-
-    assert_cursor_inserts_at(&mut tree, &mut ctx, &sig, "abcdef\nghM");
-}
-
-#[test]
-fn multiline_desired_col_survives_short_middle_line() {
-    // Three lines: "long line one" (13), "x" (1), "long line two" (13).
-    // Walk to (line 0, col 10), then Down → clamps into "x" (col 1),
-    // then Down again → desired_col 10 must restore to byte 16 + 10 = 26.
-    // Probe 'M' at byte 26 → "long line one\nx\nlong line Mtwo".
-    let (mut tree, _idx, mut ctx, sig) =
-        build_input_with_signal("long line one\nx\nlong line two", true);
-
-    // Cursor at byte 29 (end of line 2). Up twice → end of line 0 = byte 13
-    // (desired_col seeded to 13 from the original col).
-    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowUp), &mut ctx);
-    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowUp), &mut ctx);
-    // Left × 3 → byte 10 (col 10), and each Left clears desired_col so the
-    // next Down will seed from the *visual* col=10.
-    for _ in 0..3 {
-        tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowLeft), &mut ctx);
-    }
-    // Down → clamps into "x" (length 1), cursor sits at byte 15.
-    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowDown), &mut ctx);
-    // Down → desired_col 10 restored, lands at byte 16 + 10 = 26.
-    tree.dispatch_event(&key(shroud_widgets::event::NamedKey::ArrowDown), &mut ctx);
-
-    assert_cursor_inserts_at(
-        &mut tree,
-        &mut ctx,
-        &sig,
-        "long line one\nx\nlong line Mtwo",
-    );
-}
+// Multi-line ArrowUp/Down navigation moved to *visual*-row + sticky-x semantics
+// (FW-2): the move now needs the text engine and is resolved in `paint`, so the
+// old synchronous, char-column, no-paint probes here no longer model it. The
+// behavior is pinned in `tests/input_vnav_spike.rs` (engine + paint), including
+// the soft-wrap case the old hard-line model couldn't express.
 
 #[test]
 fn single_line_arrow_up_down_are_no_ops() {

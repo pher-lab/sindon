@@ -37,9 +37,9 @@
   真因確定: [event_loop.rs](../crates/shroud_app/src/event_loop.rs) が `Ime::Preedit` を明示的に無視 (`Commit` のみ処理)。winit は `set_ime_allowed(true)` 時にインライン変換文字列を OS に描かせず **アプリに描画させる** 設計なので、無視 = 確定まで何も見えない。コメントの「OS が変換窓を出す」前提は誤り。
   - **✅ #25 = 完了**: `WidgetEvent::ImePreedit` 新設 + pure `translate_ime` + Input が preedit を表示専用スプライス→下線描画 (commit まで `value` 不変、FocusLost で破棄)。candidate-window が下線に被る件も IME cursor area を行底+2px まで伸ばして解消。widget 5 + translation 3 テスト緑、実機 OK。
   - **⏳ #24 = 残**: focus 時に IME open status を強制している箇所 ([event_loop.rs](../crates/shroud_app/src/event_loop.rs) の `Focused(true)` → `set_ime_allowed(true)` 内の `ImmSetOpenStatus(true)`) が「ウィンドウ選択でひらがな既定」の原因。緩めるか要判断。FW-1 #25 とは別作業。
-- **FW-2 [fw] P1 — soft-wrap 折り返し後の ↑↓ 移動が壊れる** (元 #26, #27, #29)
-  真因確定: [input.rs:1313](../crates/shroud_widgets/src/input.rs) のとおり ↑↓ が **hard line(段落)単位**で、視覚的な折り返し行を見ていない → 折り返し段落内で「見当違い」にワープ。sticky column も x 座標でなく文字 index 基準 (#27 の「文字サイズ未考慮」)。
-  対応: caret ↔ 視覚行(x,y) マッピングを text engine の hit-test 越しに。**#29 (端で行頭/行末へ吸着) も同じ改修に同梱**。
+- **✅ FW-2 [fw] P1 — soft-wrap 折り返し後の ↑↓ 移動が壊れる (元 #26, #27, #29) = 完了**
+  真因: ↑↓ が **hard line(段落)単位**で視覚的な折り返し行を見ていなかった + sticky column が文字 index 基準。さらに caret 描画が prefix シェイプで**折り返し境界で1行ズレる**既存バグ(クリックでも発症)も同根。
+  対応: ①↑↓ を視覚行 + sticky-**x** ベースに、`event` は net 行数を貯めて `paint` で engine 解決(`pending_vmove`/`desired_x`)。#29 端ジャンプ同梱。②`shroud_text::caret_at_offset` 新設 — 全文シェイプで offset→(x,y) を出し折り返し境界の caret ズレを解消(`cursor_position` の prefix シェイプを置換)。vnav spike 4 + engine 2 テスト緑、既存 241+ 回帰なし、実機 OK。
 - **FW-3 [fw] P2 — 右端 caret がスクロールバーに被る** (元 #34)
   [input.rs:1667 周辺](../crates/shroud_widgets/src/input.rs) の wrap_width / scrollbar gutter の見直し。FW-2 と同じ viewport 領域。
 - **FW-4 [fw] P2 — color emoji が真っ白** (元 #28)
