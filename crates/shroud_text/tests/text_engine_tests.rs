@@ -105,6 +105,7 @@ fn rasterize_glyph() {
     let img = image.unwrap();
     assert!(img.width > 0);
     assert!(img.height > 0);
+    assert!(!img.is_color, "a Latin letter is a monochrome alpha mask");
     assert_eq!(
         img.data.len(),
         (img.width * img.height) as usize,
@@ -115,6 +116,31 @@ fn rasterize_glyph() {
         img.data.iter().any(|&b| b > 0),
         "glyph image should have non-zero alpha pixels"
     );
+}
+
+#[test]
+fn rasterize_color_emoji_keeps_rgba() {
+    // A color emoji must come back as RGBA (4 bytes/pixel) tagged `is_color`,
+    // not an alpha mask — that's what stops it painting as a solid white
+    // silhouette. Color-emoji fonts aren't guaranteed in every environment, so
+    // this is a best-effort guard: if *any* shaped glyph rasterizes as color,
+    // its data must be tightly-packed RGBA. (On Windows, Segoe UI Emoji makes
+    // this fire for real.)
+    let mut engine = TextEngine::new();
+    let result = engine.shape_text("😀", 32.0, 40.0, None);
+
+    for glyph in &result.glyphs {
+        if let Some(img) = engine.rasterize(glyph.cache_key) {
+            if img.is_color {
+                assert_eq!(
+                    img.data.len(),
+                    (img.width * img.height * 4) as usize,
+                    "a color glyph must carry width*height*4 RGBA bytes"
+                );
+                return;
+            }
+        }
+    }
 }
 
 #[test]

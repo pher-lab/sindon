@@ -87,9 +87,17 @@ pub struct ShapedText {
     pub decoration_lines: Vec<DecorationLine>,
 }
 
-/// A rasterized glyph image (alpha mask).
+/// A rasterized glyph image.
+///
+/// Most glyphs are single-channel **alpha masks** (`is_color == false`): one
+/// byte per pixel, tinted by the text color at draw time. Color emoji
+/// (COLR / embedded bitmap faces) come back from swash as full **RGBA**
+/// (`is_color == true`): four bytes per pixel carrying their own colors,
+/// which must *not* be recolored by the text color. The renderer routes the
+/// two kinds to different atlases (R8 vs RGBA8) based on this flag.
 pub struct GlyphImage {
-    /// Alpha data, one byte per pixel.
+    /// Pixel data. One byte per pixel (alpha) when `is_color` is false; four
+    /// bytes per pixel (RGBA, straight alpha) when `is_color` is true.
     pub data: Vec<u8>,
     /// Bitmap width in pixels.
     pub width: u32,
@@ -99,6 +107,9 @@ pub struct GlyphImage {
     pub left: i32,
     /// Y bearing (offset from glyph origin to top edge of bitmap).
     pub top: i32,
+    /// `true` when `data` is RGBA color (a color emoji); `false` for an
+    /// alpha mask.
+    pub is_color: bool,
 }
 
 impl std::fmt::Debug for GlyphImage {
@@ -108,6 +119,7 @@ impl std::fmt::Debug for GlyphImage {
             .field("height", &self.height)
             .field("left", &self.left)
             .field("top", &self.top)
+            .field("is_color", &self.is_color)
             .field("data_len", &self.data.len())
             .finish()
     }
@@ -802,30 +814,33 @@ impl TextEngine {
         self.cursor_position(&text[..off], font_size, line_height, max_width)
     }
 
-    /// Rasterize a glyph into an alpha mask.
+    /// Rasterize a glyph into an atlas-ready bitmap.
     ///
-    /// Returns `None` if the glyph has no visible pixels (e.g. space).
+    /// Monochrome and subpixel glyphs become single-channel alpha masks
+    /// (`is_color == false`). Color emoji keep their full RGBA — extracting
+    /// only alpha here is exactly what made them paint as a solid text-color
+    /// silhouette ("white emoji"); the renderer now has an RGBA atlas to hold
+    /// them. Returns `None` if the glyph has no visible pixels (e.g. space).
     pub fn rasterize(&mut self, cache_key: cosmic_text::CacheKey) -> Option<GlyphImage> {
         let image = self.swash_cache.get_image(&mut self.font_system, cache_key);
 
         let image = image.as_ref()?;
         let placement = image.placement;
 
-        // Convert to alpha mask regardless of source format
-        let alpha_data = match image.content {
-            SwashContent::Mask => image.data.clone(),
+        let (data, is_color) = match image.content {
+            SwashContent::Mask => (image.data.clone(), false),
             SwashContent::SubpixelMask => {
                 // Subpixel: 3 bytes per pixel (RGB). Average to single alpha.
-                image
+                let alpha = image
                     .data
                     .chunks_exact(3)
                     .map(|rgb| ((rgb[0] as u16 + rgb[1] as u16 + rgb[2] as u16) / 3) as u8)
-                    .collect()
+                    .collect();
+                (alpha, false)
             }
-            SwashContent::Color => {
-                // RGBA: extract alpha channel
-                image.data.chunks_exact(4).map(|rgba| rgba[3]).collect()
-            }
+            // Keep the full RGBA (straight alpha) so the color glyph atlas can
+            // render the emoji in its own colors.
+            SwashContent::Color => (image.data.clone(), true),
         };
 
         if placement.width == 0 || placement.height == 0 {
@@ -833,11 +848,12 @@ impl TextEngine {
         }
 
         Some(GlyphImage {
-            data: alpha_data,
+            data,
             width: placement.width,
             height: placement.height,
             left: placement.left,
             top: placement.top,
+            is_color,
         })
     }
 }

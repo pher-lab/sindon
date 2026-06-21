@@ -54,10 +54,14 @@ struct Shelf {
 pub struct TextureAtlas {
     width: u32,
     height: u32,
+    /// Bytes per pixel of the GPU texture: 1 for an R8 alpha-mask atlas, 4
+    /// for an RGBA8 color-glyph atlas. The shelf allocator works in pixels;
+    /// only the upload row stride and the zero-clear buffer depend on this.
+    bytes_per_pixel: u32,
     shelves: Vec<Shelf>,
     /// Maps glyph CacheKey → region in the atlas.
     cache: HashMap<CacheKey, AtlasRegion>,
-    /// GPU texture (R8Unorm).
+    /// GPU texture (R8Unorm for masks, Rgba8UnormSrgb for color glyphs).
     texture: wgpu::Texture,
     /// Texture view for binding.
     pub(crate) view: wgpu::TextureView,
@@ -66,10 +70,43 @@ pub struct TextureAtlas {
 }
 
 impl TextureAtlas {
-    /// Create a new atlas with the given dimensions.
+    /// Create a new single-channel (R8Unorm) alpha-mask atlas. This is the
+    /// atlas used for ordinary monochrome glyphs.
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        Self::with_format(
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::R8Unorm,
+            1,
+            "shroud_glyph_atlas",
+        )
+    }
+
+    /// Create a four-channel (Rgba8UnormSrgb) atlas for color emoji glyphs.
+    /// The pixel layout matches the color image path so the same sampler and
+    /// `texel * tint` shader render it correctly.
+    pub fn new_rgba(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        Self::with_format(
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            4,
+            "shroud_color_glyph_atlas",
+        )
+    }
+
+    fn with_format(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        bytes_per_pixel: u32,
+        label: &str,
+    ) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shroud_glyph_atlas"),
+            label: Some(label),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -78,7 +115,7 @@ impl TextureAtlas {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -88,6 +125,7 @@ impl TextureAtlas {
         Self {
             width,
             height,
+            bytes_per_pixel,
             shelves: Vec::new(),
             cache: HashMap::new(),
             texture,
@@ -148,7 +186,7 @@ impl TextureAtlas {
             data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(glyph_width),
+                bytes_per_row: Some(glyph_width * self.bytes_per_pixel),
                 rows_per_image: Some(glyph_height),
             },
             wgpu::Extent3d {
@@ -232,7 +270,8 @@ impl TextureAtlas {
     /// Clear the entire atlas (GPU + CPU state). Used by SecureTextureAtlas.
     pub fn clear(&mut self, queue: &wgpu::Queue) {
         // Zero out the GPU texture
-        let zero_data = vec![0u8; (self.width * self.height) as usize];
+        let row_bytes = self.width * self.bytes_per_pixel;
+        let zero_data = vec![0u8; (row_bytes * self.height) as usize];
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -243,7 +282,7 @@ impl TextureAtlas {
             &zero_data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.width),
+                bytes_per_row: Some(row_bytes),
                 rows_per_image: Some(self.height),
             },
             wgpu::Extent3d {

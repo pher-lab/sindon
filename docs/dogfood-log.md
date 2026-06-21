@@ -42,8 +42,9 @@
   対応: ①↑↓ を視覚行 + sticky-**x** ベースに、`event` は net 行数を貯めて `paint` で engine 解決(`pending_vmove`/`desired_x`)。#29 端ジャンプ同梱。②`shroud_text::caret_at_offset` 新設 — 全文シェイプで offset→(x,y) を出し折り返し境界の caret ズレを解消(`cursor_position` の prefix シェイプを置換)。vnav spike 4 + engine 2 テスト緑、既存 241+ 回帰なし、実機 OK。
 - **✅ FW-3 [fw] P2 — 右端 caret がスクロールバーに被る (元 #34) = 完了**
   multiline の wrap 幅から `SCROLLBAR_LANE` (= `SCROLLBAR_WIDTH + SCROLLBAR_INSET` = 8px) を**常時**差し引き、本文・caret・ヒットテスト・選択をバー手前で止める(バー出入りで幅が揺れないよう常時予約)。viewport spike に「glyph がレーンに入らない」テスト追加、実機 OK。
-- **FW-4 [fw] P2 — color emoji が真っ白** (元 #28)
-  text engine が monochrome alpha glyph のみ。COLR/bitmap emoji 非対応。**大きめ**(atlas に color glyph 経路追加)・優先度中。
+- **✅ FW-4 [fw] P2 — color emoji が真っ白 (元 #28) = 完了 (実機 OK)**
+  真因確定: swash は color emoji をフル RGBA で出していたが、`rasterize` が alpha だけ抜き取り → R8 atlas → text shader が `.r × text色(白)` を掛けて真っ白に。
+  対応: ①`GlyphImage.is_color` 追加 + `rasterize` の `SwashContent::Color` で RGBA 保持(alpha 抜き取りをやめる)。②`TextureAtlas` を bytes-per-pixel+format 化(`new()`=R8 据置、`new_rgba()`=Rgba8UnormSrgb 追加、upload/clear が bpp 対応)。③renderer に RGBA `color_atlas` + bind group。upload を `is_color` で振り分け、`build_text_geometry` を atlas-membership で自動分割(color は白 tint で本来色を保持・text色の alpha だけ尊重)、描画は **image pipeline 流用**(`texel×tint`)で text の後に1パス。image と同じ sRGB + ALPHA_BLENDING 経路なので premultiply 不要。`SecureTextureAtlas` は R8 のまま無傷。回帰ガード(ASCII=mask 1bpp / emoji=RGBA 4bpp)。fmt/clippy/build/全テスト緑。実機で絵文字フルカラー表示・エッジズレ無しを確認。
 - **✅ FW-5 [fw] P2 — 画像が荒い (元 #40) = 完了 (実機 OK)**
   真因確定: 画像テクスチャは `mip_level_count: 1`(原寸1枚)でアップロードされ、sampler に mipmap が無かった。ノートに貼る大きい写真/スクショをテキスト幅に縮小表示すると、bilinear minification が出力1pxあたり 2×2 texel しか平均しない → ジャギ/チラつき(no-mipmap minification aliasing)。nearest でも DPI でもない。
   対応: ①`shroud_render::image::build_mip_chain` 新設 — **premultiplied-linear** で 2×2 box 縮小を 1×1 まで反復生成(透過エッジの色ブリード防止 + GPU の sRGB sampling と輝度整合)。②`ensure_image_uploaded` で `mip_level_count` を確保し各レベルを `write_texture`(unique 画像ごと1回キャッシュ、mip pixels は upload 後 drop)。③共有 sampler を `mipmap_filter: Linear`(trilinear)に(1-mip の glyph atlas には無害)。画像シェーダは `textureSample`(自動 LOD)なので追加変更不要。mip 生成器に純関数テスト5件(寸法半減・非正方 clamp・solid 保存・premult 非ブリード)。fmt/clippy/build/全テスト緑。実機目視で荒さ解消を確認(FHD プレビューサイズでは縮小で小さくなるが minification の荒れは消えた)。

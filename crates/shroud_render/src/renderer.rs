@@ -223,13 +223,19 @@ pub struct Renderer {
     sampler: wgpu::Sampler,
     // Standard atlas — cached across frames
     atlas: TextureAtlas,
+    // Color-glyph atlas (RGBA8) — holds color emoji, cached across frames
+    // like the mask atlas. Drawn with the image pipeline (`texel * tint`)
+    // rather than the text pipeline, so emoji keep their own colors instead
+    // of being painted in the text color.
+    color_atlas: TextureAtlas,
+    color_text_bind_group: wgpu::BindGroup,
     // Secure atlas — cleared every frame after rendering
     secure_atlas: SecureTextureAtlas,
     secure_text_bind_group: wgpu::BindGroup,
     // Image pipeline — same vertex layout + bind group layout as text,
     // but a separate pipeline because the shader samples RGBA and
     // multiplies by a tint (rather than treating the texel as an alpha
-    // mask).
+    // mask). Also reused to draw the color-glyph atlas.
     image_pipeline: wgpu::RenderPipeline,
     /// Per-`ImageId` GPU textures. Persists across frames; a future
     /// LRU eviction pass can drop entries by inspecting weak Arc counts
@@ -365,6 +371,7 @@ impl Renderer {
         });
 
         let atlas = TextureAtlas::new(&device, DEFAULT_ATLAS_SIZE, DEFAULT_ATLAS_SIZE);
+        let color_atlas = TextureAtlas::new_rgba(&device, DEFAULT_ATLAS_SIZE, DEFAULT_ATLAS_SIZE);
         let secure_atlas = SecureTextureAtlas::new(&device);
 
         let text_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -374,6 +381,21 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(atlas.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let color_text_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shroud_color_text_bind_group"),
+            layout: &text_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(color_atlas.view()),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -494,6 +516,8 @@ impl Renderer {
             text_bind_group,
             sampler,
             atlas,
+            color_atlas,
+            color_text_bind_group,
             secure_atlas,
             secure_text_bind_group,
             image_pipeline,
@@ -533,6 +557,24 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(self.atlas.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+    }
+
+    /// Rebuild the color-glyph bind group after the color atlas changes.
+    fn rebuild_color_text_bind_group(&mut self) {
+        self.color_text_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shroud_color_text_bind_group"),
+            layout: &self.text_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(self.color_atlas.view()),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -667,9 +709,17 @@ impl Renderer {
         images: &[DrawImage],
         layer_starts: &[LayerSnapshot],
     ) -> Result<(), RenderError> {
-        // Upload standard glyphs to the standard atlas (cached)
+        // Upload standard glyphs to the matching atlas (cached): mask glyphs
+        // to the R8 atlas, color emoji to the RGBA color atlas. The two never
+        // collide because each glyph routes to exactly one atlas, so the
+        // geometry builders can read membership back to split the draw.
         for glyph in glyphs {
-            self.atlas.upload(
+            let atlas = if glyph.image.is_color {
+                &mut self.color_atlas
+            } else {
+                &mut self.atlas
+            };
+            atlas.upload(
                 &self.queue,
                 glyph.cache_key,
                 &glyph.image.data,
@@ -698,6 +748,11 @@ impl Renderer {
         if self.atlas.is_dirty() {
             self.rebuild_text_bind_group();
             self.atlas.clear_dirty();
+        }
+
+        if self.color_atlas.is_dirty() {
+            self.rebuild_color_text_bind_group();
+            self.color_atlas.clear_dirty();
         }
 
         let secure_dirty = self.secure_atlas.is_dirty();
@@ -751,6 +806,9 @@ impl Renderer {
             text_vb: wgpu::Buffer,
             text_ib: wgpu::Buffer,
             text_batches: Vec<DrawBatch>,
+            color_vb: wgpu::Buffer,
+            color_ib: wgpu::Buffer,
+            color_batches: Vec<DrawBatch>,
             sec_vb: wgpu::Buffer,
             sec_ib: wgpu::Buffer,
             sec_batches: Vec<DrawBatch>,
@@ -763,7 +821,11 @@ impl Renderer {
         for r in &batch_ranges {
             let [rr, gr, sr, ir] = r;
             let (rv, ri, rb) = self.build_rect_geometry(&rects[rr.clone()]);
+            // The same per-layer glyph slice feeds both builders; each picks up
+            // only the glyphs uploaded to its atlas (mask vs. color), so a line
+            // mixing text and emoji splits cleanly without a separate partition.
             let (tv, ti, tb) = self.build_text_geometry(&glyphs[gr.clone()], &self.atlas);
+            let (cv, ci, cb) = self.build_text_geometry(&glyphs[gr.clone()], &self.color_atlas);
             let (sv, si, sb) =
                 self.build_text_geometry(&secure_glyphs[sr.clone()], self.secure_atlas.as_atlas());
             let (iv, ii, ib) = self.build_image_geometry(&images[ir.clone()]);
@@ -774,6 +836,9 @@ impl Renderer {
                 text_vb: self.create_vertex_buffer("text_vb", bytemuck::cast_slice(&tv)),
                 text_ib: self.create_index_buffer("text_ib", bytemuck::cast_slice(&ti)),
                 text_batches: tb,
+                color_vb: self.create_vertex_buffer("color_glyph_vb", bytemuck::cast_slice(&cv)),
+                color_ib: self.create_index_buffer("color_glyph_ib", bytemuck::cast_slice(&ci)),
+                color_batches: cb,
                 sec_vb: self.create_vertex_buffer("sec_text_vb", bytemuck::cast_slice(&sv)),
                 sec_ib: self.create_index_buffer("sec_text_ib", bytemuck::cast_slice(&si)),
                 sec_batches: sb,
@@ -849,6 +914,21 @@ impl Renderer {
                     pass.set_vertex_buffer(0, batch.text_vb.slice(..));
                     pass.set_index_buffer(batch.text_ib.slice(..), wgpu::IndexFormat::Uint16);
                     for b in &batch.text_batches {
+                        apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
+                        let end = b.index_start + b.index_count;
+                        pass.draw_indexed(b.index_start..end, 0, 0..1);
+                    }
+                }
+
+                if !batch.color_batches.is_empty() {
+                    // Color emoji: sample the RGBA color atlas and multiply by
+                    // the (white) tint via the image pipeline, so the glyph
+                    // keeps its own colors. Drawn after the mask text pass.
+                    pass.set_pipeline(&self.image_pipeline);
+                    pass.set_bind_group(0, &self.color_text_bind_group, &[]);
+                    pass.set_vertex_buffer(0, batch.color_vb.slice(..));
+                    pass.set_index_buffer(batch.color_ib.slice(..), wgpu::IndexFormat::Uint16);
+                    for b in &batch.color_batches {
                         apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
                         pass.draw_indexed(b.index_start..end, 0, 0..1);
@@ -1060,7 +1140,15 @@ impl Renderer {
             let u1 = uv[2];
             let v1 = uv[3];
 
-            let c = glyph.color.to_array();
+            // Color emoji carry their own RGB and are drawn with the
+            // `texel * tint` image shader, so the tint must be white to leave
+            // them unrecolored — but keep the text color's alpha so opacity /
+            // fades still apply. Mask glyphs use the full text color as before.
+            let c = if glyph.image.is_color {
+                [1.0, 1.0, 1.0, glyph.color.a]
+            } else {
+                glyph.color.to_array()
+            };
 
             let ndc = |(x, y): (f32, f32)| [(x / sw) * 2.0 - 1.0, 1.0 - (y / sh) * 2.0];
             vertices.push(TextVertex {
