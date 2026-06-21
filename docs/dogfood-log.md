@@ -44,8 +44,9 @@
   multiline の wrap 幅から `SCROLLBAR_LANE` (= `SCROLLBAR_WIDTH + SCROLLBAR_INSET` = 8px) を**常時**差し引き、本文・caret・ヒットテスト・選択をバー手前で止める(バー出入りで幅が揺れないよう常時予約)。viewport spike に「glyph がレーンに入らない」テスト追加、実機 OK。
 - **FW-4 [fw] P2 — color emoji が真っ白** (元 #28)
   text engine が monochrome alpha glyph のみ。COLR/bitmap emoji 非対応。**大きめ**(atlas に color glyph 経路追加)・優先度中。
-- **FW-5 [fw] P2 — 画像が荒い** (元 #40)
-  image pipeline のサンプリング/フィルタ要調査(linear / mipmap / DPI スケール)。要再現で原因切り分けてから。
+- **✅ FW-5 [fw] P2 — 画像が荒い (元 #40) = 完了 (実機 OK)**
+  真因確定: 画像テクスチャは `mip_level_count: 1`(原寸1枚)でアップロードされ、sampler に mipmap が無かった。ノートに貼る大きい写真/スクショをテキスト幅に縮小表示すると、bilinear minification が出力1pxあたり 2×2 texel しか平均しない → ジャギ/チラつき(no-mipmap minification aliasing)。nearest でも DPI でもない。
+  対応: ①`shroud_render::image::build_mip_chain` 新設 — **premultiplied-linear** で 2×2 box 縮小を 1×1 まで反復生成(透過エッジの色ブリード防止 + GPU の sRGB sampling と輝度整合)。②`ensure_image_uploaded` で `mip_level_count` を確保し各レベルを `write_texture`(unique 画像ごと1回キャッシュ、mip pixels は upload 後 drop)。③共有 sampler を `mipmap_filter: Linear`(trilinear)に(1-mip の glyph atlas には無害)。画像シェーダは `textureSample`(自動 LOD)なので追加変更不要。mip 生成器に純関数テスト5件(寸法半減・非正方 clamp・solid 保存・premult 非ブリード)。fmt/clippy/build/全テスト緑。実機目視で荒さ解消を確認(FHD プレビューサイズでは縮小で小さくなるが minification の荒れは消えた)。
 
 #### Knot app — UX 磨き
 

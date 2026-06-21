@@ -355,6 +355,12 @@ impl Renderer {
             label: Some("shroud_text_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            // Trilinear: blend between mip levels when minifying. Glyph
+            // atlases ship a single level so this is a no-op for them, but
+            // image textures upload a full mip chain (see
+            // `ensure_image_uploaded`) and need it to avoid minification
+            // aliasing when drawn smaller than their decoded size.
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -565,10 +571,15 @@ impl Renderer {
             height: image.height(),
             depth_or_array_layers: 1,
         };
+        // Build the downscaled mip levels up front so the texture can be
+        // allocated with the right `mip_level_count`. Without these, a large
+        // image drawn small aliases ("rough"): the sampler's bilinear
+        // minification only averages a 2×2 neighbourhood per output texel.
+        let mips = crate::image::build_mip_chain(image.rgba(), image.width(), image.height());
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shroud_image_texture"),
             size: extent,
-            mip_level_count: 1,
+            mip_level_count: 1 + mips.len() as u32,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             // sRGB so the shader sees linear-light values when sampling.
@@ -595,6 +606,29 @@ impl Renderer {
             },
             extent,
         );
+        // Upload each generated level (1..N). The transient mip pixels are
+        // dropped at the end of this function once they reach the GPU.
+        for (i, mip) in mips.iter().enumerate() {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: i as u32 + 1,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &mip.rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * mip.width),
+                    rows_per_image: Some(mip.height),
+                },
+                wgpu::Extent3d {
+                    width: mip.width,
+                    height: mip.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shroud_image_bind_group"),
