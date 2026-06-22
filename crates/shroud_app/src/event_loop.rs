@@ -949,11 +949,13 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 };
             }
 
-            // Window gained focus — re-apply IME open status. Windows
-            // resets IME open on focus transitions in some configurations,
-            // so calling `set_ime_allowed(true)` again here re-runs both
-            // the winit IACE_DEFAULT path and our `ImmSetOpenStatus(true)`
-            // override, keeping IME live across focus loss/regain.
+            // Window gained focus — re-associate the IME context. Windows can
+            // drop the association across focus transitions, so calling
+            // `set_ime_allowed(true)` again here re-runs winit's IACE_DEFAULT
+            // path, keeping IME available across focus loss/regain. It does not
+            // force composition mode on (no `ImmSetOpenStatus`), so refocusing
+            // no longer snaps a Japanese layout back to hiragana — the user's
+            // last open status stands.
             //
             // We also record the value we just pushed in `last_ime_allowed`
             // so the Tier 2 dedup in `RedrawRequested` sees the platform's

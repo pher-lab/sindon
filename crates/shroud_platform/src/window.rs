@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::display_protection::{DisplayProtection, DisplayProtectionResult};
 use crate::system_theme::SystemTheme;
 #[cfg(target_os = "windows")]
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
@@ -84,22 +83,23 @@ impl PlatformWindow {
     /// flow (e.g. a numeric-only PIN entry) can call this with `false`
     /// directly on the platform window.
     ///
-    /// On Windows we also call `ImmSetOpenStatus(true)` so a freshly focused
-    /// window with a Japanese keyboard layout starts composing immediately
-    /// instead of waiting for the user to press 半角/全角 — see
-    /// `force_attach_ime_windows` (below, cfg(windows)) for the IMM32
-    /// specifics. The composition path itself only works when
-    /// `App::exploit_mitigation` (in `shroud_app`) is left at its
-    /// default (`false`); turning that on activates
-    /// `ProcessExtensionPointDisablePolicy`, which blocks the extension-DLL
-    /// plumbing the IME relies on. The trade-off is documented on that
-    /// builder.
+    /// IME open *status* (composing vs. direct alphanumeric) is deliberately
+    /// left to the OS and the user. Enabling IME associates the input context
+    /// but does not force composition mode on, so a Japanese-layout user keeps
+    /// their last-used mode and toggles composing with 半角/全角 — matching
+    /// native apps. An earlier build forced the IME open on every focus via
+    /// `ImmSetOpenStatus(true)`, which wrongly defaulted every window focus to
+    /// hiragana; that was removed once `App::exploit_mitigation` — the real
+    /// cause of the "IME totally dead" symptom it was papering over — was
+    /// defaulted off.
+    ///
+    /// Composition itself only works when `App::exploit_mitigation` (in
+    /// `shroud_app`) is left at its default (`false`); turning that on
+    /// activates `ProcessExtensionPointDisablePolicy`, which blocks the
+    /// extension-DLL plumbing the IME relies on. The trade-off is documented
+    /// on that builder.
     pub fn set_ime_allowed(&self, allowed: bool) {
         self.window.set_ime_allowed(allowed);
-        #[cfg(target_os = "windows")]
-        if allowed {
-            force_attach_ime_windows(&self.window);
-        }
     }
 
     /// Anchor the OS IME composition / candidate window near the given
@@ -128,54 +128,5 @@ impl PlatformWindow {
     /// fresh via `WindowEvent::ThemeChanged`.
     pub fn system_theme(&self) -> Option<SystemTheme> {
         self.window.theme().map(SystemTheme::from_winit)
-    }
-}
-
-/// Best-effort IME bring-up for the given window on Windows.
-///
-/// Forces the IME open status to `true` via `ImmSetOpenStatus` so a freshly
-/// focused window with a Japanese keyboard layout starts composing
-/// immediately instead of waiting for the user to press 半角/全角.
-///
-/// History note: a long deep-dive (2026-05) chased an apparent winit /
-/// Win11 IME breakage where `WindowEvent::Ime(_)` never fired even though
-/// every IMM32 status query reported success. Root cause turned out to be
-/// shroud's own `App::exploit_mitigation` default —
-/// `ProcessExtensionPointDisablePolicy` blocks the IME's extension-DLL
-/// hooks, so the OS IME would silently degrade to ASCII-only passthrough.
-/// Flipping that default to `false` restored composition; this function
-/// stays as a UX nicety (auto-open on focus) rather than a workaround for
-/// a winit bug.
-///
-/// Failures are deliberately silent because IME activation is a UX feature,
-/// not a correctness one: a no-op here just means the existing keystroke
-/// path (raw `KeyboardInput` → `CharInput` per ASCII char) continues to
-/// work, the same as on a system with no IME installed.
-#[cfg(target_os = "windows")]
-fn force_attach_ime_windows(window: &Window) {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetOpenStatus};
-
-    let handle = match window.window_handle() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-
-    let hwnd = match handle.as_raw() {
-        RawWindowHandle::Win32(h) => HWND(h.hwnd.get() as *mut _),
-        _ => return,
-    };
-
-    unsafe {
-        let himc = ImmGetContext(hwnd);
-        if himc.is_invalid() {
-            return;
-        }
-        // Idempotent: if the user has already toggled IME closed (intentional
-        // alphanumeric mode for a specific flow) this re-opens it on the
-        // next focus event. Acceptable for M1 — apps that need IME-off
-        // behavior can call `set_ime_allowed(false)` explicitly per flow.
-        let _ = ImmSetOpenStatus(himc, true);
-        let _ = ImmReleaseContext(hwnd, himc);
     }
 }
