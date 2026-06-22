@@ -461,6 +461,82 @@ fn selection_rects_across_newline_spans_two_lines() {
 }
 
 #[test]
+fn selection_rects_with_trailing_marks_included_line_break() {
+    // FW-6: a multi-line selection should show that the line break is part of
+    // the selection. The plain variant stops at each row's last glyph; the
+    // trailing variant adds one sliver on every row whose selection continues.
+    let mut engine = TextEngine::new();
+    let text = "abc\ndef";
+    let plain = engine.selection_rects(text, 0, text.len(), 16.0, 20.0, None);
+    let trailing = engine.selection_rects_with_trailing(text, 0, text.len(), 16.0, 20.0, None);
+    assert_eq!(
+        trailing.len(),
+        plain.len() + 1,
+        "first line gains a trailing sliver, last line does not. plain={plain:?} trailing={trailing:?}"
+    );
+    // The extra rect sits on the top row, flush against the "abc" highlight's
+    // right edge.
+    let top: Vec<_> = trailing
+        .iter()
+        .filter(|r| r.origin.y.round() as i32 == 0)
+        .collect();
+    assert_eq!(top.len(), 2, "top row = highlight + sliver, got {top:?}");
+    let hl = top
+        .iter()
+        .min_by(|a, b| a.origin.x.total_cmp(&b.origin.x))
+        .unwrap();
+    let sliver = top
+        .iter()
+        .max_by(|a, b| a.origin.x.total_cmp(&b.origin.x))
+        .unwrap();
+    assert!(
+        sliver.origin.x >= hl.origin.x + hl.size.width - 0.5,
+        "sliver starts at the highlight's right edge: hl={hl:?} sliver={sliver:?}"
+    );
+    assert!(sliver.size.width > 0.0, "sliver has width");
+}
+
+#[test]
+fn selection_rects_with_trailing_no_sliver_when_selection_ends_text() {
+    // A selection ending at the last glyph of the final row needs no sliver —
+    // there is no following break to signal.
+    let mut engine = TextEngine::new();
+    let text = "abc";
+    let plain = engine.selection_rects(text, 0, 3, 16.0, 20.0, None);
+    let trailing = engine.selection_rects_with_trailing(text, 0, 3, 16.0, 20.0, None);
+    assert_eq!(
+        plain.len(),
+        trailing.len(),
+        "single fully-selected line gets no extra sliver"
+    );
+}
+
+#[test]
+fn selection_rects_with_trailing_reveals_selected_blank_line() {
+    // A blank line mid-selection yields no glyph rect in the plain variant
+    // (an invisible gap). The trailing variant draws a sliver on it so the
+    // user sees the blank line is included.
+    let mut engine = TextEngine::new();
+    let text = "abc\n\ndef";
+    let plain = engine.selection_rects(text, 0, text.len(), 16.0, 20.0, None);
+    let trailing = engine.selection_rects_with_trailing(text, 0, text.len(), 16.0, 20.0, None);
+    let plain_rows: std::collections::BTreeSet<i32> =
+        plain.iter().map(|r| r.origin.y.round() as i32).collect();
+    let trailing_rows: std::collections::BTreeSet<i32> =
+        trailing.iter().map(|r| r.origin.y.round() as i32).collect();
+    assert_eq!(
+        plain_rows.len(),
+        2,
+        "plain skips the blank middle row, got {plain:?}"
+    );
+    assert_eq!(
+        trailing_rows.len(),
+        3,
+        "trailing shows all three rows incl. blank, got {trailing:?}"
+    );
+}
+
+#[test]
 fn monospace_family_makes_iii_and_mmm_equal_width() {
     // The cosmic-text fontdb resolves the `Monospace` generic against
     // whatever monospace face is installed on the platform (Consolas /

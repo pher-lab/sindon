@@ -1696,8 +1696,17 @@ impl Widget for Input {
                     .unwrap_or(ctx.theme.colors.selection_background);
                 let rects = {
                     let v = self.value.borrow();
-                    ctx.text_engine
-                        .selection_rects(&v, lo, hi, font_size, line_height, wrap_width)
+                    // `_with_trailing`: a multi-line selection draws a small
+                    // sliver past each non-final row's last glyph so the
+                    // included line breaks are visible (FW-6).
+                    ctx.text_engine.selection_rects_with_trailing(
+                        &v,
+                        lo,
+                        hi,
+                        font_size,
+                        line_height,
+                        wrap_width,
+                    )
                 };
                 for r in rects {
                     ctx.fill_rect(

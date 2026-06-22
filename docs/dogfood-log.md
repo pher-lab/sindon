@@ -20,7 +20,7 @@
 - 2026-06-18 💡 P3 — pin したノートを sidebar 最上部で区切り線で分けたい
 -->
 
-(2026-06-18 の初回バッチ22件はトリアージ済みへ移動)
+(2026-06-18 の初回バッチ22件 + 2026-06-21 の6件はトリアージ済みへ移動)
 
 ---
 
@@ -49,6 +49,20 @@
   真因確定: 画像テクスチャは `mip_level_count: 1`(原寸1枚)でアップロードされ、sampler に mipmap が無かった。ノートに貼る大きい写真/スクショをテキスト幅に縮小表示すると、bilinear minification が出力1pxあたり 2×2 texel しか平均しない → ジャギ/チラつき(no-mipmap minification aliasing)。nearest でも DPI でもない。
   対応: ①`shroud_render::image::build_mip_chain` 新設 — **premultiplied-linear** で 2×2 box 縮小を 1×1 まで反復生成(透過エッジの色ブリード防止 + GPU の sRGB sampling と輝度整合)。②`ensure_image_uploaded` で `mip_level_count` を確保し各レベルを `write_texture`(unique 画像ごと1回キャッシュ、mip pixels は upload 後 drop)。③共有 sampler を `mipmap_filter: Linear`(trilinear)に(1-mip の glyph atlas には無害)。画像シェーダは `textureSample`(自動 LOD)なので追加変更不要。mip 生成器に純関数テスト5件(寸法半減・非正方 clamp・solid 保存・premult 非ブリード)。fmt/clippy/build/全テスト緑。実機目視で荒さ解消を確認(FHD プレビューサイズでは縮小で小さくなるが minification の荒れは消えた)。
 
+> 2026-06-21 第2バッチ(6件)トリアージ。**全件 framework (shroud) 側**で Input の選択 / focus ring / scroll の磨き。P1(release-blocker)は無く、全て P2/P3。FW-1〜5 は完了済 ∴ 採番は FW-6 から。
+
+- **✅ FW-6 [fw] P2 — 選択が改行/行末で途切れて見える(元: 改行も選択ハイライト)= 完了**
+  真因確定: [engine.rs](../crates/shroud_text/src/engine.rs) `selection_rects` は各 layout run で `run.highlight()`(= その行の*グリフ*が覆う pixel 区間のみ)を取り、`if w > 0.0` で 0 幅を捨てる。∴ 選択が次行へ続く行でも**行末の改行分にハイライトが出ない**ので、改行が選択に含まれているか視覚的に分からない。
+  対応: `selection_rects` は pure のまま据え置き、内部実装を共有する新 API `selection_rects_with_trailing` を追加。選択がその視覚行の最終グリフより先(= 改行 / soft-wrap 継ぎ目)へ続く行だけ、行末に `font_size × 0.33` の trailing sliver を足す(空行も left edge に出して可視化)。caret 幾何 ([`cursor_position`]) と IME preedit 下線は pure 版を使い続けるので phantom sliver は出ない。Input は選択ハイライト描画のみ trailing 版へ切替。engine テスト3件(改行で付与 / 最終行は非付与 / 選択中の空行を可視化)。fmt/clippy/全テスト緑(shroud_text+shroud_widgets、241 widget test 回帰なし)。**実機目視は未**(次回 dogfood で確認)。
+- **FW-7 [fw] P2 — スムーススクロールが無く位置を見失う**
+  現状 ScrollView / Input 内部 viewport ([scroll_view.rs](../crates/shroud_widgets/src/scroll_view.rs) / input.rs `scroll_y`)はホイールで瞬間ジャンプ。既存の B-8 animation 基盤(`Animated<T>` + frame-vote pump, [[progress-animation-b8]])で scroll_y を target へ補間すれば実現可能。ROI: 体感に効くが既存 primitive 流用で小〜中。
+- **FW-8 [fw] P3 — focus ring がクリックでも出る(:focus-visible 相当が無い)**
+  真因: [input.rs](../crates/shroud_widgets/src/input.rs) は `if self.focused { ctx.paint_focus_ring(..) }`(1859 付近)で focus 状態だけ見て ring を描き、focus の**理由(pointer / keyboard)を区別しない**。auto-focus-on-click でクリックでも focused → ring 表示。対応: FocusManager に focus reason を持たせ、pointer 起因の focus では ring を抑制(keyboard/Tab のみ表示)。Button/Checkbox/Dropdown も同経路。
+- **FW-9 [fw] P3 — focus ring が四角で角丸でない**
+  真因: [paint.rs](../crates/shroud_widgets/src/paint.rs) `paint_focus_ring`(277-290)は 4 本の sharp `fill_rect` で枠を描く。`fill_rect_rounded`(193, SDF 角丸)は既にあるので、widget の radius を `paint_focus_ring` に渡して角丸 stroke 化すれば解消。**FW-8 と同じ focus-ring paint 周りなのでまとめて着手が効率的**。
+- **FW-10 [fw] P3 — triple-click で行選択**
+  現状: double-click 単語選択は実装済(`word_bounds`/`DOUBLE_CLICK_MAX`)だが、`last_click` は double 発火後に reset され **triple は連鎖しない**設計(input.rs 338 付近)。対応: click count を追い、triple = 視覚行/段落の選択に拡張。**FW-11 の現実的 fallback も兼ねる**。
+
 #### Knot app — UX 磨き
 
 - **AP-1 [app] P2 — 複製ボタンが背景と同化して見えない** (元 #42) — context menu / row のコントラスト
@@ -65,6 +79,7 @@
 
 ### → 様子見 / 仕様(まだ動かさない)
 
+- **FW-11 [fw] P3 — 日本語等の単語選択(double-click)が機能しない** — **要設計判断**。真因確定: [input.rs](../crates/shroud_widgets/src/input.rs) `classify`(237)が `is_alphanumeric()` を使うため CJK(漢字/ひらがな/カタカナ)を全部 `Word` 扱い → double-click が **CJK の連続全体**(実質その文/行まるごと)を掴む。正しい分かち書きには辞書(MeCab 級)が必須で、zeroize-first の最小 framework に積むには重い。方向案を決めてから昇格: ①辞書なしで script-run(Han/Hiragana/Katakana/Latin の切れ目)区切りにして「多少マシ」にする ②そもそも word-select は諦め、**triple-click 行選択(FW-10)を実用的 fallback とする** ③現状維持(連続全選択)で割り切る。ユーザー文言「使えないなら使えないで何かできないか」= ①か②を期待。
 - **元 #23 パスワード強度メーター** — [[roadmap]] で「強度ポリシーは*意図的に非移植*」と記録済。今回は据え置き。E(リリース)前に復活させるか改めて判断。
 - **元 #35 live split preview が使いにくい** — **要設計判断**。実装ではなく方向決めが先: ①split の比率/プレビュー見やすさを改善 ②toggle 方式(編集⇄プレビュー)に戻す ③可変ペイン幅。決めてから昇格。
 - **元 #31 フォントに差があって見づらい** — **要再現**。どの画面のどのフォント差か曖昧。次の dogfood で具体化してから。

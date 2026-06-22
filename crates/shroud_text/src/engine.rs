@@ -715,12 +715,17 @@ impl TextEngine {
     /// Block-relative highlight rectangles covering the byte range
     /// `[start, end)` of `text`, one per visual line the range spans.
     ///
-    /// Used by `Input` to paint a selection behind the glyphs. Coordinates
-    /// are in the same block-relative space as [`cursor_position`](Self::cursor_position) and the
-    /// painted glyphs (origin at the block top-left), so a caller adds the
-    /// text origin to translate into screen space. `max_width` must match
-    /// the render wrap configuration. An empty or inverted range, or empty
-    /// `text`, returns an empty `Vec`.
+    /// Used to back caret geometry ([`cursor_position`](Self::cursor_position))
+    /// and the IME preedit underline — callers that need the glyph span
+    /// *exactly*, with no trailing affordance. To paint an on-screen
+    /// selection, prefer [`selection_rects_with_trailing`](Self::selection_rects_with_trailing).
+    ///
+    /// Coordinates are in the same block-relative space as
+    /// [`cursor_position`](Self::cursor_position) and the painted glyphs
+    /// (origin at the block top-left), so a caller adds the text origin to
+    /// translate into screen space. `max_width` must match the render wrap
+    /// configuration. An empty or inverted range, or empty `text`, returns
+    /// an empty `Vec`.
     pub fn selection_rects(
         &mut self,
         text: &str,
@@ -730,6 +735,49 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> Vec<Rect> {
+        self.selection_rects_impl(text, start, end, font_size, line_height, max_width, false)
+    }
+
+    /// Like [`selection_rects`](Self::selection_rects), but every visual
+    /// row whose selection continues onto the next row also gets a small
+    /// trailing sliver at its right edge. Without it a multi-line selection
+    /// stops at each row's last glyph, so the user can't tell whether the
+    /// line break (or soft-wrap joint) is part of the selection (FW-6).
+    ///
+    /// This is the variant `Input` paints behind the glyphs. The plain
+    /// [`selection_rects`](Self::selection_rects) stays sliver-free because
+    /// caret geometry and the preedit underline reuse it and must not gain
+    /// a phantom trailing mark.
+    pub fn selection_rects_with_trailing(
+        &mut self,
+        text: &str,
+        start: usize,
+        end: usize,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> Vec<Rect> {
+        self.selection_rects_impl(text, start, end, font_size, line_height, max_width, true)
+    }
+
+    // Shared body for the two public `selection_rects*` methods: same 7-arg
+    // shape plus a `trailing` mode flag, so the arg count is one over the lint.
+    #[allow(clippy::too_many_arguments)]
+    fn selection_rects_impl(
+        &mut self,
+        text: &str,
+        start: usize,
+        end: usize,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        trailing: bool,
+    ) -> Vec<Rect> {
+        /// Trailing-sliver width as a fraction of the font size — roughly a
+        /// space advance, enough to read as "the break is selected" without
+        /// looking like a stray glyph.
+        const TRAILING_SELECTION_EM: f32 = 0.33;
+
         if text.is_empty() || start >= end {
             return Vec::new();
         }
@@ -752,6 +800,24 @@ impl TextEngine {
         let cursor_lo = Cursor::new(lo_line, lo_idx);
         let cursor_hi = Cursor::new(hi_line, hi_idx);
 
+        // Byte offset where each `\n`-delimited line starts, indexed by the
+        // cosmic-text buffer line index (`run.line_i`). Lets us map a run's
+        // per-line glyph byte ranges back into global offsets for the
+        // trailing-sliver test. Only needed when `trailing` is set.
+        let line_starts: Vec<usize> = if trailing {
+            let mut v = vec![0usize];
+            v.extend(
+                text.bytes()
+                    .enumerate()
+                    .filter(|(_, b)| *b == b'\n')
+                    .map(|(i, _)| i + 1),
+            );
+            v
+        } else {
+            Vec::new()
+        };
+        let sliver_w = font_size * TRAILING_SELECTION_EM;
+
         let mut rects = Vec::new();
         for run in buffer.layout_runs() {
             // `highlight` returns the pixel span of this run's glyphs whose
@@ -760,6 +826,29 @@ impl TextEngine {
             if let Some((x, w)) = run.highlight(cursor_lo, cursor_hi) {
                 if w > 0.0 {
                     rects.push(Rect::new(x, run.line_top, w, run.line_height));
+                }
+            }
+
+            // Trailing sliver: when the selection reaches past this visual
+            // row's last glyph, the line break / soft-wrap joint after it is
+            // selected, so draw a small block at the row's right edge. The
+            // glyph byte ranges are line-relative, so rebase through
+            // `line_starts[run.line_i]` to compare against the global
+            // [lo, hi). An empty run (blank line) ends at the line start and
+            // anchors the sliver at the left edge.
+            if trailing {
+                let line_start = line_starts.get(run.line_i).copied().unwrap_or(0);
+                let (row_end_global, row_right_x) = match run.glyphs.last() {
+                    Some(g) => (line_start + g.end, g.x + g.w),
+                    None => (line_start, 0.0),
+                };
+                if lo <= row_end_global && row_end_global < hi {
+                    rects.push(Rect::new(
+                        row_right_x,
+                        run.line_top,
+                        sliver_w,
+                        run.line_height,
+                    ));
                 }
             }
         }
