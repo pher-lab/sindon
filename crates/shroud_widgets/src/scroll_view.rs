@@ -13,6 +13,8 @@ use crate::paint::PaintContext;
 use crate::widget::Widget;
 use shroud_core::{Color, Rect};
 use shroud_layout::FlexStyle;
+use shroud_reactive::{Animated, Easing};
+use std::time::Duration;
 
 /// A scrollable viewport.
 ///
@@ -23,8 +25,22 @@ use shroud_layout::FlexStyle;
 ///     .width_full()
 ///     .content_height(1200.0);
 /// ```
+/// Default duration of the smooth-scroll glide applied to wheel input.
+/// Short enough to feel responsive, long enough to read as motion (matches
+/// the hover-fade default). `scroll_transition(Duration::ZERO)` opts back out
+/// to the pre-animation instant jump.
+const SCROLL_TRANSITION_DEFAULT: Duration = Duration::from_millis(120);
+
 pub struct ScrollView {
-    scroll_y: f32,
+    /// Wheel scrolling retargets this animator and the displayed offset eases
+    /// toward it, so a fast flick doesn't teleport the content (FW-7). Lazily
+    /// created on first scroll (like `Container`'s hover fade); `None` reads as
+    /// a resting offset of 0. The *target* is the logical scroll position
+    /// ([`scroll_y`](Self::scroll_y)); the *current eased* value is what paint
+    /// and hit-testing use ([`scroll_offset`](Widget::scroll_offset)).
+    scroll_anim: Option<Animated<f32>>,
+    /// Glide duration for wheel scrolling. `Duration::ZERO` = instant.
+    scroll_transition: Duration,
     /// Caller-pinned content height. `None` means "auto" — the widget tree
     /// writes the laid-out children's max bottom into [`Self::auto_content_height`]
     /// after each layout pass and that value is used for scroll clamp /
@@ -53,7 +69,8 @@ impl ScrollView {
     /// Create a new scroll view (column-oriented content).
     pub fn new() -> Self {
         Self {
-            scroll_y: 0.0,
+            scroll_anim: None,
+            scroll_transition: SCROLL_TRANSITION_DEFAULT,
             explicit_content_height: None,
             auto_content_height: 0.0,
             // A scroll container must declare `overflow: hidden` so flex
@@ -178,9 +195,35 @@ impl ScrollView {
         self
     }
 
-    /// Current vertical scroll offset in pixels.
+    /// Set how long a wheel scroll takes to glide to its new position.
+    /// Defaults to [`SCROLL_TRANSITION_DEFAULT`] (120 ms); pass
+    /// [`Duration::ZERO`] for the pre-animation instant jump (FW-7).
+    pub fn scroll_transition(mut self, duration: Duration) -> Self {
+        self.scroll_transition = duration;
+        self
+    }
+
+    /// The logical (target) vertical scroll offset in pixels — where the
+    /// content is heading. Equals the displayed offset once any glide settles.
+    /// Wheel input and clamping operate on this; the smoothly-eased value the
+    /// user sees is [`scroll_offset`](Widget::scroll_offset).
     pub fn scroll_y(&self) -> f32 {
-        self.scroll_y
+        self.scroll_anim.as_ref().map_or(0.0, |a| a.target())
+    }
+
+    /// The current eased offset the content is drawn at — lags the target
+    /// while a wheel glide is in flight, then matches it. Reads also vote for
+    /// another frame while animating (see [`Animated`]).
+    fn displayed_scroll(&self) -> f32 {
+        self.scroll_anim.as_ref().map_or(0.0, |a| a.get())
+    }
+
+    /// Retarget the scroll glide, lazily creating the animator with the
+    /// configured [`scroll_transition`](Self::scroll_transition) duration.
+    fn drive_scroll(&mut self, to: f32) {
+        self.scroll_anim
+            .get_or_insert_with(|| Animated::new(0.0, self.scroll_transition, Easing::EaseOut))
+            .set(to);
     }
 
     /// Maximum allowed scroll offset given the current viewport height.
@@ -197,8 +240,13 @@ impl ScrollView {
     /// content leaves it untouched, so an active scroll position is preserved.
     pub(crate) fn clamp_scroll(&mut self, viewport_height: f32) {
         let max = self.max_scroll_y(viewport_height);
-        if self.scroll_y > max {
-            self.scroll_y = max;
+        if let Some(a) = &self.scroll_anim {
+            if a.target() > max {
+                // Re-clamp is a system correction, not a user gesture — snap
+                // instantly so switching to a shorter note doesn't visibly
+                // slide the (reused) viewport back up.
+                a.snap(max);
+            }
         }
     }
 }
@@ -252,7 +300,7 @@ impl Widget for ScrollView {
 
     fn paint_pre_children(&self, layout: Rect, ctx: &mut PaintContext) {
         ctx.push_clip(layout);
-        ctx.push_offset(0.0, -self.scroll_y);
+        ctx.push_offset(0.0, -self.displayed_scroll());
     }
 
     fn paint_post_children(&self, layout: Rect, ctx: &mut PaintContext) {
@@ -282,8 +330,10 @@ impl Widget for ScrollView {
         let thumb_h = ((viewport_h / content_h) * viewport_h).max(SCROLLBAR_THUMB_MIN);
         let thumb_h = thumb_h.min(viewport_h);
         let max_scroll = (content_h - viewport_h).max(0.0);
+        // Thumb tracks the displayed (eased) offset so it glides with the
+        // content rather than jumping ahead to the target.
         let progress = if max_scroll > 0.0 {
-            (self.scroll_y / max_scroll).clamp(0.0, 1.0)
+            (self.displayed_scroll() / max_scroll).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -293,7 +343,9 @@ impl Widget for ScrollView {
     }
 
     fn scroll_offset(&self) -> (f32, f32) {
-        (0.0, self.scroll_y)
+        // Hit-testing must use the displayed (eased) offset so a click lands on
+        // the glyph the user currently sees mid-glide, matching paint.
+        (0.0, self.displayed_scroll())
     }
 
     fn event(&mut self, event: &WidgetEvent, layout: Rect, _ctx: &mut EventContext) -> EventResult {
@@ -305,9 +357,12 @@ impl Widget for ScrollView {
                 return EventResult::Ignored;
             }
             let max = self.max_scroll_y(layout.size.height);
-            let new_y = (self.scroll_y - delta_y).clamp(0.0, max);
-            if new_y != self.scroll_y {
-                self.scroll_y = new_y;
+            // Accumulate against the *target*, not the in-flight displayed
+            // value, so consecutive wheel ticks add up instead of fighting the
+            // glide. `drive_scroll` eases the displayed offset toward it.
+            let new_y = (self.scroll_y() - delta_y).clamp(0.0, max);
+            if new_y != self.scroll_y() {
+                self.drive_scroll(new_y);
             }
             return EventResult::Consumed;
         }

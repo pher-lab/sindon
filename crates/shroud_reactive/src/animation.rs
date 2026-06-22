@@ -181,6 +181,22 @@ impl<T: Lerp + Clone> Animated<T> {
         s.start = Instant::now();
     }
 
+    /// Jump immediately to `value` with no interpolation — the animation is
+    /// left fully settled. Use for resets that must not visibly slide (e.g.
+    /// re-clamping a scroll offset after its content shrank, or snapping to a
+    /// fresh document), in contrast to [`set`](Self::set), which eases. Casts
+    /// no frame vote.
+    pub fn snap(&self, value: T) {
+        let mut s = self.state.borrow_mut();
+        s.from = value.clone();
+        s.target = value;
+        // Backdate `start` past `duration` so `settled()` holds and `value()`
+        // short-circuits to `target`: no interpolation, no vote.
+        s.start = Instant::now()
+            .checked_sub(s.duration)
+            .unwrap_or_else(Instant::now);
+    }
+
     /// Read the current eased value. While the animation is still in flight
     /// this also votes for another frame (see module docs).
     pub fn get(&self) -> T {
@@ -267,6 +283,18 @@ mod tests {
         assert!((0.0..2.0).contains(&v), "value just after set was {v}");
         assert!(a.is_animating());
         assert!(frame_requested(), "an in-flight get must request a frame");
+    }
+
+    #[test]
+    fn snap_jumps_without_animating_or_voting() {
+        reset_frame_request();
+        let a = Animated::new(0.0f32, Duration::from_secs(10), Easing::Linear);
+        a.set(100.0); // begin a long animation
+        assert!(a.is_animating());
+        a.snap(42.0);
+        assert_eq!(a.get(), 42.0, "snap lands exactly on the value");
+        assert!(!a.is_animating(), "snap leaves the animation settled");
+        assert!(!frame_requested(), "a snapped animation casts no vote");
     }
 
     #[test]

@@ -1407,8 +1407,59 @@ fn scroll_view_no_scroll_when_content_fits() {
 }
 
 #[test]
+fn scroll_view_wheel_target_jumps_but_display_eases() {
+    // FW-7: a wheel tick sets the logical target immediately, but the drawn
+    // offset eases toward it so the content doesn't teleport. A long
+    // transition makes the lag deterministic.
+    let mut sv = ScrollView::new()
+        .content_height(1000.0)
+        .scroll_transition(std::time::Duration::from_secs(10));
+    let layout = shroud_core::Rect::new(0.0, 0.0, 200.0, 300.0);
+    let mut ectx = EventContext::new();
+    let event = WidgetEvent::Scroll {
+        position: Point::new(50.0, 50.0),
+        delta_x: 0.0,
+        delta_y: -100.0,
+    };
+    sv.event(&event, layout, &mut ectx);
+    assert_eq!(sv.scroll_y(), 100.0, "target is reached immediately");
+    let displayed = Widget::scroll_offset(&sv).1;
+    assert!(
+        displayed < 100.0,
+        "displayed offset lags the target while gliding, got {displayed}"
+    );
+}
+
+#[test]
+fn scroll_view_zero_transition_scrolls_instantly() {
+    // Opting out with a zero-duration transition restores the instant jump:
+    // the displayed offset equals the target with no easing.
+    let mut sv = ScrollView::new()
+        .content_height(1000.0)
+        .scroll_transition(std::time::Duration::ZERO);
+    let layout = shroud_core::Rect::new(0.0, 0.0, 200.0, 300.0);
+    let mut ectx = EventContext::new();
+    let event = WidgetEvent::Scroll {
+        position: Point::new(50.0, 50.0),
+        delta_x: 0.0,
+        delta_y: -40.0,
+    };
+    sv.event(&event, layout, &mut ectx);
+    assert_eq!(sv.scroll_y(), 40.0);
+    assert_eq!(
+        Widget::scroll_offset(&sv).1,
+        40.0,
+        "zero transition scrolls instantly"
+    );
+}
+
+#[test]
 fn scroll_view_scroll_offset_matches_scroll_y() {
-    let mut sv = ScrollView::new().content_height(1000.0);
+    // Instant transition isolates the offset/scroll-y relationship from the
+    // smooth-scroll glide (covered by the dedicated FW-7 tests).
+    let mut sv = ScrollView::new()
+        .content_height(1000.0)
+        .scroll_transition(std::time::Duration::ZERO);
     let layout = shroud_core::Rect::new(0.0, 0.0, 200.0, 300.0);
     let mut ectx = EventContext::new();
     let event = WidgetEvent::Scroll {
@@ -1452,7 +1503,9 @@ fn scroll_view_child_paint_uses_offset_and_clip() {
         ScrollView::new()
             .width(200.0)
             .height(300.0)
-            .content_height(1000.0),
+            .content_height(1000.0)
+            // Instant scroll so the child's shifted position is deterministic.
+            .scroll_transition(std::time::Duration::ZERO),
     );
     let child = tree.add_child(
         root,
@@ -1504,7 +1557,9 @@ fn scroll_view_hit_test_respects_scroll_offset() {
         ScrollView::new()
             .width(200.0)
             .height(300.0)
-            .content_height(1000.0),
+            .content_height(1000.0)
+            // Instant scroll so the click lands without waiting for the glide.
+            .scroll_transition(std::time::Duration::ZERO),
     );
     // Spacer to push the button down to logical y=100.
     tree.add_child(root, Container::column().width(200.0).height(100.0));
