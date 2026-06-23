@@ -19,6 +19,7 @@ use shroud_widgets::event::{EventContext, MouseButton, WidgetEvent};
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::tree::WidgetTree;
 use shroud_widgets::{Container, Input};
+use std::time::Duration;
 
 const W: f32 = 400.0;
 const H: f32 = 120.0;
@@ -42,10 +43,16 @@ fn paint(tree: &WidgetTree) -> PaintContext {
 /// hit-test from the focusing click is resolved by a throwaway "warm" paint
 /// *before* typing, so the typed caret position (end of buffer) is what the next
 /// paint sees.
-fn build_and_type(n_lines: usize) -> (WidgetTree, usize, Rect) {
+fn build_and_type(n_lines: usize, scroll_transition: Duration) -> (WidgetTree, usize, Rect) {
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(W).height(H));
-    let input_idx = tree.add_child(root, Input::new().multiline().height_full());
+    let input_idx = tree.add_child(
+        root,
+        Input::new()
+            .multiline()
+            .height_full()
+            .scroll_transition(scroll_transition),
+    );
 
     let mut engine = TextEngine::new();
     let theme = Theme::default();
@@ -88,7 +95,7 @@ fn caret_rect(ctx: &PaintContext) -> (f32, f32) {
 
 #[test]
 fn caret_scrolls_into_view_for_long_content() {
-    let (tree, _idx, rect) = build_and_type(20);
+    let (tree, _idx, rect) = build_and_type(20, Duration::ZERO);
     let ctx = paint(&tree);
 
     let top = rect.origin.y + 8.0;
@@ -109,7 +116,7 @@ fn caret_scrolls_into_view_for_long_content() {
 
 #[test]
 fn overflowing_glyphs_are_clipped_to_the_field_box() {
-    let (tree, _idx, rect) = build_and_type(20);
+    let (tree, _idx, rect) = build_and_type(20, Duration::ZERO);
     let ctx = paint(&tree);
 
     let box_clip = Rect::new(
@@ -135,7 +142,7 @@ fn overflowing_glyphs_are_clipped_to_the_field_box() {
 
 #[test]
 fn mouse_wheel_scrolls_the_viewport() {
-    let (mut tree, _idx, rect) = build_and_type(20);
+    let (mut tree, _idx, rect) = build_and_type(20, Duration::ZERO);
 
     // First paint: reveal scrolls to the caret (bottom), so the top lines sit
     // above the viewport (very negative y once the offset is applied).
@@ -159,6 +166,40 @@ fn mouse_wheel_scrolls_the_viewport() {
         min_y_after > min_y_before,
         "scrolling up must move content down (min glyph y rises): \
          before={min_y_before} after={min_y_after}"
+    );
+}
+
+#[test]
+fn mouse_wheel_glides_with_a_transition() {
+    // FW-7b: with a (long) transition the wheel *eases* the viewport instead of
+    // teleporting — on the very next frame the content has barely moved. Paired
+    // with `mouse_wheel_scrolls_the_viewport` (instant via ZERO) this pins that
+    // wheel input uses `set` (eased), not `snap`.
+    let (mut tree, _idx, rect) = build_and_type(20, Duration::from_secs(10));
+
+    // First paint snaps the caret-reveal to the bottom (reveal always snaps).
+    let before = paint(&tree);
+    let min_y_before = before.glyphs.iter().map(|g| g.y).min().unwrap();
+
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::Scroll {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            delta_x: 0.0,
+            delta_y: 10_000.0,
+        },
+        &mut ev,
+    );
+
+    let after = paint(&tree);
+    let min_y_after = after.glyphs.iter().map(|g| g.y).min().unwrap();
+    // Scrolling up moves content down, so min glyph y rises — but over a 10s
+    // glide the first frame advances only a few px, nowhere near the ~full
+    // viewport jump an instant scroll to the top would produce.
+    assert!(
+        min_y_after >= min_y_before && min_y_after < min_y_before + 100,
+        "a 10s-transition wheel scroll should barely move the content on the \
+         next frame (eased, not instant): before={min_y_before} after={min_y_after}"
     );
 }
 
@@ -268,7 +309,7 @@ fn scrollbar_bars(ctx: &PaintContext, field: Rect) -> Vec<(f32, f32)> {
 
 #[test]
 fn scrollbar_indicator_drawn_when_content_overflows() {
-    let (tree, _idx, rect) = build_and_type(20);
+    let (tree, _idx, rect) = build_and_type(20, Duration::ZERO);
     let ctx = paint(&tree);
 
     let viewport_h = rect.size.height - 16.0;
@@ -304,7 +345,7 @@ fn scrollbar_indicator_drawn_when_content_overflows() {
 fn no_scrollbar_when_content_fits() {
     // One short line fits well within the full-height viewport, so the field
     // has nothing to scroll and must draw no scrollbar.
-    let (tree, _idx, rect) = build_and_type(1);
+    let (tree, _idx, rect) = build_and_type(1, Duration::ZERO);
     let ctx = paint(&tree);
     assert!(
         scrollbar_bars(&ctx, rect).is_empty(),

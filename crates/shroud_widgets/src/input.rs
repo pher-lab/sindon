@@ -48,7 +48,7 @@ use crate::paint::PaintContext;
 use crate::widget::Widget;
 use shroud_core::{Color, Point, Rect};
 use shroud_layout::FlexStyle;
-use shroud_reactive::Signal;
+use shroud_reactive::{Animated, Easing, Signal};
 use shroud_text::TextSpan;
 use zeroize::Zeroizing;
 
@@ -197,6 +197,11 @@ const SCROLLBAR_THUMB_MIN: f32 = 16.0;
 /// caret stops — *before* the bar instead of being drawn under it (#34).
 /// Covers the bar's width plus its inset from the inner right edge.
 const SCROLLBAR_LANE: f32 = SCROLLBAR_WIDTH + SCROLLBAR_INSET;
+
+/// Glide duration for wheel scrolling the multi-line viewport. Matches
+/// `ScrollView`'s default (FW-7) so the two scroll surfaces feel identical;
+/// caret-reveal and re-clamp bypass it via `Animated::snap`.
+const SCROLL_TRANSITION: Duration = Duration::from_millis(120);
 
 /// Coalescing class for an edit, used to decide whether a new edit folds into
 /// the current undo step or starts a fresh one. Consecutive same-kind inserts
@@ -458,12 +463,14 @@ pub struct Input {
     /// delete. Independent of [`on_backspace_empty`](Self::on_backspace_empty),
     /// which only fires on an empty buffer.
     backspace_handler: Option<KeymapHandler>,
-    /// Internal vertical scroll offset for multi-line mode (px). The viewport
-    /// shows `[scroll_y, scroll_y + viewport_h]` of the shaped content; glyphs
-    /// are clipped to the field's padding box and translated up by this amount,
-    /// so a long note never bleeds past the border. `Cell` because paint (which
-    /// holds `&self`) clamps and adjusts it. Always 0 in single-line mode.
-    scroll_y: Cell<f32>,
+    /// Internal vertical scroll for multi-line mode (px). The *target* offset —
+    /// where wheel input, caret-reveal, and clamping point — lives here; the
+    /// displayed offset eases toward it so a wheel flick glides instead of
+    /// teleporting (FW-7b). Glyphs are clipped to the padding box and shifted up
+    /// by the *displayed* value. `Animated` (interior-mutable) so paint (which
+    /// holds `&self`) can retarget / snap it. Rests at 0 in single-line mode.
+    /// Wheel uses `set` (eased); caret-reveal and re-clamp use `snap` (instant).
+    scroll_anim: Animated<f32>,
     /// Set whenever the caret moves (edit, arrow, click, undo) so the next paint
     /// scrolls the viewport to keep the caret visible. Taken (cleared) by paint.
     /// A wheel scroll deliberately does *not* set it, so scrolling away from the
@@ -539,7 +546,7 @@ impl Input {
             highlighter: None,
             enter_handler: None,
             backspace_handler: None,
-            scroll_y: Cell::new(0.0),
+            scroll_anim: Animated::new(0.0, SCROLL_TRANSITION, Easing::EaseOut),
             reveal_caret: Cell::new(false),
             last_max_scroll: Cell::new(0.0),
             grow: None,
@@ -679,6 +686,18 @@ impl Input {
     /// [`lines`](Self::lines) line-heights. No effect in single-line mode.
     pub fn height_full(mut self) -> Self {
         self.fill_height = true;
+        self
+    }
+
+    /// Set how long a wheel scroll takes to glide to its new position in a
+    /// multi-line viewport. Defaults to [`SCROLL_TRANSITION`] (120 ms), matching
+    /// `ScrollView`; pass [`Duration::ZERO`] for the pre-animation instant jump
+    /// (FW-7b). Caret-reveal and re-clamp always snap regardless of this value.
+    pub fn scroll_transition(mut self, duration: Duration) -> Self {
+        // Recreate the animator with the new duration (it is fixed at
+        // construction). Builders run before any scroll, so resetting to 0 is
+        // safe.
+        self.scroll_anim = Animated::new(0.0, duration, Easing::EaseOut);
         self
     }
 
@@ -1200,7 +1219,9 @@ impl Input {
                 // the caret-reveal below positions the viewport instead, so a
                 // mid-document edit doesn't snap back to the top.
                 if !caret_incoming {
-                    self.scroll_y.set(0.0);
+                    // Snap (not glide): a note switch should appear at the top
+                    // immediately, never scroll up from the old position.
+                    self.scroll_anim.snap(0.0);
                 }
             }
         }
@@ -1493,7 +1514,11 @@ impl Widget for Input {
         // something to draw, so the placeholder path is suppressed.
         let value_is_empty = self.value.borrow().is_empty() && !composing;
         let viewport_h = (layout.size.height - 16.0).max(0.0);
-        let mut scroll_y = 0.0_f32;
+        // `displayed` is the eased offset the text is actually drawn at; the
+        // logical target lives in `scroll_anim`. Hit-testing, the offset push,
+        // and the scrollbar all use `displayed` so they match what is on screen
+        // while a wheel glide is mid-flight (FW-7b).
+        let mut displayed = 0.0_f32;
         let mut max_scroll = 0.0_f32;
         if self.multiline {
             let content_h = if value_is_empty {
@@ -1509,7 +1534,14 @@ impl Widget for Input {
                     .height
             };
             max_scroll = (content_h - viewport_h).max(0.0);
-            scroll_y = self.scroll_y.get().clamp(0.0, max_scroll);
+            // Re-clamp the target against the freshly measured content. A shrink
+            // (shorter note, deleted lines) snaps instantly — no slide — while a
+            // still-valid target leaves any in-flight wheel glide running.
+            let clamped = self.scroll_anim.target().clamp(0.0, max_scroll);
+            if clamped != self.scroll_anim.target() {
+                self.scroll_anim.snap(clamped);
+            }
+            displayed = self.scroll_anim.get();
         }
 
         // Resolve a deferred click / drag against the shaped text now that the
@@ -1518,9 +1550,9 @@ impl Widget for Input {
         // end; otherwise the caret collapses to a fresh, selection-free point.
         if let Some((pos, extend)) = self.pending_hit.take() {
             let rel_x = pos.x - text_x;
-            // Add the current scroll offset so a click maps to the character the
-            // user actually sees (the text is drawn shifted up by `scroll_y`).
-            let rel_y = pos.y - text_y + scroll_y;
+            // Add the displayed scroll offset so a click maps to the character
+            // the user actually sees (the text is drawn shifted up by it).
+            let rel_y = pos.y - text_y + displayed;
             let offset = {
                 let v = self.value.borrow();
                 ctx.text_engine.offset_at_point(
@@ -1659,15 +1691,23 @@ impl Widget for Input {
         if self.multiline {
             if self.reveal_caret.take() {
                 if let Some((_cx, cy)) = caret_xy {
-                    if cy < scroll_y {
-                        scroll_y = cy;
-                    } else if cy + line_height > scroll_y + viewport_h {
-                        scroll_y = cy + line_height - viewport_h;
+                    // Reveal against the logical target, then snap: a caret moved
+                    // by typing / nav / click is shown immediately, never lazily
+                    // glided to (only wheel input eases). A no-op reveal (caret
+                    // already in range) leaves an in-flight glide untouched.
+                    let mut t = self.scroll_anim.target();
+                    if cy < t {
+                        t = cy;
+                    } else if cy + line_height > t + viewport_h {
+                        t = cy + line_height - viewport_h;
                     }
-                    scroll_y = scroll_y.clamp(0.0, max_scroll);
+                    t = t.clamp(0.0, max_scroll);
+                    if t != self.scroll_anim.target() {
+                        self.scroll_anim.snap(t);
+                        displayed = t;
+                    }
                 }
             }
-            self.scroll_y.set(scroll_y);
             self.last_max_scroll.set(max_scroll);
         }
 
@@ -1682,7 +1722,7 @@ impl Widget for Input {
                 layout.size.width,
                 viewport_h,
             ));
-            ctx.push_offset(0.0, -scroll_y);
+            ctx.push_offset(0.0, -displayed);
         }
 
         // Selection highlight, painted behind the glyphs so the (opaque) text
@@ -1857,7 +1897,9 @@ impl Widget for Input {
             let thumb_h = ((viewport_h / content_h) * viewport_h)
                 .max(SCROLLBAR_THUMB_MIN)
                 .min(viewport_h);
-            let progress = (scroll_y / max_scroll).clamp(0.0, 1.0);
+            // Track the displayed (eased) offset so the thumb glides with the
+            // text rather than jumping to the wheel target.
+            let progress = (displayed / max_scroll).clamp(0.0, 1.0);
             let thumb_y = track_top + progress * (viewport_h - thumb_h);
             ctx.fill_rect(
                 Rect::new(track_x, thumb_y, SCROLLBAR_WIDTH, thumb_h),
@@ -1943,8 +1985,14 @@ impl Widget for Input {
                 if !layout.contains(*position) || max <= 0.0 {
                     EventResult::Ignored
                 } else {
-                    let new_y = (self.scroll_y.get() - delta_y).clamp(0.0, max);
-                    self.scroll_y.set(new_y);
+                    // Accumulate against the target so consecutive ticks add up;
+                    // `set` eases the displayed offset toward it (paint re-clamps
+                    // authoritatively, so this raw bound is safe). Guarded so a
+                    // tick at a scroll bound doesn't restart the glide.
+                    let new_y = (self.scroll_anim.target() - delta_y).clamp(0.0, max);
+                    if new_y != self.scroll_anim.target() {
+                        self.scroll_anim.set(new_y);
+                    }
                     EventResult::Consumed
                 }
             }
