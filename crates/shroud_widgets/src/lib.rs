@@ -30,7 +30,7 @@ pub use clear_trigger::ClearTrigger;
 pub use container::Container;
 pub use dropdown::Dropdown;
 pub use event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
-pub use focus::{FocusDirection, FocusManager};
+pub use focus::{FocusDirection, FocusManager, FocusReason};
 pub use image::{Image, ImageFit};
 pub use input::{Input, KeyEdit};
 pub use layer::{LayerAnchor, LayerOptions, Placement};

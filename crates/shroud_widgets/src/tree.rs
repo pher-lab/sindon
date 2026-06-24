@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::event::{
     EventContext, EventResult, Key, MouseButton, NamedKey, TreeCommand, WidgetEvent,
 };
-use crate::focus::{FocusDirection, FocusManager};
+use crate::focus::{FocusDirection, FocusManager, FocusReason};
 use crate::layer::{LayerAnchor, LayerEntry, LayerOptions, Placement};
 use crate::paint::PaintContext;
 use crate::reactive_children::ReactiveChildren;
@@ -1094,6 +1094,10 @@ impl WidgetTree {
     ///    then the layer subtree shifted by its anchor offset so the
     ///    painted rect lands at the right viewport position.
     pub fn paint(&self, ctx: &mut PaintContext) {
+        // Publish the `:focus-visible` state for this frame so the focused
+        // widget knows whether to paint its ring (suppressed for pointer
+        // focus, shown for keyboard / programmatic).
+        ctx.set_focus_visible(self.focus.visible());
         if let Some(root) = self.root {
             self.paint_node(root, ctx);
         }
@@ -1420,7 +1424,8 @@ impl WidgetTree {
                     .map(|n| n.widget.focusable())
                     .unwrap_or(false)
             });
-            self.focus(new_focus, event_ctx);
+            // Pointer-driven focus: suppress the ring (:focus-visible).
+            self.focus_with_reason(new_focus, FocusReason::Pointer, event_ctx);
         }
 
         self.dispatch_to_node(target, shifted, event_ctx)
@@ -1525,7 +1530,9 @@ impl WidgetTree {
             }
         };
 
-        self.focus(Some(next), event_ctx);
+        // Keyboard-driven focus: the ring is shown so a Tab user can see
+        // where focus went.
+        self.focus_with_reason(Some(next), FocusReason::Keyboard, event_ctx);
         Some(next)
     }
 
@@ -1545,7 +1552,29 @@ impl WidgetTree {
     /// silently skips dispatch for that side, which keeps the call safe
     /// against races with a removal.
     pub fn focus(&mut self, new: Option<usize>, event_ctx: &mut EventContext) -> Option<usize> {
+        // App-facing focus is programmatic: the user didn't point at the
+        // widget, so the ring shows (like keyboard navigation).
+        self.focus_with_reason(new, FocusReason::Programmatic, event_ctx)
+    }
+
+    /// Focus `new`, recording *why* focus moved so the `:focus-visible`
+    /// heuristic can decide whether to paint a ring. The built-in
+    /// click-to-focus path passes [`FocusReason::Pointer`] (ring
+    /// suppressed) and Tab routing passes [`FocusReason::Keyboard`]; the
+    /// public [`focus`](Self::focus) wrapper passes
+    /// [`FocusReason::Programmatic`]. Otherwise identical to `focus`,
+    /// including the `FocusLost`/`FocusGained` dispatch.
+    fn focus_with_reason(
+        &mut self,
+        new: Option<usize>,
+        reason: FocusReason,
+        event_ctx: &mut EventContext,
+    ) -> Option<usize> {
         let prev = self.focus.set(new);
+        // Refresh visibility even on a same-widget re-focus (set early so a
+        // click on an already-keyboard-focused widget drops its ring) —
+        // this is before the no-op early return below.
+        self.focus.set_visible(new.is_some() && reason.shows_ring());
         if prev == new {
             return prev;
         }

@@ -222,8 +222,9 @@ impl Widget for Checkbox {
 
         // Ring follows the full layout rect (the entire row is the click
         // target, so the focus affordance matches what the user can hit).
-        if self.focused {
-            ctx.paint_focus_ring(layout, self.focus_ring_color);
+        // The row has no corner radius, so the ring stays square.
+        if self.focused && ctx.focus_visible() {
+            ctx.paint_focus_ring(layout, self.focus_ring_color, 0.0);
         }
     }
 

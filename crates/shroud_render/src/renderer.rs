@@ -26,6 +26,12 @@ struct Vertex {
     half_size: [f32; 2],
     /// Corner radius in pixels. `0.0` short-circuits the SDF in fs_main.
     radius: f32,
+    /// Border (stroke) width in pixels. `0.0` fills the rect solid;
+    /// `> 0.0` keeps only an inner band of this thickness along the
+    /// (rounded) edge and leaves the interior transparent — this is how
+    /// focus rings draw a single concentric outline. Same value at every
+    /// vertex, interpolated `flat`.
+    border_width: f32,
 }
 
 impl Vertex {
@@ -56,6 +62,11 @@ impl Vertex {
             wgpu::VertexAttribute {
                 offset: std::mem::size_of::<[f32; 10]>() as wgpu::BufferAddress,
                 shader_location: 4,
+                format: wgpu::VertexFormat::Float32,
+            },
+            wgpu::VertexAttribute {
+                offset: std::mem::size_of::<[f32; 11]>() as wgpu::BufferAddress,
+                shader_location: 5,
                 format: wgpu::VertexFormat::Float32,
             },
         ],
@@ -150,6 +161,12 @@ pub struct DrawRect {
     pub height: f32,
     pub color: Color,
     pub radius: f32,
+    /// Stroke width in pixels. `0.0` (the default for `fill_rect`
+    /// callers) fills the rect solid. `> 0.0` draws only an inner band
+    /// of this thickness along the (rounded) edge, leaving the interior
+    /// transparent — a single-rect outline used for focus rings. The
+    /// width is clamped downstream to the rect's half-extent.
+    pub border_width: f32,
     /// Scissor region in screen pixels; `None` means no clipping.
     pub clip_rect: Option<Rect>,
 }
@@ -1042,6 +1059,9 @@ impl Renderer {
             // (length(max(q, 0)) becomes negative inside the shrunk box) if
             // r exceeds min(hw, hh), which would produce a black corner.
             let r = rect.radius.max(0.0).min(hw.min(hh));
+            // Clamp the stroke to the half-extent; a wider request just
+            // fills the rect (the inner edge collapses past center).
+            let bw = rect.border_width.max(0.0).min(hw.min(hh));
             let half = [hw, hh];
 
             vertices.push(Vertex {
@@ -1050,6 +1070,7 @@ impl Renderer {
                 local_pos: [-hw, -hh],
                 half_size: half,
                 radius: r,
+                border_width: bw,
             });
             vertices.push(Vertex {
                 position: [x1, y0],
@@ -1057,6 +1078,7 @@ impl Renderer {
                 local_pos: [hw, -hh],
                 half_size: half,
                 radius: r,
+                border_width: bw,
             });
             vertices.push(Vertex {
                 position: [x1, y1],
@@ -1064,6 +1086,7 @@ impl Renderer {
                 local_pos: [hw, hh],
                 half_size: half,
                 radius: r,
+                border_width: bw,
             });
             vertices.push(Vertex {
                 position: [x0, y1],
@@ -1071,6 +1094,7 @@ impl Renderer {
                 local_pos: [-hw, hh],
                 half_size: half,
                 radius: r,
+                border_width: bw,
             });
 
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -1307,6 +1331,7 @@ struct VertexInput {
     @location(2) local_pos: vec2<f32>,
     @location(3) half_size: vec2<f32>,
     @location(4) radius: f32,
+    @location(5) border_width: f32,
 };
 
 struct VertexOutput {
@@ -1315,6 +1340,7 @@ struct VertexOutput {
     @location(1) local_pos: vec2<f32>,
     @location(2) @interpolate(flat) half_size: vec2<f32>,
     @location(3) @interpolate(flat) radius: f32,
+    @location(4) @interpolate(flat) border_width: f32,
 };
 
 @vertex
@@ -1325,6 +1351,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.local_pos = in.local_pos;
     out.half_size = in.half_size;
     out.radius = in.radius;
+    out.border_width = in.border_width;
     return out;
 }
 
@@ -1337,13 +1364,25 @@ fn sdf_rounded_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    if (in.radius <= 0.0) {
+    // Fast path: an axis-aligned solid fill needs neither the SDF nor a
+    // stroke band. A sharp-cornered *border* (radius 0, border > 0) still
+    // takes the SDF path below so its outline gets antialiased edges.
+    if (in.radius <= 0.0 && in.border_width <= 0.0) {
         return in.color;
     }
     let d = sdf_rounded_rect(in.local_pos, in.half_size, in.radius);
-    // Antialiased edge: 1 px transition. clamp(0.5 - d) gives full coverage
-    // for d <= -0.5, full transparency for d >= 0.5, smooth in between.
-    let alpha = clamp(0.5 - d, 0.0, 1.0);
+    // Antialiased outer edge: 1 px transition. clamp(0.5 - d) gives full
+    // coverage for d <= -0.5, full transparency for d >= 0.5, smooth in
+    // between.
+    var alpha = clamp(0.5 - d, 0.0, 1.0);
+    // Stroke: subtract the inner fill (the boundary shifted inward by
+    // border_width) so only the band between the outer edge and that
+    // inner edge survives — a concentric outline that rounds with the
+    // corner radius for free.
+    if (in.border_width > 0.0) {
+        let inner = clamp(0.5 - (d + in.border_width), 0.0, 1.0);
+        alpha = alpha - inner;
+    }
     return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }
 "#;

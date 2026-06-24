@@ -352,9 +352,9 @@ impl Widget for Dropdown {
             }
         }
 
-        if self.focused {
+        if self.focused && ctx.focus_visible() {
             let override_color = self.focus_ring_color.as_ref().map(|c| c.get());
-            ctx.paint_focus_ring(layout, override_color);
+            ctx.paint_focus_ring(layout, override_color, self.radius);
         }
     }
 

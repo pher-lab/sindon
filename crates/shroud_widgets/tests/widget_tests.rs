@@ -4629,9 +4629,10 @@ fn tab_order_includes_button_and_checkbox() {
 #[test]
 fn focus_ring_appears_when_button_focused_with_theme_color() {
     // Two paint snapshots — once unfocused, once focused — and the diff
-    // must be exactly 4 rects in the theme's focus ring color (top, bottom,
-    // left, right strokes). Button has no other paint that varies with
-    // focus, so the +4 delta is a tight assertion.
+    // must be exactly one rect in the theme's focus ring color: the ring
+    // is a single stroked (border_width > 0) rect now, not four edge fills.
+    // Button has no other paint that varies with focus, so the +1 delta is
+    // a tight assertion.
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(200.0).height(60.0));
     let btn = tree.add_child(root, Button::new("Go"));
@@ -4648,15 +4649,19 @@ fn focus_ring_appears_when_button_focused_with_theme_color() {
 
     assert_eq!(
         focused.rects.len() - baseline,
-        4,
-        "focused Button must add exactly 4 ring rects"
+        1,
+        "focused Button must add exactly one ring rect"
     );
 
     let ring = Theme::default().focus.ring_color;
-    let ring_rect_count = focused.rects.iter().filter(|r| r.color == ring).count();
-    assert_eq!(
-        ring_rect_count, 4,
-        "all 4 added rects should use theme.focus.ring_color"
+    let ring_rect = focused
+        .rects
+        .iter()
+        .find(|r| r.color == ring)
+        .expect("ring rect present");
+    assert!(
+        ring_rect.border_width > 0.0,
+        "the ring rect must be a stroke, not a fill"
     );
 }
 
@@ -4695,15 +4700,15 @@ fn focus_ring_color_override_takes_precedence() {
     tree.paint(&mut ctx);
 
     let n = ctx.rects.iter().filter(|r| r.color == custom).count();
-    assert_eq!(n, 4, "all 4 ring rects should use the override color");
+    assert_eq!(n, 1, "the single ring rect should use the override color");
 }
 
 #[test]
 fn focus_ring_sits_outside_widget_rect() {
-    // Geometry contract: with offset=2 and width=2 (defaults), the ring's
-    // outer edge sits 4px beyond each widget edge. Probes via the top
-    // stroke — it has the smallest y of the four ring rects, and its
-    // y-coord must equal widget_y - (offset + width).
+    // Geometry contract: with offset=2 and width=2 (defaults), the single
+    // ring rect's outer edge sits 4px (offset + width) beyond each widget
+    // edge. Its origin must be widget_origin - (offset + width) and its
+    // size grown by twice that on each axis.
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(200.0).height(80.0));
     let btn = tree.add_child(root, Button::new("X"));
@@ -4721,23 +4726,29 @@ fn focus_ring_sits_outside_widget_rect() {
         .iter()
         .filter(|r| r.color == theme.focus.ring_color)
         .collect();
-    assert_eq!(ring_rects.len(), 4);
+    assert_eq!(ring_rects.len(), 1);
 
-    let top = ring_rects
-        .iter()
-        .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
-        .unwrap();
-    let expected = widget_rect.origin.y - (theme.focus.ring_offset + theme.focus.ring_width);
+    let ring = ring_rects[0];
+    let off = theme.focus.ring_offset + theme.focus.ring_width;
     assert!(
-        (top.y - expected).abs() < 0.01,
-        "top stroke y={} should equal widget_y - (offset + width) = {expected}",
-        top.y
+        (ring.x - (widget_rect.origin.x - off)).abs() < 0.01
+            && (ring.y - (widget_rect.origin.y - off)).abs() < 0.01,
+        "ring origin should sit (offset + width) outside the widget"
+    );
+    assert!(
+        (ring.width - (widget_rect.size.width + 2.0 * off)).abs() < 0.01
+            && (ring.height - (widget_rect.size.height + 2.0 * off)).abs() < 0.01,
+        "ring should be grown by (offset + width) on every side"
+    );
+    assert!(
+        (ring.border_width - theme.focus.ring_width).abs() < 0.01,
+        "ring stroke width should equal theme.focus.ring_width"
     );
 }
 
 #[test]
 fn focus_ring_paints_for_input() {
-    // Smoke test: focusing an Input emits 4 ring rects. Catches a
+    // Smoke test: focusing an Input emits its ring rect. Catches a
     // regression where someone removes the paint_focus_ring call from
     // Input's paint method specifically.
     let mut tree = WidgetTree::new();
@@ -4752,7 +4763,7 @@ fn focus_ring_paints_for_input() {
 
     let ring = Theme::default().focus.ring_color;
     let n = ctx.rects.iter().filter(|r| r.color == ring).count();
-    assert_eq!(n, 4, "Input focus ring should render 4 rects");
+    assert_eq!(n, 1, "Input focus ring should render one stroked rect");
 }
 
 #[test]
@@ -4769,7 +4780,108 @@ fn focus_ring_paints_for_checkbox() {
 
     let ring = Theme::default().focus.ring_color;
     let n = ctx.rects.iter().filter(|r| r.color == ring).count();
-    assert_eq!(n, 4);
+    assert_eq!(n, 1);
+}
+
+// ── FW-8: :focus-visible (ring suppressed for pointer focus) ──────
+
+fn ring_count(ctx: &PaintContext) -> usize {
+    let ring = Theme::default().focus.ring_color;
+    ctx.rects.iter().filter(|r| r.color == ring).count()
+}
+
+#[test]
+fn pointer_focus_suppresses_ring() {
+    // Clicking a focusable widget focuses it (so handlers see `focused`)
+    // but must NOT paint a ring — the :focus-visible heuristic. A ring on
+    // every click was the FW-8 dogfood complaint.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let btn = tree.add_child(root, Button::new("Go"));
+    tree.compute_layout(200.0, 60.0);
+    let r = tree.layout_rect(btn);
+
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(
+                r.origin.x + r.size.width / 2.0,
+                r.origin.y + r.size.height / 2.0,
+            ),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+
+    assert_eq!(tree.focused(), Some(btn), "click should focus the button");
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(ring_count(&ctx), 0, "pointer focus must not paint a ring");
+}
+
+#[test]
+fn keyboard_focus_shows_ring() {
+    // Tab moves focus via the keyboard, which the :focus-visible heuristic
+    // treats as ring-worthy so keyboard-only users can see where focus is.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let btn = tree.add_child(root, Button::new("Go"));
+    tree.compute_layout(200.0, 60.0);
+
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Tab),
+        },
+        &mut ev,
+    );
+
+    assert_eq!(tree.focused(), Some(btn), "Tab should focus the button");
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(ring_count(&ctx), 1, "keyboard focus should paint the ring");
+}
+
+#[test]
+fn clicking_keyboard_focused_widget_drops_its_ring() {
+    // Tab to a widget (ring shows), then click the same widget: the ring
+    // must vanish even though focus did not move. The visible flag is
+    // refreshed from the pointer reason ahead of the no-op focus return.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let btn = tree.add_child(root, Button::new("Go"));
+    tree.compute_layout(200.0, 60.0);
+    let r = tree.layout_rect(btn);
+
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Tab),
+        },
+        &mut ev,
+    );
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(ring_count(&ctx), 1, "Tab focus shows the ring");
+
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(
+                r.origin.x + r.size.width / 2.0,
+                r.origin.y + r.size.height / 2.0,
+            ),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    assert_eq!(tree.focused(), Some(btn), "focus stays on the button");
+    let mut ctx2 = PaintContext::default();
+    tree.paint(&mut ctx2);
+    assert_eq!(
+        ring_count(&ctx2),
+        0,
+        "clicking the already-focused widget drops the ring"
+    );
 }
 
 // ── Knot gap 3: focus_initially + EventContext::focus ─────────────

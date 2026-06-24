@@ -70,6 +70,19 @@ pub struct PaintContext {
     /// into a `set_ime_allowed(bool)` push after paint with the same
     /// dedup discipline used for [`ime_cursor_area`](Self::ime_cursor_area).
     suppress_ime: bool,
+    /// Whether the currently focused widget should paint a focus ring this
+    /// frame (the `:focus-visible` heuristic).
+    ///
+    /// Set once per frame by [`WidgetTree::paint`](crate::tree::WidgetTree::paint)
+    /// from the tree's focus state: `true` when focus was last moved by the
+    /// keyboard or programmatically, `false` when it followed a pointer
+    /// press. A focused widget gates its `paint_focus_ring` call on this so
+    /// a click doesn't leave a ring the user reads as noise. Only one widget
+    /// is focused at a time, so a single tree-wide flag is unambiguous.
+    ///
+    /// Default `false`; reset to `false` by [`clear`](Self::clear) each frame
+    /// before the tree re-establishes it.
+    focus_visible: bool,
 }
 
 impl PaintContext {
@@ -87,6 +100,7 @@ impl PaintContext {
             layer_starts: Vec::new(),
             ime_cursor_area: None,
             suppress_ime: false,
+            focus_visible: false,
         }
     }
 
@@ -191,6 +205,28 @@ impl PaintContext {
     /// downstream to half of the smaller side, so callers don't need to
     /// validate against the rect's dimensions.
     pub fn fill_rect_rounded(&mut self, rect: Rect, color: Color, radius: f32) {
+        self.push_rect(rect, color, radius, 0.0);
+    }
+
+    /// Draw a `border_width`-thick outline along the inside of `rect`'s
+    /// (optionally rounded) edge, leaving the interior transparent.
+    ///
+    /// A single rect carries the whole stroke — the SDF in the rect
+    /// shader keeps only the band between the outer edge and that edge
+    /// shifted inward by `border_width`, so the corners round with
+    /// `radius` automatically. Used by [`paint_focus_ring`](Self::paint_focus_ring);
+    /// `border_width <= 0.0` degenerates to a solid fill.
+    pub fn stroke_rect_rounded(
+        &mut self,
+        rect: Rect,
+        color: Color,
+        radius: f32,
+        border_width: f32,
+    ) {
+        self.push_rect(rect, color, radius, border_width);
+    }
+
+    fn push_rect(&mut self, rect: Rect, color: Color, radius: f32, border_width: f32) {
         let (ox, oy) = self.current_offset();
         self.rects.push(DrawRect {
             x: rect.origin.x + ox,
@@ -199,6 +235,7 @@ impl PaintContext {
             height: rect.size.height,
             color,
             radius,
+            border_width,
             clip_rect: self.current_clip(),
         });
     }
@@ -270,11 +307,21 @@ impl PaintContext {
     /// Pass `override_color = None` to use `theme.focus.ring_color`, or
     /// `Some(c)` for a per-widget accent.
     ///
-    /// Implemented as four `fill_rect` calls (top / bottom / left / right
-    /// strokes) so the active clip and offset stacks are honored — a
-    /// focused widget that has scrolled partly out of a `ScrollView` has
-    /// its ring clipped consistently with the widget itself.
-    pub fn paint_focus_ring(&mut self, widget_rect: Rect, override_color: Option<Color>) {
+    /// `widget_radius` is the widget's own corner radius (`0.0` for a
+    /// square widget); the ring's outer corner is grown to
+    /// `widget_radius + offset + width` so a rounded widget gets a
+    /// concentric rounded ring and a square one keeps square corners.
+    ///
+    /// Emitted as a single stroked rect so the active clip and offset
+    /// stacks are honored — a focused widget that has scrolled partly out
+    /// of a `ScrollView` has its ring clipped consistently with the widget
+    /// itself.
+    pub fn paint_focus_ring(
+        &mut self,
+        widget_rect: Rect,
+        override_color: Option<Color>,
+        widget_radius: f32,
+    ) {
         let style = self.theme.focus;
         let color = override_color.unwrap_or(style.ring_color);
         let w = style.ring_width;
@@ -283,10 +330,15 @@ impl PaintContext {
         let oy = widget_rect.origin.y - outer_off;
         let width = widget_rect.size.width + 2.0 * outer_off;
         let height = widget_rect.size.height + 2.0 * outer_off;
-        self.fill_rect(Rect::new(ox, oy, width, w), color);
-        self.fill_rect(Rect::new(ox, oy + height - w, width, w), color);
-        self.fill_rect(Rect::new(ox, oy, w, height), color);
-        self.fill_rect(Rect::new(ox + width - w, oy, w, height), color);
+        // Keep the ring concentric: grow the radius by the gap between the
+        // widget edge and the ring's outer edge. A square widget (radius 0)
+        // stays square.
+        let outer_radius = if widget_radius > 0.0 {
+            widget_radius + outer_off
+        } else {
+            0.0
+        };
+        self.stroke_rect_rounded(Rect::new(ox, oy, width, height), color, outer_radius, w);
     }
 
     /// Record where the focused text widget's caret currently sits, in
@@ -344,6 +396,21 @@ impl PaintContext {
         self.suppress_ime
     }
 
+    /// Set whether the focused widget should paint its focus ring this
+    /// frame. Called once per frame by the tree's paint pass from its
+    /// focus state; widget code reads it via [`focus_visible`](Self::focus_visible).
+    pub fn set_focus_visible(&mut self, visible: bool) {
+        self.focus_visible = visible;
+    }
+
+    /// Whether the focused widget should paint a focus ring (the
+    /// `:focus-visible` heuristic). A focused widget gates its
+    /// [`paint_focus_ring`](Self::paint_focus_ring) call on this so
+    /// click-to-focus doesn't show a ring while Tab focus does.
+    pub fn focus_visible(&self) -> bool {
+        self.focus_visible
+    }
+
     /// Clear all accumulated commands.
     pub fn clear(&mut self) {
         self.rects.clear();
@@ -354,6 +421,7 @@ impl PaintContext {
         self.rotation_stack.clear();
         self.ime_cursor_area = None;
         self.suppress_ime = false;
+        self.focus_visible = false;
     }
 }
 

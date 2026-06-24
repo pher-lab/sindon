@@ -1907,8 +1907,8 @@ impl Widget for Input {
             );
         }
 
-        if self.focused {
-            ctx.paint_focus_ring(layout, self.focus_ring_color);
+        if self.focused && ctx.focus_visible() {
+            ctx.paint_focus_ring(layout, self.focus_ring_color, 0.0);
         }
     }
 

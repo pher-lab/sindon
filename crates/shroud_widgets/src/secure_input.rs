@@ -374,9 +374,14 @@ impl Widget for SecureInput {
             // keystrokes bypass the composition window an IME engine
             // (or a malicious replacement IME) could observe. No
             // `set_ime_cursor_area` call is needed here — there is no
-            // candidate window to anchor.
+            // candidate window to anchor. This is a security measure and
+            // stays unconditional on focus, independent of the ring below.
             ctx.suppress_ime();
-            ctx.paint_focus_ring(layout, self.focus_ring_color);
+            // Ring follows the `:focus-visible` heuristic — square, since
+            // SecureInput draws no corner radius.
+            if ctx.focus_visible() {
+                ctx.paint_focus_ring(layout, self.focus_ring_color, 0.0);
+            }
         }
     }
 
