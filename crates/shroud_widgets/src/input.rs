@@ -249,6 +249,19 @@ fn classify(c: char) -> CharClass {
     }
 }
 
+/// Granularity a pending pointer selection expands to, resolved against the
+/// shaped text at paint. A single press plants a bare caret; a double-click
+/// grabs the word under it ([`word_bounds`]); a triple-click grabs the whole
+/// logical line ([`line_bounds`]). Tracked as a unit (not a bool) because the
+/// precise hit-test — and the expansion — are deferred to paint, where the text
+/// engine is in hand (see [`Input::pending_hit`]).
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum SelectUnit {
+    Caret,
+    Word,
+    Line,
+}
+
 /// Expand a caret `offset` to the byte range of the "word" under it, used by
 /// double-click selection. The reference class is the character to the right of
 /// the caret, except when that is whitespace (or we're at end-of-text): then we
@@ -296,6 +309,21 @@ fn word_bounds(s: &str, offset: usize) -> (usize, usize) {
     (lo, hi)
 }
 
+/// Expand a caret `offset` to the byte range of the logical line under it, used
+/// by triple-click selection. A "logical line" is the run between hard line
+/// breaks (`\n`); the returned range covers the line's *content* with the
+/// trailing newline excluded, so replacing the selection edits the line in
+/// place rather than swallowing the break and merging it with the next. The
+/// bounds land on `\n` (or the buffer edges), which are always char boundaries,
+/// so multibyte text is safe. `offset` is clamped and treated as a char
+/// boundary — the same contract as [`word_bounds`].
+fn line_bounds(s: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(s.len());
+    let lo = s[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let hi = s[offset..].find('\n').map_or(s.len(), |i| offset + i);
+    (lo, hi)
+}
+
 /// Clamp `v` to the inclusive `[min, max]` range when either bound is set.
 /// `None` bounds are unbounded on that side. Used by numeric-mode editing.
 fn clamp_opt(v: i64, min: Option<i64>, max: Option<i64>) -> i64 {
@@ -337,14 +365,16 @@ pub struct Input {
     /// cleared on MouseUp / FocusLost. While set, MouseMove extends the
     /// selection's active end.
     selecting: Cell<bool>,
-    /// Timestamp + position of the last primary press, used to recognize a
-    /// double-click. A second press within [`DOUBLE_CLICK_MAX`] and
-    /// [`DOUBLE_CLICK_SLOP`] of the first promotes the pending hit to a word
-    /// select. Reset after a double fires so a triple-click doesn't chain.
-    last_click: Cell<Option<(Instant, Point)>>,
-    /// Set on a recognized double-click; consumed at paint time to expand the
-    /// resolved caret offset to the surrounding word via [`word_bounds`].
-    pending_word_select: Cell<bool>,
+    /// Timestamp, position, and resulting count of the last primary press, used
+    /// to chain a multi-click. A press within [`DOUBLE_CLICK_MAX`] and
+    /// [`DOUBLE_CLICK_SLOP`] of the previous one advances the count (1 → 2 → 3,
+    /// then cycles back to 1), promoting the pending hit to a word (2) or whole
+    /// line (3) select; a press that lands too late or too far starts fresh at 1.
+    last_click: Cell<Option<(Instant, Point, u8)>>,
+    /// Granularity the next deferred hit resolves to, set on press from the
+    /// multi-click count and consumed at paint to expand the caret offset to the
+    /// surrounding word ([`word_bounds`]) or logical line ([`line_bounds`]).
+    pending_select: Cell<SelectUnit>,
     /// Optional external binding. When `Some`, every paint and event
     /// rebases `value` from the signal if they differ, and every edit
     /// writes the fresh buffer back.
@@ -513,9 +543,9 @@ impl Input {
             cursor: Cell::new(0),
             selection_anchor: Cell::new(None),
             pending_hit: Cell::new(None),
+            pending_select: Cell::new(SelectUnit::Caret),
             selecting: Cell::new(false),
             last_click: Cell::new(None),
-            pending_word_select: Cell::new(false),
             source: None,
             cursor_source: None,
             selection_source: None,
@@ -1564,21 +1594,28 @@ impl Widget for Input {
                     wrap_width,
                 )
             };
-            if self.pending_word_select.take() {
-                // Double-click: select the whole word under the resolved caret.
-                let (lo, hi) = {
-                    let v = self.value.borrow();
-                    word_bounds(&v, offset)
-                };
-                self.selection_anchor.set(Some(lo));
-                self.cursor.set(hi);
-            } else {
-                if extend {
-                    self.ensure_anchor();
-                } else {
-                    self.selection_anchor.set(None);
+            match self.pending_select.replace(SelectUnit::Caret) {
+                // Double- / triple-click: expand the resolved caret to the
+                // surrounding word or whole logical line.
+                unit @ (SelectUnit::Word | SelectUnit::Line) => {
+                    let (lo, hi) = {
+                        let v = self.value.borrow();
+                        match unit {
+                            SelectUnit::Word => word_bounds(&v, offset),
+                            _ => line_bounds(&v, offset),
+                        }
+                    };
+                    self.selection_anchor.set(Some(lo));
+                    self.cursor.set(hi);
                 }
-                self.cursor.set(offset);
+                SelectUnit::Caret => {
+                    if extend {
+                        self.ensure_anchor();
+                    } else {
+                        self.selection_anchor.set(None);
+                    }
+                    self.cursor.set(offset);
+                }
             }
             self.desired_x.set(None);
             // A click / drag moves the caret outside the edit path, so end any
@@ -1926,23 +1963,29 @@ impl Widget for Input {
                 // follows Shift, so Shift+click stretches the selection from
                 // the current caret to the click point.
                 if *button == MouseButton::Left {
-                    // Recognize a double-click (two quick presses at the same
-                    // spot) and promote it to a word select, resolved at paint.
+                    // Chain quick presses at the same spot into a multi-click:
+                    // 1 = caret, 2 = word, 3 = whole line, then cycle back to 1.
+                    // The hit-test and the word / line expansion are resolved at
+                    // paint (no text engine here).
                     let now = Instant::now();
-                    let is_double = self.last_click.get().is_some_and(|(t, p)| {
-                        now.duration_since(t) <= DOUBLE_CLICK_MAX
-                            && (p.x - position.x).abs() <= DOUBLE_CLICK_SLOP
-                            && (p.y - position.y).abs() <= DOUBLE_CLICK_SLOP
-                    });
-                    // Reset the chain after a double so a third press starts
-                    // fresh rather than registering as another double.
-                    self.last_click.set(if is_double {
-                        None
-                    } else {
-                        Some((now, *position))
-                    });
+                    let count = match self.last_click.get() {
+                        Some((t, p, c))
+                            if now.duration_since(t) <= DOUBLE_CLICK_MAX
+                                && (p.x - position.x).abs() <= DOUBLE_CLICK_SLOP
+                                && (p.y - position.y).abs() <= DOUBLE_CLICK_SLOP =>
+                        {
+                            c % 3 + 1
+                        }
+                        _ => 1,
+                    };
+                    self.last_click.set(Some((now, *position, count)));
+                    let unit = match count {
+                        2 => SelectUnit::Word,
+                        3 => SelectUnit::Line,
+                        _ => SelectUnit::Caret,
+                    };
                     self.pending_hit.set(Some((*position, ctx.modifiers.shift)));
-                    self.pending_word_select.set(is_double);
+                    self.pending_select.set(unit);
                     self.selecting.set(true);
                     self.desired_x.set(None);
                     // Capture the pointer so the drag keeps being delivered
@@ -2013,7 +2056,7 @@ impl Widget for Input {
                 // screen after the field is no longer focused.
                 self.preedit.clear();
                 self.preedit_cursor = None;
-                self.pending_word_select.set(false);
+                self.pending_select.set(SelectUnit::Caret);
                 self.desired_x.set(None);
                 if self.numeric {
                     self.canonicalize_numeric_buffer();
@@ -2380,7 +2423,7 @@ impl Widget for Input {
 
 #[cfg(test)]
 mod tests {
-    use super::word_bounds;
+    use super::{line_bounds, word_bounds};
 
     #[test]
     fn word_bounds_grabs_word_from_middle() {
@@ -2436,5 +2479,43 @@ mod tests {
     fn word_bounds_underscore_is_word_char() {
         // Identifiers with underscores select as one word.
         assert_eq!(word_bounds("foo_bar baz", 4), (0, 7));
+    }
+
+    #[test]
+    fn line_bounds_grabs_middle_line_excluding_breaks() {
+        // Triple-click anywhere on "bar" selects "bar" — no surrounding `\n`.
+        let s = "foo\nbar\nbaz";
+        assert_eq!(line_bounds(s, 4), (4, 7)); // start of "bar"
+        assert_eq!(line_bounds(s, 6), (4, 7)); // inside "bar"
+        assert_eq!(line_bounds(s, 7), (4, 7)); // end of "bar", on the `\n`
+    }
+
+    #[test]
+    fn line_bounds_first_and_last_line() {
+        let s = "foo\nbar\nbaz";
+        assert_eq!(line_bounds(s, 1), (0, 3)); // first line
+        assert_eq!(line_bounds(s, 9), (8, 11)); // last line
+        assert_eq!(line_bounds(s, 11), (8, 11)); // end of text
+    }
+
+    #[test]
+    fn line_bounds_empty_line_is_caret() {
+        // A blank line between two breaks collapses to a zero-width range at it.
+        let s = "foo\n\nbar";
+        assert_eq!(line_bounds(s, 4), (4, 4));
+    }
+
+    #[test]
+    fn line_bounds_single_line_is_whole_buffer() {
+        assert_eq!(line_bounds("hello world", 5), (0, 11));
+        assert_eq!(line_bounds("", 0), (0, 0));
+    }
+
+    #[test]
+    fn line_bounds_respects_char_boundaries() {
+        // Multibyte content: bounds land on `\n` / buffer edges (char starts).
+        let s = "あい\nうえ"; // あい = bytes 0..6, \n = 6, うえ = 7..13
+        assert_eq!(line_bounds(s, 3), (0, 6)); // inside first line
+        assert_eq!(line_bounds(s, 10), (7, 13)); // inside second line
     }
 }
