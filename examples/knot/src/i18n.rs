@@ -187,15 +187,8 @@ pub enum Key {
     ErrExportPrefix,
 
     // --- Editor formatting toolbar ---
-    // Button labels for the bar above the body. The Markdown each button
-    // inserts (`**`, `# `, `[](https://)`, …) is fixed syntax, not localized.
-    ToolbarHeading,
-    ToolbarBold,
-    ToolbarItalic,
-    ToolbarCode,
-    ToolbarQuote,
-    ToolbarList,
-    ToolbarLink,
+    // The bar above the body now uses icon-font glyphs (see `crate::icons`),
+    // not localized text labels, so there are no toolbar `Key`s here.
 
     // --- Editor find / replace (B-1 ④) ---
     // The bar toggled with Ctrl+H. Prev/Next/Close use fixed glyph labels
@@ -424,15 +417,6 @@ impl Key {
             ErrImageStore => "Couldn't store that image.",
             ErrExportPrefix => "Export failed: ",
 
-            // Editor formatting toolbar
-            ToolbarHeading => "Heading",
-            ToolbarBold => "Bold",
-            ToolbarItalic => "Italic",
-            ToolbarCode => "Code",
-            ToolbarQuote => "Quote",
-            ToolbarList => "List",
-            ToolbarLink => "Link",
-
             // Editor find / replace
             FindReplaceFindPlaceholder => "Find",
             FindReplaceReplacePlaceholder => "Replace with",
@@ -658,15 +642,6 @@ impl Key {
             ErrImageUnsupported => "対応していない画像形式です（PNG / JPEG のみ）。",
             ErrImageStore => "その画像を保存できませんでした。",
             ErrExportPrefix => "エクスポートに失敗しました: ",
-
-            // Editor formatting toolbar
-            ToolbarHeading => "見出し",
-            ToolbarBold => "太字",
-            ToolbarItalic => "斜体",
-            ToolbarCode => "コード",
-            ToolbarQuote => "引用",
-            ToolbarList => "リスト",
-            ToolbarLink => "リンク",
 
             // Editor find / replace
             FindReplaceFindPlaceholder => "検索",

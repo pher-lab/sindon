@@ -37,9 +37,9 @@ use std::rc::Rc;
 
 use shroud::reactive::Signal;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, EventContext};
+use shroud::widgets::{Container, EventContext};
 
-use crate::i18n::{self, Key};
+use crate::icons::{self, Icon};
 use crate::state::AppState;
 
 /// Build the toolbar row into `parent` (the editor's column). `body_sig` and
@@ -60,22 +60,23 @@ pub fn build(
     // wraps the buttons onto a second row instead of overflowing.
     let row = tree.add_child(parent, Container::row().flex_wrap(true).gap(6.0));
 
-    for (label, fmt) in [
-        (Key::ToolbarHeading, Fmt::Heading),
-        (Key::ToolbarBold, Fmt::Bold),
-        (Key::ToolbarItalic, Fmt::Italic),
-        (Key::ToolbarCode, Fmt::Code),
-        (Key::ToolbarQuote, Fmt::Quote),
-        (Key::ToolbarList, Fmt::List),
-        (Key::ToolbarLink, Fmt::Link),
+    for (icon, fmt) in [
+        (Icon::Heading, Fmt::Heading),
+        (Icon::Bold, Fmt::Bold),
+        (Icon::Italic, Fmt::Italic),
+        (Icon::Code, Fmt::Code),
+        (Icon::Quote, Fmt::Quote),
+        (Icon::List, Fmt::List),
+        (Icon::Link, Fmt::Link),
     ] {
         let state = Rc::clone(&state);
         let body_idx = Rc::clone(&body_idx);
         tree.add_child(
             row,
-            Button::reactive_label(move || i18n::tr(label).to_string())
+            // Icon glyphs from the bundled font (FW-12) — language-independent,
+            // replacing the former "Bold" / "見出し" text labels.
+            icons::icon_button(icon, 18.0)
                 .radius(6.0)
-                .font_size(13.0)
                 .on_click(move |ctx| {
                     apply(
                         &state,

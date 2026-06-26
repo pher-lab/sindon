@@ -8,6 +8,7 @@ use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Lerp, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Animated, Easing, Reactive};
+use shroud_text::{TextAttrs, TextFamily};
 
 /// Default hover color-transition duration — a short fade (120 ms) so the
 /// button eases between its normal and hover backgrounds instead of
@@ -29,6 +30,11 @@ type ClickHandler = Box<dyn FnMut(&mut EventContext)>;
 pub struct Button {
     label: Reactive<String>,
     font_size: Option<f32>,
+    /// Font family / weight / style the label shapes with. Defaults to the
+    /// same sans-serif as plain text, so existing buttons are unaffected; the
+    /// one common override is `.family(Named(..))` to draw a glyph from a
+    /// bundled icon font (the label is then a single icon codepoint).
+    attrs: TextAttrs,
     on_click: Option<ClickHandler>,
     // Visual state
     /// Progress of the normal→hover background fade, lazily created on the
@@ -63,6 +69,7 @@ impl Button {
         Self {
             label: Reactive::Static(label.into()),
             font_size: None,
+            attrs: TextAttrs::default(),
             on_click: None,
             hover_anim: None,
             hover_transition: DEFAULT_HOVER_TRANSITION,
@@ -88,6 +95,7 @@ impl Button {
         Self {
             label: Reactive::derive(f),
             font_size: None,
+            attrs: TextAttrs::default(),
             on_click: None,
             hover_anim: None,
             hover_transition: DEFAULT_HOVER_TRANSITION,
@@ -118,6 +126,17 @@ impl Button {
     /// Set font size.
     pub fn font_size(mut self, px: f32) -> Self {
         self.font_size = Some(px);
+        self
+    }
+
+    /// Set the font family the label shapes with. Defaults to sans-serif.
+    ///
+    /// The primary use is an **icon button**: pass `TextFamily::Named(..)` for a
+    /// font registered via `App::font` and make the label a single icon
+    /// codepoint, so the glyph renders through the same shaping / tint path as
+    /// any label (and recolors with `text_color`).
+    pub fn family(mut self, family: TextFamily) -> Self {
+        self.attrs.family = family;
         self
     }
 
@@ -255,13 +274,18 @@ impl Widget for Button {
         // Taffy's flex algorithm don't collapse the label to its min-content
         // shape. Only wrap when the natural width actually exceeds the
         // available width (e.g., long label in a narrow container).
-        let natural = ctx
-            .text_engine
-            .shape_text(&label, font_size, line_height, None);
+        let natural =
+            ctx.text_engine
+                .shape_text_attrs(&label, font_size, line_height, None, &self.attrs);
         let shaped = if let Some(aw) = available_width {
             if natural.width > aw {
-                ctx.text_engine
-                    .shape_text(&label, font_size, line_height, Some(aw))
+                ctx.text_engine.shape_text_attrs(
+                    &label,
+                    font_size,
+                    line_height,
+                    Some(aw),
+                    &self.attrs,
+                )
             } else {
                 natural
             }
@@ -325,11 +349,12 @@ impl Widget for Button {
         // Label text (centered within the button)
         let label = self.label.get();
         if !label.is_empty() {
-            let shaped = ctx.text_engine.shape_text(
+            let shaped = ctx.text_engine.shape_text_attrs(
                 &label,
                 font_size,
                 font_size * 1.2,
                 Some(layout.size.width),
+                &self.attrs,
             );
 
             // Center the text block within the button

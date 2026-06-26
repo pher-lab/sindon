@@ -64,6 +64,18 @@
   対応: rect SDF シェーダに **stroke(border)モード**追加([renderer.rs](../crates/shroud_render/src/renderer.rs) `DrawRect.border_width`)。outer SDF から `d+border_width` の inner fill を引いて両エッジ AA 付きの同心アウトラインを1枚 rect で描く(filled fast-path は `radius<=0 && border<=0` のときだけ)。`paint_focus_ring` を 4 本 sharp rect → **1枚の `stroke_rect_rounded`** に。widget radius を受け取り `radius + offset + width` で同心円化(四角 widget は四角維持)。Button/Dropdown=自前 radius、Input/Checkbox/SecureInput=0。既存 ring テスト6件を「4 rect → 1 stroke rect + border_width 検証」へ更新。`shroud_render`+`shroud_widgets` 全緑、workspace(knot 除く)ビルド警告ゼロ、fmt/clippy クリーン。**実機 OK**(2026-06-24 ユーザー確認: クリックで ring 出ない / Tab で角丸 ring、きれいに動作)。
 - **FW-10 [fw] P3 — triple-click で行選択**
   現状: double-click 単語選択は実装済(`word_bounds`/`DOUBLE_CLICK_MAX`)だが、`last_click` は double 発火後に reset され **triple は連鎖しない**設計(input.rs 338 付近)。対応: click count を追い、triple = 視覚行/段落の選択に拡張。**FW-11 の現実的 fallback も兼ねる**。
+- **✅ FW-12 [fw] P2 💡 — アイコン描画手段が無い(アイコンフォント / SVG)= 完了 (2026-06-27, 実機 OK)**
+  調査で確定した現状: レンダラのプリミティブは `DrawRect`・`DrawGlyph`・`DrawImage`(RGBA8) の3種のみでベクター/SVG 経路が無く、アプリ同梱フォントをロードする一級 API も無かった(`font_system().db_mut().load_font_data()` の escape hatch のみ)。3案(① mono PNG を DrawImage / ② アイコンフォント同梱 API / ③ SVG ラスタ)から、既存 glyph atlas/tint/shape 経路を再利用できる **② を採用**(framework 追加が小さく zeroize 非干渉)。設計判断: フォント本体は **app が OSS フォントを同梱**(framework は load API のみ)、アイコンの **名前→コードポイント対応は app 側 helper**。
+  対応(framework・小):
+  - `TextEngine::load_font_data(&[u8]) -> Vec<String>`([engine.rs](../crates/shroud_text/src/engine.rs)) — fontdb へ登録 + 使えるようになった family 名を返す(呼び手が `Named` を組める DX)。登録後 shape cache を drop。
+  - `App::font(impl Into<Cow<'static,[u8]>>)`([event_loop.rs](../crates/shroud_app/src/event_loop.rs)) — `resumed` の最初の paint 前に登録(`fonts_loaded` ガードで suspend/resume の二重登録回避)。
+  - `Button::family(TextFamily)`([button.rs](../crates/shroud_widgets/src/button.rs)) — ラベルをアイコンファミリで shape(`shape_text`→`shape_text_attrs`、default attrs は従来と等価 ∴ 既存ボタン無影響)。アイコンボタンの最小フック。
+  対応(Knot):
+  - `assets/knot-icons.ttf` — MDI webfont(`@mdi/font@7.4.47`)を `pyftsubset` で **15グリフにサブセット(1.3MB→2.5KB)**、Apache 2.0([ICON-FONT-LICENSE.txt](../examples/knot/assets/ICON-FONT-LICENSE.txt) 同梱)。family 名 `Material Design Icons`。
+  - [`icons.rs`](../examples/knot/src/icons.rs) — `Icon` enum→コードポイント + `icon_button()` helper。`main.rs` で `App::font(icons::FONT)`。
+  - [`toolbar.rs`](../examples/knot/src/toolbar.rs) のフォーマットボタン7個を `Heading/Bold/見出し/太字…` テキスト → アイコングリフに置換。不要になった `Toolbar*` i18n キー削除。
+  テスト/検証: shroud_text に load+名前解決テスト2件(fixture = サブセット font)、framework 全テスト回帰なし、fmt/clippy(framework+knot)新規警告ゼロ、起動スモーク OK。**実機 OK**(2026-06-27 ユーザー確認: 表示きれい・視認性 OK・light⇄dark 両方 OK)。
+  - **カラー(COLR)アイコンは未対応のまま様子見**(モノクロ + tint が今回の対象。FW-4 の color atlas 経路に乗せれば多色も出る余地はあるが未着手)。
 
 #### Knot app — UX 磨き
 

@@ -306,6 +306,50 @@ impl TextEngine {
         &mut self.font_system
     }
 
+    /// Register a font from in-memory bytes (TTF / OTF) so its families become
+    /// resolvable by name in [`TextAttrs`](crate::TextAttrs)/`TextFamily::Named`.
+    ///
+    /// Returns the family names that the loaded faces expose, de-duplicated and
+    /// in first-seen order, so the caller can build a `TextFamily::Named(..)`
+    /// without hard-coding the font's internal family string. An empty `Vec`
+    /// means the bytes held no parseable face (bad data) — nothing was added.
+    ///
+    /// This is the first-class entry point for bundling an *icon font*: load a
+    /// monochrome icon `.ttf` once at startup (see `App::font`), then draw an
+    /// icon as a single-glyph `TextWidget` in that family — the glyph flows
+    /// through the same shaping / atlas / tint path as text, so it scales and
+    /// recolors for free (a color/COLR face routes through the color atlas like
+    /// emoji instead). Icons are not secret, so loading one is unrelated to the
+    /// zeroize path; the shape cache stays coherent because we drop it here, so
+    /// any text shaped before this call is re-evaluated against the new font on
+    /// its next paint. Call before the first paint for startup fonts.
+    pub fn load_font_data(&mut self, data: &[u8]) -> Vec<String> {
+        use std::collections::HashSet;
+
+        let before: HashSet<cosmic_text::fontdb::ID> =
+            self.font_system.db().faces().map(|f| f.id).collect();
+        self.font_system.db_mut().load_font_data(data.to_vec());
+
+        let mut names = Vec::new();
+        for face in self.font_system.db().faces() {
+            if before.contains(&face.id) {
+                continue;
+            }
+            if let Some((family, _)) = face.families.first() {
+                if !names.contains(family) {
+                    names.push(family.clone());
+                }
+            }
+        }
+
+        // A newly registered font can change how already-cached text resolves
+        // (e.g. a `Named` family that previously fell back). Drop the cache so
+        // the next paint re-shapes against the current font set. At startup the
+        // cache is empty, so this is free in the common case.
+        self.shape_cache.clear();
+        names
+    }
+
     /// Shape a text string with default attributes (sans-serif, normal weight,
     /// normal style). Equivalent to calling [`shape_text_attrs`](Self::shape_text_attrs)
     /// with `TextAttrs::default()`; retained as the original API used by

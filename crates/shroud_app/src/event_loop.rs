@@ -275,6 +275,12 @@ struct AppConfig {
     /// `Theme` value through the signal repaints with fresh tokens.
     theme: Reactive<Theme>,
     tick_interval: Duration,
+    /// Fonts (TTF / OTF bytes) registered into the text engine once the
+    /// window comes up, before the first paint. The canonical use is bundling
+    /// an icon font via `App::font(include_bytes!(..))`; see
+    /// [`TextEngine::load_font_data`](shroud_text::TextEngine::load_font_data).
+    /// `'static` bytes (an `include_bytes!` slice) cost nothing to carry.
+    fonts: Vec<std::borrow::Cow<'static, [u8]>>,
 }
 
 impl Default for AppConfig {
@@ -301,6 +307,7 @@ impl Default for AppConfig {
             capture_prevention: false,
             theme: Reactive::Static(Theme::default()),
             tick_interval: DEFAULT_TICK_INTERVAL,
+            fonts: Vec::new(),
         }
     }
 }
@@ -366,6 +373,36 @@ impl App {
     /// Defaults to [`Theme::default`] (currently the dark theme).
     pub fn theme(mut self, theme: impl Into<Reactive<Theme>>) -> Self {
         self.config.theme = theme.into();
+        self
+    }
+
+    /// Register a font (TTF / OTF bytes) into the text engine at startup.
+    ///
+    /// The bytes are registered once the window comes up, before the first
+    /// paint, so any widget can reference the font's families by name from the
+    /// very first frame. Call it as many times as you have fonts.
+    ///
+    /// The canonical use is an **icon font**: bundle a monochrome icon `.ttf`
+    /// with `include_bytes!`, then draw an icon as a single-glyph
+    /// `TextWidget::new("\u{e801}").family(TextFamily::Named("My Icons"))` — the
+    /// glyph rides the same shaping / atlas / tint path as text, so it scales
+    /// and recolors like any label. The font's family name(s) are what
+    /// [`TextEngine::load_font_data`](shroud_text::TextEngine::load_font_data)
+    /// reports; check the font (or that return value) for the exact string.
+    ///
+    /// ```no_run
+    /// use shroud_app::App;
+    /// use shroud_widgets::tree::WidgetTree;
+    ///
+    /// // In a real app the bytes come from the binary:
+    /// //   let icons = include_bytes!("../assets/icons.ttf");
+    /// # let icons: &'static [u8] = &[];
+    /// App::new()
+    ///     .font(icons)
+    ///     .run(|_scope| WidgetTree::new());
+    /// ```
+    pub fn font(mut self, data: impl Into<std::borrow::Cow<'static, [u8]>>) -> Self {
+        self.config.fonts.push(data.into());
         self
     }
 
@@ -533,6 +570,7 @@ impl App {
             last_input: Instant::now(),
             last_ime_cursor_area: None,
             last_ime_allowed: None,
+            fonts_loaded: false,
         };
 
         event_loop.run_app(&mut handler).expect("event loop error");
@@ -738,6 +776,10 @@ struct ShroudEventLoop {
     /// push the same `true`. `None` means nothing has been pushed yet;
     /// the first paint always pushes whatever the current focus dictates.
     last_ime_allowed: Option<bool>,
+    /// Whether `config.fonts` have been registered into the text engine yet.
+    /// `resumed` can fire more than once (suspend/resume); without this guard
+    /// each resume would re-register the same faces and bloat the font db.
+    fonts_loaded: bool,
 }
 
 impl ShroudEventLoop {
@@ -891,7 +933,18 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         let window_arc = platform_window.arc();
         let renderer = pollster::block_on(Renderer::new(Arc::clone(&window_arc)));
 
-        let paint_ctx = PaintContext::new(self.config.theme.get());
+        let mut paint_ctx = PaintContext::new(self.config.theme.get());
+
+        // Register bundled fonts (e.g. an icon font) into the text engine
+        // before the first layout/paint, so widgets can resolve their families
+        // by name from frame one. Guarded so a second `resumed` (suspend/resume)
+        // doesn't re-add the same faces.
+        if !self.fonts_loaded {
+            for data in &self.config.fonts {
+                paint_ctx.text_engine.load_font_data(data);
+            }
+            self.fonts_loaded = true;
+        }
 
         self.window = Some(platform_window);
         self.renderer = Some(renderer);

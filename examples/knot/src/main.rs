@@ -26,6 +26,7 @@ mod editor;
 mod find_replace;
 mod highlight;
 mod i18n;
+mod icons;
 mod lock_screen;
 mod notice;
 mod preview;
@@ -64,6 +65,9 @@ fn main() {
     App::new()
         .title("Knot \u{2014} M3")
         .size(1080, 720)
+        // Register the bundled icon font (FW-12) before the first paint, so the
+        // editor toolbar can draw its formatting glyphs. See `icons`.
+        .font(icons::FONT)
         .capture_prevention(true)
         // Theme is derived live from the settings signals + OS appearance,
         // re-evaluated every paint — a settings change repaints the whole
