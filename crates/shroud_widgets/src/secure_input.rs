@@ -314,6 +314,10 @@ impl Widget for SecureInput {
         let max_width = layout.size.width - 16.0;
 
         let value = self.value.borrow();
+        // X of the caret's leading edge. Defaults to the text start, so an
+        // empty field carets at the left padding (just like `Input`); the
+        // masked branch advances it past the rendered dots.
+        let mut caret_x = text_x;
         if value.is_empty() {
             // Show placeholder
             if !self.placeholder.is_empty() {
@@ -356,16 +360,20 @@ impl Widget for SecureInput {
                 }
             }
 
-            // Cursor (simple line when focused)
-            if self.focused {
-                let cursor_x = if shaped.glyphs.is_empty() {
-                    text_x
-                } else {
-                    text_x + shaped.width
-                };
-                let caret = Rect::new(cursor_x, text_y, 2.0, font_size);
-                ctx.fill_rect(caret, text_color);
+            if !shaped.glyphs.is_empty() {
+                caret_x = text_x + shaped.width;
             }
+        }
+
+        // Caret (simple line when focused) — drawn for both the empty and
+        // non-empty cases. With the `:focus-visible` heuristic the ring is
+        // suppressed for pointer-driven focus, so without a caret a
+        // click-focused empty field gives no visual sign it's active. The
+        // caret is the affordance that survives ring suppression (mirrors
+        // `Input`, which carets at the line start when empty).
+        if self.focused {
+            let caret = Rect::new(caret_x, text_y, 2.0, font_size);
+            ctx.fill_rect(caret, text_color);
         }
 
         if self.focused {

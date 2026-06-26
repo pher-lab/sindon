@@ -411,6 +411,54 @@ fn secure_input_focus_ring_paints() {
     );
 }
 
+/// The caret a focused SecureInput draws — a 2px-wide solid fill in the
+/// text color. `None` when no such rect was emitted.
+fn caret_count(ctx: &PaintContext, text_color: Color) -> usize {
+    ctx.rects
+        .iter()
+        .filter(|r| {
+            r.color == text_color && r.border_width == 0.0 && (r.width - 2.0).abs() < f32::EPSILON
+        })
+        .count()
+}
+
+#[test]
+fn focused_empty_secure_input_draws_caret() {
+    // Regression (FW-8 `:focus-visible`): pointer-driven focus suppresses
+    // the ring, and an empty SecureInput renders no masked dots — so
+    // without an unconditional caret a click-focused, empty password field
+    // gives zero sign it's active. The caret is the affordance that
+    // survives ring suppression. Mirrors `Input`, which carets at the line
+    // start when empty.
+    use shroud_core::Theme;
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let idx = tree.add_child(root, SecureInput::new().placeholder("Enter password"));
+    tree.compute_layout(200.0, 60.0);
+
+    let text_color = Theme::default().colors.on_surface;
+
+    // Unfocused: no caret.
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(
+        caret_count(&ctx, text_color),
+        0,
+        "unfocused empty SecureInput must not draw a caret"
+    );
+
+    // Focused (even though empty): caret appears.
+    let mut ev = EventContext::new();
+    tree.focus(Some(idx), &mut ev);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(
+        caret_count(&ctx, text_color),
+        1,
+        "focused empty SecureInput must draw a caret"
+    );
+}
+
 #[test]
 fn secure_text_builder() {
     let _text = SecureText::new(SecureString::new("secret"))
