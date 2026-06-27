@@ -39,8 +39,10 @@ use shroud::reactive::Signal;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Container, EventContext};
 
+use crate::i18n::{self, Key};
 use crate::icons::{self, Icon};
 use crate::state::AppState;
+use crate::tooltip;
 
 /// Build the toolbar row into `parent` (the editor's column). `body_sig` and
 /// `cursor_sig` are the body input's bound text/caret signals; `body_idx` is a
@@ -60,19 +62,23 @@ pub fn build(
     // wraps the buttons onto a second row instead of overflowing.
     let row = tree.add_child(parent, Container::row().flex_wrap(true).gap(6.0));
 
-    for (icon, fmt) in [
-        (Icon::Heading, Fmt::Heading),
-        (Icon::Bold, Fmt::Bold),
-        (Icon::Italic, Fmt::Italic),
-        (Icon::Code, Fmt::Code),
-        (Icon::Quote, Fmt::Quote),
-        (Icon::List, Fmt::List),
-        (Icon::Link, Fmt::Link),
+    for (icon, fmt, tip) in [
+        (Icon::Heading, Fmt::Heading, Key::TooltipHeading),
+        (Icon::Bold, Fmt::Bold, Key::TooltipBold),
+        (Icon::Italic, Fmt::Italic, Key::TooltipItalic),
+        (Icon::Code, Fmt::Code, Key::TooltipCode),
+        (Icon::Quote, Fmt::Quote, Key::TooltipQuote),
+        (Icon::List, Fmt::List, Key::TooltipList),
+        (Icon::Link, Fmt::Link, Key::TooltipLink),
     ] {
         let state = Rc::clone(&state);
         let body_idx = Rc::clone(&body_idx);
+        // Wrap each icon button in a tooltip trigger (FW-13): the icon glyphs
+        // (FW-12) carry no text label, so a hover tip names the action. The
+        // trigger container hugs the button and anchors the tip beneath it.
+        let cell = tree.add_child(row, tooltip::trigger(i18n::tr(tip)));
         tree.add_child(
-            row,
+            cell,
             // Icon glyphs from the bundled font (FW-12) — language-independent,
             // replacing the former "Bold" / "見出し" text labels.
             icons::icon_button(icon, 18.0)

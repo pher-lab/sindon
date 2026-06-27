@@ -187,8 +187,15 @@ pub enum Key {
     ErrExportPrefix,
 
     // --- Editor formatting toolbar ---
-    // The bar above the body now uses icon-font glyphs (see `crate::icons`),
-    // not localized text labels, so there are no toolbar `Key`s here.
+    // The bar above the body uses icon-font glyphs (see `crate::icons`), not
+    // text labels, so the icons carry hover tooltips (FW-13) to stay legible.
+    TooltipHeading,
+    TooltipBold,
+    TooltipItalic,
+    TooltipCode,
+    TooltipQuote,
+    TooltipList,
+    TooltipLink,
 
     // --- Editor find / replace (B-1 ④) ---
     // The bar toggled with Ctrl+H. Prev/Next/Close use fixed glyph labels
@@ -417,6 +424,15 @@ impl Key {
             ErrImageStore => "Couldn't store that image.",
             ErrExportPrefix => "Export failed: ",
 
+            // Editor formatting toolbar (icon-button tooltips)
+            TooltipHeading => "Heading",
+            TooltipBold => "Bold",
+            TooltipItalic => "Italic",
+            TooltipCode => "Code",
+            TooltipQuote => "Quote",
+            TooltipList => "List",
+            TooltipLink => "Link",
+
             // Editor find / replace
             FindReplaceFindPlaceholder => "Find",
             FindReplaceReplacePlaceholder => "Replace with",
@@ -642,6 +658,15 @@ impl Key {
             ErrImageUnsupported => "対応していない画像形式です（PNG / JPEG のみ）。",
             ErrImageStore => "その画像を保存できませんでした。",
             ErrExportPrefix => "エクスポートに失敗しました: ",
+
+            // Editor formatting toolbar (icon-button tooltips)
+            TooltipHeading => "見出し",
+            TooltipBold => "太字",
+            TooltipItalic => "斜体",
+            TooltipCode => "コード",
+            TooltipQuote => "引用",
+            TooltipList => "リスト",
+            TooltipLink => "リンク",
 
             // Editor find / replace
             FindReplaceFindPlaceholder => "検索",
@@ -902,6 +927,13 @@ mod tests {
         Key::ErrImageUnsupported,
         Key::ErrImageStore,
         Key::ErrExportPrefix,
+        Key::TooltipHeading,
+        Key::TooltipBold,
+        Key::TooltipItalic,
+        Key::TooltipCode,
+        Key::TooltipQuote,
+        Key::TooltipList,
+        Key::TooltipLink,
         Key::SidebarImport,
         Key::SidebarNewNote,
         Key::SidebarSearchPlaceholder,
