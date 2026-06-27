@@ -595,8 +595,10 @@ impl AppState {
         matched.iter().map(|n| n.id).collect()
     }
 
-    /// Total resident note count, ignoring the filter. Lets the sidebar tell
-    /// "no notes yet" apart from "the filter hid them all". Zero when locked.
+    /// Total resident note count including trashed rows (the underlying `notes`
+    /// vec length), ignoring the filter. Currently test-only: lets the trash
+    /// tests tell "row removed from the vec" apart from "row merely trashed",
+    /// which `live_note_count` can't distinguish. Zero when locked.
     pub fn note_count(&self) -> usize {
         match &self.phase {
             Phase::Unlocked { notes, .. } => notes.len(),
