@@ -342,6 +342,49 @@ fn secure_input_caret_clamps_at_both_ends() {
 }
 
 #[test]
+fn secure_input_click_positions_caret() {
+    // Click-to-place caret. Resolved in paint against the masked glyphs, so
+    // the test drives a real paint pass. Exact mid-string hit positions
+    // depend on glyph metrics; the two extremes (far left → start, far right
+    // → end) are deterministic and prove the event→paint→cursor wiring.
+    let mut input = SecureInput::new();
+    let mut ctx = EventContext::new();
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
+    input.event(&WidgetEvent::FocusGained, rect, &mut ctx);
+    for ch in "abcde".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
+    }
+
+    // Click far to the left → caret jumps to the start; typing prepends.
+    input.event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x, rect.origin.y + 20.0),
+            button: MouseButton::Left,
+        },
+        rect,
+        &mut ctx,
+    );
+    let mut pctx = PaintContext::default();
+    input.paint(rect, &mut pctx);
+    input.event(&WidgetEvent::CharInput { ch: 'X' }, rect, &mut ctx);
+    input.expose(|s| assert_eq!(s, "Xabcde"));
+
+    // Click far to the right → caret jumps to the end; typing appends.
+    input.event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 1000.0, rect.origin.y + 20.0),
+            button: MouseButton::Left,
+        },
+        rect,
+        &mut ctx,
+    );
+    let mut pctx = PaintContext::default();
+    input.paint(rect, &mut pctx);
+    input.event(&WidgetEvent::CharInput { ch: 'Y' }, rect, &mut ctx);
+    input.expose(|s| assert_eq!(s, "XabcdeY"));
+}
+
+#[test]
 fn secure_input_caret_handles_multibyte_chars() {
     // Char-index caret vs. byte-offset insert: "あい" is two 3-byte chars.
     // Caret one left (between あ and い) must insert at byte offset 3.

@@ -16,10 +16,10 @@
 use std::cell::{Cell, RefCell};
 
 use crate::clear_trigger::ClearTrigger;
-use crate::event::{EventContext, EventResult, Key, NamedKey, WidgetEvent};
+use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, Rect, SecurityLevel};
+use shroud_core::{Color, Point, Rect, SecurityLevel};
 use shroud_layout::FlexStyle;
 use shroud_security::SecureString;
 
@@ -72,6 +72,11 @@ pub struct SecureInput {
     /// Cursor position (character index). `Cell` so paint-side clears can
     /// reset it to 0.
     cursor: Cell<usize>,
+    /// A left-click waiting to be turned into a caret position. Set in
+    /// `event` (which has no text engine) and resolved in `paint` against
+    /// the *masked* glyphs — the click is hit-tested on the dots, never on
+    /// the real text. `None` once consumed.
+    pending_click: Cell<Option<Point>>,
     /// Submit handler, fired on Enter. Receives `&SecureString` so callers
     /// can copy, hash, or consume the value without widening its exposure.
     on_submit: Option<SubmitHandler>,
@@ -110,6 +115,7 @@ impl SecureInput {
             font_size: None,
             focused: false,
             cursor: Cell::new(0),
+            pending_click: Cell::new(None),
             on_submit: None,
             clear_trigger: None,
             last_clear_version: Cell::new(0),
@@ -335,6 +341,9 @@ impl Widget for SecureInput {
         // masked branch advances it past the rendered dots.
         let mut caret_x = text_x;
         if value.is_empty() {
+            // A click on an empty field has nothing to position — the caret
+            // can only sit at the start. Drop any pending click.
+            self.pending_click.set(None);
             // Show placeholder
             if !self.placeholder.is_empty() {
                 let shaped = ctx.text_engine.shape_text(
@@ -374,6 +383,26 @@ impl Widget for SecureInput {
                         glyph.cache_key,
                     );
                 }
+            }
+
+            // Resolve a pending left-click into a caret position. Hit-test the
+            // click against the masked glyphs (`mask_str`) — never the real
+            // text — then map the byte offset back to a char index. The mask
+            // string is homogeneous, so `byte / mask_char.len_utf8()` is the
+            // char index.
+            if let Some(click) = self.pending_click.replace(None) {
+                let rel_x = click.x - text_x;
+                let rel_y = (click.y - text_y).max(0.0);
+                let byte = ctx.text_engine.offset_at_point(
+                    &mask_str,
+                    rel_x,
+                    rel_y,
+                    font_size,
+                    font_size * 1.2,
+                    Some(max_width),
+                );
+                self.cursor
+                    .set((byte / self.mask_char.len_utf8()).min(char_count));
             }
 
             // Caret x at the cursor. The caret can't be measured against the
@@ -432,10 +461,14 @@ impl Widget for SecureInput {
         self.sync_clear();
 
         match event {
-            WidgetEvent::MouseDown { .. } => {
-                // Focus is already set by WidgetTree's click-to-focus
-                // path (dispatched FocusGained before this handler runs),
-                // so there is nothing widget-specific to do here.
+            WidgetEvent::MouseDown { position, button } => {
+                // Focus is already set by WidgetTree's click-to-focus path
+                // (dispatched FocusGained before this handler runs). Record a
+                // left-click so the next paint can place the caret where the
+                // user clicked, hit-tested against the masked glyphs.
+                if *button == MouseButton::Left {
+                    self.pending_click.set(Some(*position));
+                }
                 EventResult::Consumed
             }
 
