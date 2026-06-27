@@ -235,6 +235,22 @@ impl SecureInput {
         self.border_color.unwrap_or(colors.input_border)
     }
 
+    /// Byte offset within the secure buffer of the char at `char_idx`
+    /// (clamped to the buffer end when `char_idx == char_count`).
+    ///
+    /// The widget tracks the caret as a *char* index, but
+    /// [`SecureString::insert`]/[`remove`](SecureString::remove) take *byte*
+    /// offsets. Computed inside `expose` so the plaintext never escapes the
+    /// closure — only the offset (a length) leaves.
+    fn byte_offset_of_char(&self, char_idx: usize) -> usize {
+        self.value.borrow().expose(|s| {
+            s.char_indices()
+                .nth(char_idx)
+                .map(|(b, _)| b)
+                .unwrap_or(s.len())
+        })
+    }
+
     /// Observe the clear trigger version and zeroize if it changed. Called
     /// at the top of both paint and event so the clear is visible within
     /// one frame of the `bump()`.
@@ -341,8 +357,8 @@ impl Widget for SecureInput {
             }
         } else {
             // Render masked characters — never the actual text
-            let mask_str: String =
-                std::iter::repeat_n(self.mask_char, value.char_count()).collect();
+            let char_count = value.char_count();
+            let mask_str: String = std::iter::repeat_n(self.mask_char, char_count).collect();
 
             let shaped =
                 ctx.text_engine
@@ -360,9 +376,26 @@ impl Widget for SecureInput {
                 }
             }
 
-            if !shaped.glyphs.is_empty() {
-                caret_x = text_x + shaped.width;
+            // Caret x at the cursor. The caret can't be measured against the
+            // real text (mask glyphs differ in advance from the secret's
+            // glyphs), so it's positioned against the rendered dots: shape the
+            // masked prefix `[0, cursor)` and take its advance width.
+            let cursor = self.cursor.get().min(char_count);
+            if cursor == char_count {
+                if !shaped.glyphs.is_empty() {
+                    caret_x = text_x + shaped.width;
+                }
+            } else if cursor > 0 {
+                let prefix: String = std::iter::repeat_n(self.mask_char, cursor).collect();
+                let prefix_shaped = ctx.text_engine.shape_text(
+                    &prefix,
+                    font_size,
+                    font_size * 1.2,
+                    Some(max_width),
+                );
+                caret_x = text_x + prefix_shaped.width;
             }
+            // cursor == 0 → caret_x stays at the left padding (text_x).
         }
 
         // Caret (simple line when focused) — drawn for both the empty and
@@ -417,15 +450,17 @@ impl Widget for SecureInput {
             }
 
             WidgetEvent::CharInput { ch } if self.focused => {
-                // Push character directly into SecureString — no intermediary.
-                // Drop the keystroke if it would overflow the fixed capacity
-                // (which would panic on push()). This is the line that
-                // enforces the no-realloc invariant: see Phase 20 audit
-                // response (H-1).
+                // Insert the character directly into SecureString at the caret
+                // — no intermediary String. Drop the keystroke if it would
+                // overflow the fixed capacity (which would panic on insert()).
+                // This is the line that enforces the no-realloc invariant: see
+                // Phase 20 audit response (H-1). Insertion within capacity does
+                // not realloc, so mid-string editing keeps that invariant.
                 if !ch.is_control() {
+                    let at = self.byte_offset_of_char(self.cursor.get());
                     let mut value = self.value.borrow_mut();
                     if value.remaining_capacity() >= ch.len_utf8() {
-                        value.push(*ch);
+                        value.insert(at, *ch);
                         drop(value);
                         self.cursor.set(self.cursor.get() + 1);
                     }
@@ -433,13 +468,46 @@ impl Widget for SecureInput {
                 EventResult::Consumed
             }
 
+            // Caret navigation and edit keys. Note there is deliberately *no*
+            // selection model here (no Shift+arrow, Ctrl+A, copy/cut): a
+            // selection that could be copied would put the secret on the OS
+            // clipboard, defeating the point of SecureInput. The non-secure
+            // `Input` carries that model; SecureInput intentionally does not.
             WidgetEvent::KeyDown { key } if self.focused => match key {
                 Key::Named(NamedKey::Backspace) => {
                     let cursor = self.cursor.get();
                     if cursor > 0 {
-                        self.value.borrow_mut().pop();
+                        let at = self.byte_offset_of_char(cursor - 1);
+                        self.value.borrow_mut().remove(at);
                         self.cursor.set(cursor - 1);
                     }
+                    EventResult::Consumed
+                }
+                Key::Named(NamedKey::Delete) => {
+                    let cursor = self.cursor.get();
+                    let count = self.value.borrow().char_count();
+                    if cursor < count {
+                        let at = self.byte_offset_of_char(cursor);
+                        self.value.borrow_mut().remove(at);
+                        // Caret stays put: the char to its right is gone.
+                    }
+                    EventResult::Consumed
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.cursor.set(self.cursor.get().saturating_sub(1));
+                    EventResult::Consumed
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    let count = self.value.borrow().char_count();
+                    self.cursor.set((self.cursor.get() + 1).min(count));
+                    EventResult::Consumed
+                }
+                Key::Named(NamedKey::Home) => {
+                    self.cursor.set(0);
+                    EventResult::Consumed
+                }
+                Key::Named(NamedKey::End) => {
+                    self.cursor.set(self.value.borrow().char_count());
                     EventResult::Consumed
                 }
                 Key::Named(NamedKey::Enter) => {

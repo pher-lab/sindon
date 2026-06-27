@@ -246,6 +246,111 @@ fn secure_input_renders_masked() {
     );
 }
 
+// ── SecureInput caret movement ────────────────────────────────────
+
+/// Focus a fresh SecureInput and type `text` into it, returning the widget
+/// and a reusable event context + rect.
+fn focused_secure_input(text: &str) -> (SecureInput, EventContext, shroud_core::Rect) {
+    let mut input = SecureInput::new();
+    let mut ctx = EventContext::new();
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
+    input.event(&WidgetEvent::FocusGained, rect, &mut ctx);
+    for ch in text.chars() {
+        input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
+    }
+    (input, ctx, rect)
+}
+
+fn press(input: &mut SecureInput, ctx: &mut EventContext, rect: shroud_core::Rect, key: NamedKey) {
+    input.event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(key),
+        },
+        rect,
+        ctx,
+    );
+}
+
+fn type_char(input: &mut SecureInput, ctx: &mut EventContext, rect: shroud_core::Rect, ch: char) {
+    input.event(&WidgetEvent::CharInput { ch }, rect, ctx);
+}
+
+#[test]
+fn secure_input_arrow_left_inserts_mid_string() {
+    // Type "ac", move the caret one left (between a and c), insert 'b'.
+    let (mut input, mut ctx, rect) = focused_secure_input("ac");
+    press(&mut input, &mut ctx, rect, NamedKey::ArrowLeft);
+    type_char(&mut input, &mut ctx, rect, 'b');
+    input.expose(|s| assert_eq!(s, "abc"));
+}
+
+#[test]
+fn secure_input_home_and_end_position_caret() {
+    let (mut input, mut ctx, rect) = focused_secure_input("abc");
+
+    // Home → caret at front; typing prepends.
+    press(&mut input, &mut ctx, rect, NamedKey::Home);
+    type_char(&mut input, &mut ctx, rect, 'X');
+    input.expose(|s| assert_eq!(s, "Xabc"));
+
+    // End → caret at back; typing appends.
+    press(&mut input, &mut ctx, rect, NamedKey::End);
+    type_char(&mut input, &mut ctx, rect, 'Y');
+    input.expose(|s| assert_eq!(s, "XabcY"));
+}
+
+#[test]
+fn secure_input_backspace_removes_char_before_caret() {
+    // "abc", caret one left of the end (between b and c), Backspace deletes 'b'.
+    let (mut input, mut ctx, rect) = focused_secure_input("abc");
+    press(&mut input, &mut ctx, rect, NamedKey::ArrowLeft);
+    press(&mut input, &mut ctx, rect, NamedKey::Backspace);
+    input.expose(|s| assert_eq!(s, "ac"));
+}
+
+#[test]
+fn secure_input_delete_removes_char_at_caret() {
+    // "abc", Home, Delete removes the char to the caret's right ('a').
+    let (mut input, mut ctx, rect) = focused_secure_input("abc");
+    press(&mut input, &mut ctx, rect, NamedKey::Home);
+    press(&mut input, &mut ctx, rect, NamedKey::Delete);
+    input.expose(|s| assert_eq!(s, "bc"));
+
+    // Delete at the end is a no-op.
+    press(&mut input, &mut ctx, rect, NamedKey::End);
+    press(&mut input, &mut ctx, rect, NamedKey::Delete);
+    input.expose(|s| assert_eq!(s, "bc"));
+}
+
+#[test]
+fn secure_input_caret_clamps_at_both_ends() {
+    let (mut input, mut ctx, rect) = focused_secure_input("ab");
+
+    // ArrowLeft past the start clamps to 0; typing prepends.
+    press(&mut input, &mut ctx, rect, NamedKey::ArrowLeft);
+    press(&mut input, &mut ctx, rect, NamedKey::ArrowLeft);
+    press(&mut input, &mut ctx, rect, NamedKey::ArrowLeft);
+    type_char(&mut input, &mut ctx, rect, 'X');
+    input.expose(|s| assert_eq!(s, "Xab"));
+
+    // ArrowRight past the end clamps to char_count; typing appends.
+    for _ in 0..6 {
+        press(&mut input, &mut ctx, rect, NamedKey::ArrowRight);
+    }
+    type_char(&mut input, &mut ctx, rect, 'Y');
+    input.expose(|s| assert_eq!(s, "XabY"));
+}
+
+#[test]
+fn secure_input_caret_handles_multibyte_chars() {
+    // Char-index caret vs. byte-offset insert: "あい" is two 3-byte chars.
+    // Caret one left (between あ and い) must insert at byte offset 3.
+    let (mut input, mut ctx, rect) = focused_secure_input("あい");
+    press(&mut input, &mut ctx, rect, NamedKey::ArrowLeft);
+    type_char(&mut input, &mut ctx, rect, 'x');
+    input.expose(|s| assert_eq!(s, "あxい"));
+}
+
 // ── Tier 2 IME bypass ─────────────────────────────────────────────
 
 #[test]
