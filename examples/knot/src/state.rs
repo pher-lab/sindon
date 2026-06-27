@@ -596,9 +596,13 @@ impl AppState {
     }
 
     /// Total resident note count including trashed rows (the underlying `notes`
-    /// vec length), ignoring the filter. Currently test-only: lets the trash
-    /// tests tell "row removed from the vec" apart from "row merely trashed",
-    /// which `live_note_count` can't distinguish. Zero when locked.
+    /// vec length), ignoring the filter. Test-only: lets the trash tests tell
+    /// "row removed from the vec" apart from "row merely trashed", which
+    /// `live_note_count` can't distinguish. Zero when locked.
+    ///
+    /// Gated `#[cfg(test)]` — no non-test caller, so it would otherwise trip
+    /// `dead_code` in the binary target (and the knot CI clippy gate).
+    #[cfg(test)]
     pub fn note_count(&self) -> usize {
         match &self.phase {
             Phase::Unlocked { notes, .. } => notes.len(),
