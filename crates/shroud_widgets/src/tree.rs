@@ -375,6 +375,19 @@ impl WidgetTree {
         self.layers.last().map(|l| l.offset)
     }
 
+    /// The topmost layer that participates in event routing, skipping any
+    /// non-interactive (click-through) layers stacked above it. `None` when
+    /// no interactive layer is active — in which case events fall through to
+    /// the main tree even if a tooltip overlay is painted on top.
+    ///
+    /// This is the layer that owns pointer/keyboard input, traps Tab, and
+    /// is the target of Escape / outside-click dismiss — as opposed to
+    /// [`Self::top_layer_root`], which is the literal topmost layer (used
+    /// by callers that mean "whatever paints last").
+    fn topmost_interactive_layer(&self) -> Option<&LayerEntry> {
+        self.layers.iter().rev().find(|l| l.options.interactive)
+    }
+
     /// Children of `idx` as a fresh `Vec`. Empty when the slot is
     /// tombstoned or has no children.
     ///
@@ -591,16 +604,23 @@ impl WidgetTree {
             effective_security,
             last_applied_visible: initial_visible,
         }));
+        let interactive = options.interactive;
         self.layers.push(LayerEntry {
             root: idx,
             options,
             offset: (0.0, 0.0),
             measured_size: Size::ZERO,
         });
-        // Cursor is no longer "over" any main-tree widget once a layer
-        // takes input priority — clear so a stale MouseLeave doesn't fire
-        // at the wrong time when the layer pops.
-        self.hovered = None;
+        // An interactive layer takes input priority, so the cursor is no
+        // longer "over" any main-tree widget — clear the hover chain so a
+        // stale MouseLeave doesn't fire at the wrong time when the layer
+        // pops. A non-interactive (click-through) tooltip layer leaves input
+        // with the main tree, so its hover chain must persist: clearing it
+        // would make the trigger see a spurious re-enter on the next move
+        // and re-open the very tip it just opened.
+        if interactive {
+            self.hovered = None;
+        }
         idx
     }
 
@@ -1156,10 +1176,11 @@ impl WidgetTree {
         event: &WidgetEvent,
         event_ctx: &mut EventContext,
     ) -> EventResult {
-        // Pick the subtree that owns this event: the topmost layer if any,
+        // Pick the subtree that owns this event: the topmost *interactive*
+        // layer if any (a click-through tooltip overlay on top is skipped),
         // otherwise the main root. `offset` translates viewport coords into
         // the subtree's local space (zero for the main tree).
-        let (target_root, offset, layer_active) = match self.layers.last() {
+        let (target_root, offset, layer_active) = match self.topmost_interactive_layer() {
             Some(layer) => (Some(layer.root), layer.offset, true),
             None => (self.root, (0.0, 0.0), false),
         };
@@ -1297,9 +1318,16 @@ impl WidgetTree {
                 }
             )
         {
-            let top = self.layers.last().expect("layer_active implies a layer");
-            if top.options.dismiss_on_escape {
-                self.pop_top_layer();
+            let top = self
+                .topmost_interactive_layer()
+                .expect("layer_active implies an interactive layer");
+            let dismiss = top.options.dismiss_on_escape;
+            let root = top.root;
+            if dismiss {
+                // Pop the active interactive layer specifically — a
+                // click-through tooltip may be stacked above it, and
+                // `pop_top_layer` would yank that instead.
+                self.pop_layer(root);
                 return EventResult::Consumed;
             }
         }
@@ -1360,7 +1388,15 @@ impl WidgetTree {
         if layer_active {
             if let Some(pos) = event_position(event) {
                 let local_pos = Point::new(pos.x - offset.0, pos.y - offset.1);
-                let layer_size = self.layers.last().unwrap().measured_size;
+                // The active interactive layer (not necessarily the literal
+                // topmost — a tooltip may paint above it). `offset` above
+                // came from the same entry, so its size and offset agree.
+                let layer = self
+                    .topmost_interactive_layer()
+                    .expect("layer_active implies an interactive layer");
+                let layer_size = layer.measured_size;
+                let layer_root = layer.root;
+                let dismiss_on_outside = layer.options.dismiss_on_outside_click;
                 let layer_rect = Rect::new(0.0, 0.0, layer_size.width, layer_size.height);
                 if !layer_rect.contains(local_pos) {
                     // Outside the layer's content rect.
@@ -1372,13 +1408,8 @@ impl WidgetTree {
                         return EventResult::Ignored;
                     }
                     if let WidgetEvent::MouseDown { .. } = event {
-                        let dismiss = self
-                            .layers
-                            .last()
-                            .map(|l| l.options.dismiss_on_outside_click)
-                            .unwrap_or(false);
-                        if dismiss {
-                            self.pop_top_layer();
+                        if dismiss_on_outside {
+                            self.pop_layer(layer_root);
                         }
                     }
                     // MouseUp / Scroll / other position-bearing events
@@ -1461,7 +1492,12 @@ impl WidgetTree {
     /// the primitive set.
     pub fn focusable_in_tab_order(&self) -> Vec<usize> {
         let mut out = Vec::new();
-        let start = self.top_layer_root().or(self.root);
+        // Trap Tab inside the active interactive layer, skipping any
+        // click-through tooltip painted on top (it owns no focus).
+        let start = self
+            .topmost_interactive_layer()
+            .map(|l| l.root)
+            .or(self.root);
         if let Some(root) = start {
             self.collect_focusable(root, &mut out);
         }

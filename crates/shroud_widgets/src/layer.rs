@@ -88,6 +88,21 @@ pub struct LayerOptions {
     /// dialog (e.g. a confirm-delete prompt where Ctrl+L should not yank
     /// the user out mid-confirmation).
     pub block_shortcuts: bool,
+    /// Whether this layer participates in event routing. `true` (the
+    /// default) is the normal modal/popover behavior: while the layer is
+    /// topmost it captures all pointer and keyboard input and the main
+    /// tree sees nothing.
+    ///
+    /// `false` makes the layer **click-through** — it still lays out and
+    /// paints on top, but event dispatch skips it entirely, routing
+    /// pointer/keyboard input to the topmost *interactive* layer (or the
+    /// main tree). This is what a tooltip needs: a paint-only overlay that
+    /// must not steal the `MouseLeave` from its trigger, otherwise the
+    /// trigger never learns the cursor left and the tip can never dismiss.
+    /// A non-interactive layer also never dismisses on outside-click or
+    /// Escape (there is nothing to dismiss it *to* — the caller pops it).
+    /// See [`Self::tooltip`].
+    pub interactive: bool,
 }
 
 impl LayerOptions {
@@ -100,6 +115,7 @@ impl LayerOptions {
             dismiss_on_outside_click: true,
             dismiss_on_escape: true,
             block_shortcuts: false,
+            interactive: true,
         }
     }
 
@@ -112,6 +128,26 @@ impl LayerOptions {
             dismiss_on_outside_click: true,
             dismiss_on_escape: true,
             block_shortcuts: false,
+            interactive: true,
+        }
+    }
+
+    /// Tooltip preset: a chrome-less, **click-through** overlay. No scrim,
+    /// no dismiss paths, and [`interactive`](Self::interactive) `false` so
+    /// it never captures input — pointer events keep flowing to the trigger
+    /// underneath, which is what lets a hover-driven tip dismiss itself when
+    /// the cursor leaves (the caller pops it from its `on_hover_exit`).
+    ///
+    /// Pair with [`LayerAnchor::AnchorRect`] using the trigger's own layout
+    /// rect (see [`Container::on_hover_enter`](crate::Container::on_hover_enter)).
+    pub fn tooltip() -> Self {
+        Self {
+            anchor: LayerAnchor::ViewportCenter,
+            scrim: None,
+            dismiss_on_outside_click: false,
+            dismiss_on_escape: false,
+            block_shortcuts: false,
+            interactive: false,
         }
     }
 
@@ -143,6 +179,14 @@ impl LayerOptions {
     /// top. See [`Self::block_shortcuts`].
     pub fn block_shortcuts(mut self, on: bool) -> Self {
         self.block_shortcuts = on;
+        self
+    }
+
+    /// Toggle whether this layer participates in event routing. Pass
+    /// `false` for a click-through, paint-only overlay (tooltips). See
+    /// [`Self::interactive`].
+    pub fn interactive(mut self, on: bool) -> Self {
+        self.interactive = on;
         self
     }
 }

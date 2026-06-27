@@ -24,6 +24,17 @@ type ContextMenuHandler = Box<dyn FnMut(Point, &mut EventContext)>;
 /// position in the subtree's local coordinate space.
 type PressHandler = Box<dyn FnMut(Point, &mut EventContext)>;
 
+/// Callback type for [`Container::on_hover_enter`]. Receives the
+/// container's own layout rect (viewport coordinates) so the handler can
+/// feed it straight into [`LayerAnchor::AnchorRect`](crate::LayerAnchor)
+/// to anchor a tooltip / popover to the trigger.
+type HoverEnterHandler = Box<dyn FnMut(Rect, &mut EventContext)>;
+
+/// Callback type for [`Container::on_hover_exit`]. The leave carries no
+/// position, so the handler just gets the event context (e.g. to pop the
+/// tooltip layer it opened on enter).
+type HoverExitHandler = Box<dyn FnMut(&mut EventContext)>;
+
 /// A flexbox container widget.
 ///
 /// Containers can have a background color and arrange their children
@@ -77,6 +88,17 @@ pub struct Container {
     /// the same dispatch and survives the teardown. The container does not
     /// need to be focusable, so clicking it never steals keyboard focus.
     on_press: Option<PressHandler>,
+    /// Optional hover-enter handler, fired on `MouseEnter` with the
+    /// container's own layout rect. Setting it enrolls the container in
+    /// hover-event routing *without* turning on the hover-background fade
+    /// (that stays gated on [`hoverable`](Self::hoverable)), so a tooltip
+    /// trigger doesn't suddenly highlight. Typical use: open a tooltip
+    /// layer anchored to the passed rect.
+    on_hover_enter: Option<HoverEnterHandler>,
+    /// Optional hover-exit handler, fired on `MouseLeave`. Pairs with
+    /// [`on_hover_enter`](Self::on_hover_enter) to tear down whatever it
+    /// opened.
+    on_hover_exit: Option<HoverExitHandler>,
 }
 
 impl Container {
@@ -95,6 +117,8 @@ impl Container {
             visible: Reactive::Static(true),
             on_context_menu: None,
             on_press: None,
+            on_hover_enter: None,
+            on_hover_exit: None,
         }
     }
 
@@ -116,6 +140,8 @@ impl Container {
             visible: Reactive::Static(true),
             on_context_menu: None,
             on_press: None,
+            on_hover_enter: None,
+            on_hover_exit: None,
         }
     }
 
@@ -384,6 +410,57 @@ impl Container {
         self.on_press = Some(Box::new(handler));
         self
     }
+
+    /// Register a hover-enter handler, firing on `MouseEnter`.
+    ///
+    /// The handler receives the container's own layout rect (viewport
+    /// coordinates, the same frame as `paint`'s `layout`) and the event
+    /// context. The rect feeds straight into
+    /// [`LayerAnchor::AnchorRect`](crate::LayerAnchor) so the typical body
+    /// opens a tooltip anchored to the trigger:
+    ///
+    /// ```ignore
+    /// Container::row().on_hover_enter(|rect, ctx| {
+    ///     ctx.push_layer(
+    ///         LayerOptions::tooltip().anchor(LayerAnchor::AnchorRect {
+    ///             rect,
+    ///             prefer: Placement::Below,
+    ///         }),
+    ///         tooltip_bubble("Bold"),
+    ///         |_tree, _root| {},
+    ///     );
+    /// })
+    /// ```
+    ///
+    /// Setting this opts the container into hover-event routing **without**
+    /// turning on the hover-background fade — that stays gated on
+    /// [`hoverable`](Self::hoverable) / [`hover_background`](Self::hover_background),
+    /// so a tooltip trigger is not highlighted just for carrying a tip.
+    /// The event is not consumed, so a hoverable ancestor still lights up.
+    ///
+    /// Note that a [`tooltip`](crate::LayerOptions::tooltip) layer is
+    /// click-through: it does not steal the `MouseLeave` that drives
+    /// [`on_hover_exit`](Self::on_hover_exit). A normal interactive layer
+    /// would, and the tip could never dismiss.
+    pub fn on_hover_enter(
+        mut self,
+        handler: impl FnMut(Rect, &mut EventContext) + 'static,
+    ) -> Self {
+        self.on_hover_enter = Some(Box::new(handler));
+        self
+    }
+
+    /// Register a hover-exit handler, firing on `MouseLeave`.
+    ///
+    /// Pairs with [`on_hover_enter`](Self::on_hover_enter) — e.g. pop the
+    /// tooltip layer it pushed. The leave carries no position, so the
+    /// handler receives only the event context. Like the enter handler this
+    /// enrolls the container in hover routing without enabling the hover
+    /// fade, and does not consume the event.
+    pub fn on_hover_exit(mut self, handler: impl FnMut(&mut EventContext) + 'static) -> Self {
+        self.on_hover_exit = Some(Box::new(handler));
+        self
+    }
 }
 
 impl Widget for Container {
@@ -429,7 +506,7 @@ impl Widget for Container {
         }
     }
 
-    fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
+    fn event(&mut self, event: &WidgetEvent, layout: Rect, ctx: &mut EventContext) -> EventResult {
         // Right-click → context menu (independent of hoverable). Consumed
         // so a parent container with its own on_context_menu doesn't fire
         // twice for the same click.
@@ -460,18 +537,31 @@ impl Widget for Container {
 
         // Stay inert when not opted in — keeps the no-hover path identical
         // to the pre-A4 behavior (no events consumed, no extra book-keeping).
-        if !self.hoverable {
+        // Enrollment is the union of hover *styling* (`hoverable`) and hover
+        // *callbacks*: a tooltip trigger sets only a callback and must still
+        // see MouseEnter/Leave, but must not get the background fade.
+        if !self.hoverable && self.on_hover_enter.is_none() && self.on_hover_exit.is_none() {
             return EventResult::Ignored;
         }
         match event {
             WidgetEvent::MouseEnter => {
-                self.drive_hover(1.0);
+                if self.hoverable {
+                    self.drive_hover(1.0);
+                }
+                if let Some(handler) = &mut self.on_hover_enter {
+                    handler(layout, ctx);
+                }
                 // Don't consume — descendants that also care about hover (an
                 // inner Button inside a hoverable row) still get to see it.
                 EventResult::Ignored
             }
             WidgetEvent::MouseLeave => {
-                self.drive_hover(0.0);
+                if self.hoverable {
+                    self.drive_hover(0.0);
+                }
+                if let Some(handler) = &mut self.on_hover_exit {
+                    handler(ctx);
+                }
                 EventResult::Ignored
             }
             _ => EventResult::Ignored,
