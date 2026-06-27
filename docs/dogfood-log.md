@@ -79,10 +79,15 @@
   - [`toolbar.rs`](../examples/knot/src/toolbar.rs) のフォーマットボタン7個を `Heading/Bold/見出し/太字…` テキスト → アイコングリフに置換。不要になった `Toolbar*` i18n キー削除。
   テスト/検証: shroud_text に load+名前解決テスト2件(fixture = サブセット font)、framework 全テスト回帰なし、fmt/clippy(framework+knot)新規警告ゼロ、起動スモーク OK。**実機 OK**(2026-06-27 ユーザー確認: 表示きれい・視認性 OK・light⇄dark 両方 OK)。
   - **カラー(COLR)アイコンは未対応のまま様子見**(モノクロ + tint が今回の対象。FW-4 の color atlas 経路に乗せれば多色も出る余地はあるが未着手)。
-- **FW-13 [fw] P2 🧷💡 — ツールチップ(hover で説明を出す手段)が無い = 未着手 (2026-06-27 起票)**
+- **FW-13 [fw] P2 🧷💡 — ツールチップ(hover で説明を出す手段)が無い = ✅ 完了 (2026-06-27 起票・同日着地、実機 OK)**
   動機: Tauri 版 Knot と見比べると、FW-12 でアイコン化したツールバー等のアイコンボタンや省略ラベルに hover 説明が無く**不親切になりやすい**。
-  現状調査: 専用 widget は無し([layer.rs](../crates/shroud_widgets/src/layer.rs) の doc に「Layer の想定ユースケース」として名前だけ挙がる)。**揃っている**= Layer + `LayerAnchor::AnchorRect{rect,prefer:Placement}`(Phase 21/22、`Auto` で画面外なら上下フリップ)/ 遅延タイマ(`tick_interval`・`on_frame`)/ 内部 hover 検出(`MouseEnter`/`MouseLeave` routing は [tree.rs](../crates/shroud_widgets/src/tree.rs) で稼働)。**足りない**= `Container` がアプリに公開する hover コールバックが [container.rs](../crates/shroud_widgets/src/container.rs) の `on_press` / `on_context_menu` のみで、**hover を契機に Layer を push する起点がアプリから作れない**(MouseEnter/Leave は Container 内部の hover 背景描画に消費されるだけ)。
-  実装方針(最小2ピース): ①framework = `Container::on_hover_enter(FnMut(Rect, &mut EventContext))` / `on_hover_exit` を追加し、既存内部 MouseEnter/Leave をアプリへ surface(自身の layout rect を渡す → そのまま `AnchorRect` に流せる)。②app/widget = enter で遅延タイマ開始 → 発火で `popover()`(`scrim:None`)Layer を `AnchorRect` で push、exit で pop。将来 `Tooltip` widget としてラップして dogfood/example へ。
+  **⚠ 起票時の当初案は誤り**: 「hover で `popover()` Layer を push、exit で pop」は**そのままでは動かない**。Layer はアクティブな間メイン tree の pointer イベントを全部奪う([tree.rs](../crates/shroud_widgets/src/tree.rs) `dispatch_event` が `layers.last()` を無条件にイベント対象化 / layer 外 MouseMove も握り潰す) → トリガーに **MouseLeave が届かず** tip が消えない/ちらつく。**tip には「描画されるが入力を奪わない click-through オーバーレイ」が必須**と判明。
+  着地(framework 2点 + app):
+  - **①`Container::on_hover_enter(FnMut(Rect, &mut EventContext))` / `on_hover_exit`** ([container.rs](../crates/shroud_widgets/src/container.rs)) — 内部 MouseEnter/Leave をアプリへ surface。enter は自身の layout rect を渡す → そのまま `AnchorRect`。hover コールバックを付けても **hover 背景フェードは点かない**(`hoverable` 限定維持)。
+  - **②`LayerOptions::tooltip()` / `interactive` フラグ** ([layer.rs](../crates/shroud_widgets/src/layer.rs)) — click-through Layer。layout・paint は全 Layer を回す既存ループにそのまま乗り、**イベント対象選択だけ**を「最上位 *interactive* Layer」に変更(`dispatch_event` / Escape・outside-click dismiss / Tab traversal / push 時の hover クリアを全て interactive 限定化)。
+  - **③app 配線** ([tooltip.rs](../examples/knot/src/tooltip.rs)) — thread-local controller + 既存 `on_frame` tick で ~400ms 遅延ポーリング → click-through tip を push、exit で pop。`tooltip::trigger(text)` で各ツールバーアイコンを包む。i18n キー7個(en/ja)。auto-lock で screen が消えた時用に `vault_screen::build` で reset。
+  テスト/検証: framework に [tooltip_tests.rs](../crates/shroud_widgets/tests/tooltip_tests.rs) 6件(hover コールバック / click-through 性質 + interactive 対照 / Tab スキップ / no-highlight ガード / hover→leave E2E)、shroud_widgets 全テスト緑、fmt/clippy(framework+knot --all-targets)クリーン。**実機 OK**(2026-06-27 ユーザー確認: 出る・消える・ちらつかない・レイアウト不変)。commit `093ebfb`(framework)/ `6c67649`(knot)。
+  - 将来: `Tooltip` widget としてラップ(現状は Container を `trigger()` で包む方式)/ 遅延精度は tick 粒度(500ms)依存なので細かくしたければ別途。
 
 #### Knot app — UX 磨き
 
