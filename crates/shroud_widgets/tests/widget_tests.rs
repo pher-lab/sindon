@@ -728,6 +728,70 @@ fn button_default_radius_is_zero() {
     assert_eq!(ctx.rects[0].radius, 0.0);
 }
 
+// ── Input chrome (FW-14) ─────────────────────────────────────────
+//
+// A default single-line Input paints exactly two rects: the background
+// fill, then a 1px border stroke. `.radius()` rounds both, `.borderless()`
+// drops the stroke, `.border_color()` recolors it.
+
+fn paint_input(input: Input) -> PaintContext {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    tree.add_child(root, input);
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    ctx
+}
+
+#[test]
+fn input_default_chrome_is_sharp_fill_plus_border() {
+    let ctx = paint_input(Input::new());
+    assert_eq!(ctx.rects.len(), 2, "bg fill + 1px border stroke");
+    assert_eq!(ctx.rects[0].radius, 0.0, "fill defaults to sharp corners");
+    assert_eq!(ctx.rects[0].border_width, 0.0, "rect[0] is a solid fill");
+    assert_eq!(ctx.rects[1].radius, 0.0, "border defaults to sharp corners");
+    assert_eq!(ctx.rects[1].border_width, 1.0, "border is a 1px stroke");
+}
+
+#[test]
+fn input_radius_rounds_both_fill_and_border() {
+    let ctx = paint_input(Input::new().radius(10.0));
+    assert_eq!(ctx.rects.len(), 2);
+    assert_eq!(ctx.rects[0].radius, 10.0, "fill rounds");
+    assert_eq!(ctx.rects[1].radius, 10.0, "border rounds to match");
+    assert_eq!(ctx.rects[1].border_width, 1.0);
+}
+
+#[test]
+fn input_negative_radius_clamps_to_zero() {
+    let ctx = paint_input(Input::new().radius(-3.0));
+    assert_eq!(ctx.rects[0].radius, 0.0);
+}
+
+#[test]
+fn input_borderless_drops_the_stroke() {
+    let ctx = paint_input(Input::new().borderless());
+    assert_eq!(ctx.rects.len(), 1, "only the background fill remains");
+    assert_eq!(ctx.rects[0].border_width, 0.0);
+    assert!(
+        ctx.rects.iter().all(|r| r.border_width == 0.0),
+        "no stroke rect should be emitted when borderless"
+    );
+}
+
+#[test]
+fn input_border_color_overrides_the_stroke() {
+    let red = Color::rgb(1.0, 0.0, 0.0);
+    let ctx = paint_input(Input::new().border_color(red));
+    let stroke = ctx
+        .rects
+        .iter()
+        .find(|r| r.border_width > 0.0)
+        .expect("a border stroke rect");
+    assert_eq!(stroke.color, red, "stroke uses the overridden border color");
+}
+
 // ── Theme ────────────────────────────────────────────────────────
 
 #[test]

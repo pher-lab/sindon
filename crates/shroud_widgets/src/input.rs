@@ -459,6 +459,13 @@ pub struct Input {
     text_color: Option<Color>,
     placeholder_color: Option<Color>,
     border_color: Option<Color>,
+    /// Whether to draw the 1px border at all. `false` (via [`borderless`]) skips
+    /// the stroke, leaving just the (optionally rounded) background fill — handy
+    /// for inline / search-bar styling. [`borderless`]: Self::borderless
+    border_visible: bool,
+    /// Corner radius (px) for the background fill and border stroke. `0.0` keeps
+    /// the historical sharp rectangle and short-circuits the SDF in the shader.
+    radius: f32,
     focus_ring_color: Option<Color>,
     /// Override for the selection highlight color. `None` reads
     /// `theme.colors.selection_background` each frame.
@@ -568,6 +575,8 @@ impl Input {
             text_color: None,
             placeholder_color: None,
             border_color: None,
+            border_visible: true,
+            radius: 0.0,
             focus_ring_color: None,
             selection_color: None,
             undo_stack: RefCell::new(VecDeque::new()),
@@ -845,6 +854,32 @@ impl Input {
     /// Set the background color.
     pub fn background(mut self, color: Color) -> Self {
         self.bg_color = Some(color);
+        self
+    }
+
+    /// Override the 1px border color. `None` (the default) reads
+    /// `theme.colors.input_border` each frame, so every input tracks the theme;
+    /// set this to give one field a distinct frame. Has no effect once
+    /// [`borderless`](Self::borderless) is used.
+    pub fn border_color(mut self, color: Color) -> Self {
+        self.border_color = Some(color);
+        self
+    }
+
+    /// Drop the border entirely, leaving just the background fill. Useful for
+    /// inline editing or a search-bar look where a boxed frame would feel heavy.
+    pub fn borderless(mut self) -> Self {
+        self.border_visible = false;
+        self
+    }
+
+    /// Round the corners of the background fill and border by `px`. `0.0` (the
+    /// default) keeps the sharp rectangle. Symmetric with
+    /// [`Container::radius`](crate::Container::radius) /
+    /// [`Button::radius`](crate::Button::radius). Negative values clamp to `0.0`;
+    /// over-large values are clamped to half the shorter side in the renderer.
+    pub fn radius(mut self, px: f32) -> Self {
+        self.radius = px.max(0.0);
         self
     }
 
@@ -1454,29 +1489,18 @@ impl Widget for Input {
             .placeholder_color
             .unwrap_or(ctx.theme.colors.input_placeholder);
         let bg = self.resolve_bg(&ctx.theme.colors);
-        let border = self.resolve_border(&ctx.theme.colors);
 
-        // Background
-        ctx.fill_rect(layout, bg);
+        // Background fill. `radius == 0.0` short-circuits the SDF, so this is the
+        // historical sharp rect unless the app opted into rounded corners.
+        ctx.fill_rect_rounded(layout, bg, self.radius);
 
-        // Border (1px)
-        let b = 1.0;
-        ctx.fill_rect(
-            Rect::new(layout.origin.x, layout.origin.y, layout.size.width, b),
-            border,
-        );
-        ctx.fill_rect(
-            Rect::new(layout.origin.x, layout.bottom() - b, layout.size.width, b),
-            border,
-        );
-        ctx.fill_rect(
-            Rect::new(layout.origin.x, layout.origin.y, b, layout.size.height),
-            border,
-        );
-        ctx.fill_rect(
-            Rect::new(layout.right() - b, layout.origin.y, b, layout.size.height),
-            border,
-        );
+        // Border: one rounded 1px stroke hugging the inside of the layout edge
+        // (the SDF rounds its corners with the same radius), replacing the four
+        // sharp edge rects. Skipped entirely when the field is borderless.
+        if self.border_visible {
+            let border = self.resolve_border(&ctx.theme.colors);
+            ctx.stroke_rect_rounded(layout, border, self.radius, 1.0);
+        }
 
         let text_x = layout.origin.x + 8.0;
         // Single-line: vertically center the (one) line of text so the field
