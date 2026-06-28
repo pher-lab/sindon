@@ -88,11 +88,12 @@
   - **③app 配線** ([tooltip.rs](../examples/knot/src/tooltip.rs)) — thread-local controller + 既存 `on_frame` tick で ~400ms 遅延ポーリング → click-through tip を push、exit で pop。`tooltip::trigger(text)` で各ツールバーアイコンを包む。i18n キー7個(en/ja)。auto-lock で screen が消えた時用に `vault_screen::build` で reset。
   テスト/検証: framework に [tooltip_tests.rs](../crates/shroud_widgets/tests/tooltip_tests.rs) 6件(hover コールバック / click-through 性質 + interactive 対照 / Tab スキップ / no-highlight ガード / hover→leave E2E)、shroud_widgets 全テスト緑、fmt/clippy(framework+knot --all-targets)クリーン。**実機 OK**(2026-06-27 ユーザー確認: 出る・消える・ちらつかない・レイアウト不変)。commit `093ebfb`(framework)/ `6c67649`(knot)。
   - 将来: `Tooltip` widget としてラップ(現状は Container を `trigger()` で包む方式)/ 遅延精度は tick 粒度(500ms)依存なので細かくしたければ別途。
-- **FW-14 [fw] P3 🧷 — Input の見た目が「枠つき四角」固定でカスタムできない**(2026-06-27 起票・未着手)
+- **✅ FW-14 [fw] P3 🧷 — Input の見た目が「枠つき四角」固定でカスタムできない = 完了 (2026-06-29, 実機 OK)**
   動機: Input は角丸・borderless・枠色変更ができず、検索バー風 / 下線だけ / 枠なしインライン編集 といったバリエーションが作れない。デザインは二の次だが、アイコン化(FW-12)・ツールチップ(FW-13)で UI が整ってくると、四角い枠だけが浮きやすい。
-  真因確定(2026-06-27 コード確認): [input.rs](../crates/shroud_widgets/src/input.rs) `paint`(1445)が `fill_rect` 直描きで **背景塗り + 全周 1px ボーダー(上下左右 4 本の sharp rect)** を固定で描く。角丸経路に乗っていない。`border_color` フィールドは存在する(461)が **pub builder が無く**、`resolve_border`(1172)は theme `input_border` を読むだけ ∴ 枠色すらインスタンス単位で変えられない(テーマ全体を変えない限り全 Input 共通)。横 padding `8.0` もハードコード(1481)。今いじれるのは `.background()` / `.text_color()` / `.focus_ring_color()` / `.selection_color()` / `.placeholder()` / `.font_size()` の色・サイズ系のみ。
-  実装方針(コスト低): **FW-9 で追加済の `stroke_rect_rounded` / `DrawRect.border_width` 角丸ストローク経路がそのまま使える**(レンダラ側の角丸枠プリミティブは既にある)。① `paint` の `fill_rect` 4 本 → 角丸 fill + 角丸 stroke へ置換、② `.radius(f32)` builder、③ `.border_color(Color)` と枠を消す `.borderless()`(or `.border(Option<Color>)`)builder を追加。Container/Button が既に持つ `.radius()` 系 API と対称に。padding も将来 builder 化の余地あり。
-  優先度メモ: design は二の次(ユーザー談)∴ P3、release-blocker ではない。
+  真因確定(2026-06-27 コード確認): [input.rs](../crates/shroud_widgets/src/input.rs) `paint` が `fill_rect` 直描きで **背景塗り + 全周 1px ボーダー(上下左右 4 本の sharp rect)** を固定で描いていた。角丸経路に乗っておらず、`border_color` フィールドはあるが pub builder が無く `resolve_border` が theme `input_border` を読むだけ ∴ 枠色すらインスタンス単位で変えられなかった。
+  対応(framework): **FW-9 の角丸ストローク経路(`fill_rect_rounded` / `stroke_rect_rounded` = `DrawRect.border_width`)をそのまま流用**しレンダラ無改造。`paint` の border を **4 本の sharp rect → `fill_rect_rounded(bg, radius)` + (枠ありなら) 内側 1px の `stroke_rect_rounded(border, radius, 1.0)` 1 枚**に置換(SDF が角を radius に合わせて丸める)。builder 3 つを Container/Button と対称に追加: `.radius(px)`(塗り+枠を角丸、負値 0 クランプ)/ `.border_color(c)`(インスタンス単位の枠色)/ `.borderless()`(枠を消し塗りだけ)。**デフォルト不変(radius 0・枠あり)∴ 既存 Input は見た目そのまま**。paint テスト5件(rect 数=塗り+枠 / 両 rect の角丸 / 負値クランプ / borderless で枠消失 / 枠色上書き)。`shroud_widgets` 251 テスト緑、fmt/clippy(framework+knot --all-targets)クリーン。commit `2fda28a`。
+  対応(Knot・初の実使用): [sidebar.rs](../examples/knot/src/sidebar.rs) の検索ボックスに `.radius(8.0)` を適用し「検索バー風」に。commit `9ea2362`。**実機 OK**(2026-06-29 ユーザー確認: 角丸きれい・入力/プレースホルダ/focus ring 退行なし・light/dark 両方 OK)。
+  - 将来: `padding` の builder 化 / 下線だけ(bottom-border)スタイルは未対応(今回は全周枠の角丸+消去まで)。
 
 #### Knot app — UX 磨き
 
