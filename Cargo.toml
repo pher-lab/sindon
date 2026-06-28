@@ -20,6 +20,7 @@ members = [
     "examples/hover_demo",
     "examples/image_demo",
     "examples/knot",
+    "examples/knot_clone",
     "examples/knot_spike",
     "examples/markdown_demo",
     "examples/modal_demo",

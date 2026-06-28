@@ -1,0 +1,135 @@
+//! Unlock screen — faithful reproduction of `Auth/UnlockScreen.tsx`.
+//!
+//! Reference layout (Tailwind):
+//!   - Full-screen page bg, flex center both axes, `p-4`.
+//!   - Top-right language `<select>` (`absolute top-4 right-4`) — DEFERRED,
+//!     see gap G5 (no absolute-positioning primitive).
+//!   - Centered content column, `w-full max-w-md`:
+//!       - header (`text-center mb-8`): "Knot" `text-4xl font-bold`, subtitle
+//!         `text-gray-500`.
+//!       - form (`space-y-6`): "Unlock" `text-xl font-semibold`; a labelled
+//!         password field (`px-4 py-3 border rounded-lg`); a full-width blue
+//!         submit (`py-3 bg-blue-600`); a centered "Forgot password?" link.
+//!
+//! This is a UI-only clone: the submit just navigates to a placeholder main
+//! screen. Friction encountered while building this is logged as it surfaces.
+
+use shroud::core::Color;
+use shroud::text::FontWeight;
+use shroud::widgets::tree::WidgetTree;
+use shroud::widgets::{Button, Container, SecureInput, TextWidget};
+
+use crate::tokens;
+
+pub fn build(tree: &mut WidgetTree) {
+    // Outer: page background, centered, p-4 (16px).
+    let root = tree.set_root(
+        Container::column()
+            .width_full()
+            .height_full()
+            .background(tokens::background())
+            .padding(16.0)
+            .justify_center(),
+    );
+
+    // Centered content, full width up to max-w-md (28rem = 448px).
+    let content = tree.add_child(
+        root,
+        Container::column()
+            .width_full()
+            .max_width(448.0)
+            .margin_x_auto()
+            .gap(24.0), // space-y-6
+    );
+
+    // --- Header (text-center, mb-8) ---
+    let header = tree.add_child(content, Container::column().align_center().gap(8.0));
+    tree.add_child(
+        header,
+        TextWidget::new("Knot")
+            .font_size(36.0) // text-4xl
+            .weight(FontWeight::BOLD)
+            .color(tokens::on_surface()),
+    );
+    tree.add_child(
+        header,
+        TextWidget::new("Your private notes, locked tight.")
+            .font_size(16.0)
+            .color(tokens::muted()),
+    );
+
+    // --- "Unlock" heading (text-xl font-semibold) ---
+    tree.add_child(
+        content,
+        TextWidget::new("Unlock")
+            .font_size(20.0)
+            .weight(FontWeight::SEMIBOLD)
+            .color(tokens::on_surface()),
+    );
+
+    // --- Password field group ---
+    let group = tree.add_child(content, Container::column().gap(8.0));
+    tree.add_child(
+        group,
+        TextWidget::new("Master Password")
+            .font_size(14.0) // text-sm
+            .weight(FontWeight::MEDIUM)
+            .color(tokens::on_surface()),
+    );
+    // `border rounded-lg`: the default border tracks `input_border` (gray-300
+    // light / gray-700 dark), and `.radius(8.0)` matches `rounded-lg` (G2 now
+    // landed). Padding/height are still fixed (gap G3), so this doesn't yet hit
+    // `px-4 py-3` (≈48px tall).
+    let input_idx = tree.add_child(
+        group,
+        SecureInput::new()
+            .placeholder("Enter your master password")
+            .font_size(16.0)
+            .radius(8.0),
+    );
+    tree.focus_initially(input_idx);
+
+    // --- Submit (w-full py-3 bg-blue-600) ---
+    // No padding/height control on Button (gap G6); relying on column
+    // align-stretch for the full width.
+    tree.add_child(
+        content,
+        Button::new("Unlock")
+            .radius(8.0)
+            .background(tokens::primary())
+            .hover_background(tokens::primary_hover())
+            .text_color(Color::WHITE)
+            .on_click(|ctx| {
+                ctx.replace_screen(placeholder_main);
+            }),
+    );
+
+    // --- "Forgot password?" link (centered, text-sm text-gray-500) ---
+    let link_row = tree.add_child(content, Container::row().justify_center());
+    tree.add_child(
+        link_row,
+        Button::new("Forgot password?")
+            .background(Color::TRANSPARENT)
+            .text_color(tokens::muted())
+            .font_size(14.0)
+            .on_click(|_ctx| { /* would open recovery */ }),
+    );
+}
+
+/// Stand-in for the unlocked main screen until it's built — just proves the
+/// nav wiring works.
+fn placeholder_main(tree: &mut WidgetTree) {
+    let root = tree.set_root(
+        Container::column()
+            .width_full()
+            .height_full()
+            .background(tokens::background())
+            .center(),
+    );
+    tree.add_child(
+        root,
+        TextWidget::new("Main screen — TODO")
+            .font_size(24.0)
+            .color(tokens::on_surface()),
+    );
+}

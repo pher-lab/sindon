@@ -1811,6 +1811,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "knot_clone"
+version = "0.1.0"
+dependencies = [
+ "shroud",
+]
+
+[[package]]
 name = "knot_spike"
 version = "0.1.0"
 dependencies = [
