@@ -285,6 +285,9 @@ pub fn build(
                 .placeholder(i18n::tr(Key::SidebarSearchPlaceholder))
                 .value(w.search)
                 .font_size(13.0)
+                // Rounded, pill-ish search-bar chrome (FW-14) instead of the
+                // default boxed frame, so it reads as a search field.
+                .radius(8.0)
                 .on_change(move |val, ctx| {
                     w_change.state.borrow_mut().set_search_query(val);
                     rebuild_list(&w_change, ctx);
