@@ -729,7 +729,7 @@ impl Input {
     }
 
     /// Set how long a wheel scroll takes to glide to its new position in a
-    /// multi-line viewport. Defaults to [`SCROLL_TRANSITION`] (120 ms), matching
+    /// multi-line viewport. Defaults to `SCROLL_TRANSITION` (120 ms), matching
     /// `ScrollView`; pass [`Duration::ZERO`] for the pre-animation instant jump
     /// (FW-7b). Caret-reveal and re-clamp always snap regardless of this value.
     pub fn scroll_transition(mut self, duration: Duration) -> Self {
@@ -1969,7 +1969,9 @@ impl Widget for Input {
         }
 
         if self.focused && ctx.focus_visible() {
-            ctx.paint_focus_ring(layout, self.focus_ring_color, 0.0);
+            // Ring tracks the field's corner radius, so a rounded input gets a
+            // rounded ring instead of a square one around rounded corners.
+            ctx.paint_focus_ring(layout, self.focus_ring_color, self.radius);
         }
     }
 

@@ -66,6 +66,14 @@ pub struct Container {
     /// How long the hover fade takes; `Duration::ZERO` makes it instant.
     hover_transition: Duration,
     radius: f32,
+    /// Border stroke width in px. `0.0` (the default) draws no border. Set via
+    /// [`Container::border`]; the stroke hugs the inside of the layout edge and
+    /// rounds its corners with [`radius`](Self::radius), reusing the same SDF
+    /// path as [`Input`](crate::Input)'s frame.
+    border_width: f32,
+    /// Border color, re-read every paint like [`background`](Self::background).
+    /// `None` when no border is set.
+    border_color: Option<Reactive<Color>>,
     visible: Reactive<bool>,
     /// Optional right-click handler. When set, `MouseDown { button: Right }`
     /// inside the container's layout rect invokes the handler with the
@@ -114,6 +122,8 @@ impl Container {
             hover_anim: None,
             hover_transition: DEFAULT_HOVER_TRANSITION,
             radius: 0.0,
+            border_width: 0.0,
+            border_color: None,
             visible: Reactive::Static(true),
             on_context_menu: None,
             on_press: None,
@@ -137,6 +147,8 @@ impl Container {
             hover_anim: None,
             hover_transition: DEFAULT_HOVER_TRANSITION,
             radius: 0.0,
+            border_width: 0.0,
+            border_color: None,
             visible: Reactive::Static(true),
             on_context_menu: None,
             on_press: None,
@@ -214,6 +226,23 @@ impl Container {
     /// caller to know the final size).
     pub fn radius(mut self, px: f32) -> Self {
         self.radius = px.max(0.0);
+        self
+    }
+
+    /// Draw a `width`-px border around the container in `color`.
+    ///
+    /// The stroke hugs the inside of the layout edge and rounds its corners
+    /// with [`radius`](Self::radius) — pair them for the ubiquitous
+    /// `border border-gray-300 rounded-lg` card / panel / divider look. The
+    /// color is [`Reactive`], re-read every paint like
+    /// [`background`](Self::background), so a border can track a live theme
+    /// swap. `width <= 0.0` clamps to `0.0` (no border), the default.
+    ///
+    /// Unlike the fill, a border paints even when no `background` is set, so a
+    /// transparent box can carry just an outline.
+    pub fn border(mut self, width: f32, color: impl Into<Reactive<Color>>) -> Self {
+        self.border_width = width.max(0.0);
+        self.border_color = Some(color.into());
         self
     }
 
@@ -503,6 +532,15 @@ impl Widget for Container {
             }
         } else if let Some(color) = self.background.as_ref().map(|c| c.get()) {
             ctx.fill_rect_rounded(layout, color, self.radius);
+        }
+
+        // Border stroke, painted over the fill so it reads on top of a
+        // background and on its own for a transparent outlined box. Reuses the
+        // same rounded-SDF path as Input's frame.
+        if self.border_width > 0.0 {
+            if let Some(color) = self.border_color.as_ref().map(|c| c.get()) {
+                ctx.stroke_rect_rounded(layout, color, self.radius, self.border_width);
+            }
         }
     }
 

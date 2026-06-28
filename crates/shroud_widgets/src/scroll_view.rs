@@ -196,7 +196,7 @@ impl ScrollView {
     }
 
     /// Set how long a wheel scroll takes to glide to its new position.
-    /// Defaults to [`SCROLL_TRANSITION_DEFAULT`] (120 ms); pass
+    /// Defaults to `SCROLL_TRANSITION_DEFAULT` (120 ms); pass
     /// [`Duration::ZERO`] for the pre-animation instant jump (FW-7).
     pub fn scroll_transition(mut self, duration: Duration) -> Self {
         self.scroll_transition = duration;

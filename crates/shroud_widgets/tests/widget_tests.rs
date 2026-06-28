@@ -728,6 +728,91 @@ fn button_default_radius_is_zero() {
     assert_eq!(ctx.rects[0].radius, 0.0);
 }
 
+// ── Container border (G1) ────────────────────────────────────────
+//
+// `Container::border(width, color)` paints a stroke rect over the fill,
+// rounding with `.radius()`. A border paints even without a background;
+// `width <= 0.0` draws nothing.
+
+fn paint_container(c: Container) -> PaintContext {
+    let mut tree = WidgetTree::new();
+    tree.set_root(c.width(120.0).height(80.0));
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    ctx
+}
+
+#[test]
+fn container_border_emits_stroke_over_fill() {
+    let red = Color::rgb(1.0, 0.0, 0.0);
+    let ctx = paint_container(
+        Container::column()
+            .background(Color::WHITE)
+            .border(1.0, red),
+    );
+    assert_eq!(ctx.rects.len(), 2, "bg fill + border stroke");
+    assert_eq!(ctx.rects[0].border_width, 0.0, "rect[0] is the fill");
+    assert_eq!(ctx.rects[1].border_width, 1.0, "rect[1] is a 1px stroke");
+    assert_eq!(ctx.rects[1].color, red, "stroke uses the border color");
+}
+
+#[test]
+fn container_default_has_no_border() {
+    let ctx = paint_container(Container::column().background(Color::WHITE));
+    assert_eq!(ctx.rects.len(), 1, "just the fill, no stroke");
+    assert_eq!(ctx.rects[0].border_width, 0.0);
+}
+
+#[test]
+fn container_border_rounds_with_radius() {
+    let ctx = paint_container(
+        Container::column()
+            .background(Color::WHITE)
+            .radius(8.0)
+            .border(2.0, Color::rgb(0.0, 0.0, 1.0)),
+    );
+    assert_eq!(ctx.rects.len(), 2);
+    assert_eq!(ctx.rects[0].radius, 8.0, "fill rounds");
+    assert_eq!(ctx.rects[1].radius, 8.0, "border rounds to match");
+    assert_eq!(ctx.rects[1].border_width, 2.0);
+}
+
+#[test]
+fn container_border_paints_without_background() {
+    let ctx = paint_container(Container::column().border(1.0, Color::rgb(0.5, 0.5, 0.5)));
+    assert_eq!(
+        ctx.rects.len(),
+        1,
+        "a transparent box can carry just an outline"
+    );
+    assert!(
+        ctx.rects[0].border_width > 0.0,
+        "the lone rect is the stroke"
+    );
+}
+
+#[test]
+fn container_zero_border_width_draws_nothing() {
+    let ctx = paint_container(
+        Container::column()
+            .background(Color::WHITE)
+            .border(0.0, Color::rgb(1.0, 0.0, 0.0)),
+    );
+    assert_eq!(ctx.rects.len(), 1, "width 0 draws no stroke");
+    assert_eq!(ctx.rects[0].border_width, 0.0);
+}
+
+#[test]
+fn container_negative_border_width_clamps_to_zero() {
+    let ctx = paint_container(
+        Container::column()
+            .background(Color::WHITE)
+            .border(-4.0, Color::rgb(1.0, 0.0, 0.0)),
+    );
+    assert_eq!(ctx.rects.len(), 1, "negative width clamps to no stroke");
+}
+
 // ── Input chrome (FW-14) ─────────────────────────────────────────
 //
 // A default single-line Input paints exactly two rects: the background
