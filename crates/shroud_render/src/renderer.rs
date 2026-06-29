@@ -1362,13 +1362,24 @@ fn sdf_rounded_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
     return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
+// sRGB-encoded color (the literal hex bytes the app supplies) -> linear light.
+// The surface is an sRGB format, so the GPU re-encodes our output on write;
+// passing sRGB values straight through double-encodes and washes everything
+// out. Decode here so the round-trip is identity. Matches the CPU
+// `srgb_to_linear` used for image mip building.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let low = c / 12.92;
+    let high = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(high, low, c <= vec3<f32>(0.04045));
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Fast path: an axis-aligned solid fill needs neither the SDF nor a
     // stroke band. A sharp-cornered *border* (radius 0, border > 0) still
     // takes the SDF path below so its outline gets antialiased edges.
     if (in.radius <= 0.0 && in.border_width <= 0.0) {
-        return in.color;
+        return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
     }
     let d = sdf_rounded_rect(in.local_pos, in.half_size, in.radius);
     // Antialiased outer edge: 1 px transition. clamp(0.5 - d) gives full
@@ -1383,7 +1394,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let inner = clamp(0.5 - (d + in.border_width), 0.0, 1.0);
         alpha = alpha - inner;
     }
-    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+    return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a * alpha);
 }
 "#;
 
@@ -1414,10 +1425,18 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+// See the rect shader: decode the sRGB glyph color to linear so the sRGB
+// surface re-encode is identity (no double-encode wash).
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let low = c / 12.92;
+    let high = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(high, low, c <= vec3<f32>(0.04045));
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let alpha = textureSample(t_atlas, s_atlas, in.uv).r;
-    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+    return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a * alpha);
 }
 "#;
 
@@ -1448,10 +1467,19 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+// See the rect shader. The texel is already linear (sampled from an sRGB
+// texture), so only the sRGB tint color needs decoding; for the common white
+// tint (incl. color-emoji glyphs) this is identity.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let low = c / 12.92;
+    let high = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(high, low, c <= vec3<f32>(0.04045));
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let texel = textureSample(t_image, s_image, in.uv);
-    return texel * in.color;
+    return texel * vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
 }
 "#;
 
