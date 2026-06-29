@@ -66,6 +66,15 @@ pub fn gray_900() -> Color {
 pub fn white() -> Color {
     Color::WHITE
 }
+pub fn blue_50() -> Color {
+    c(0xef, 0xf6, 0xff)
+}
+pub fn blue_100() -> Color {
+    c(0xdb, 0xea, 0xfe)
+}
+pub fn blue_300() -> Color {
+    c(0x93, 0xc5, 0xfd)
+}
 pub fn blue_400() -> Color {
     c(0x60, 0xa5, 0xfa)
 }
@@ -80,6 +89,9 @@ pub fn blue_700() -> Color {
 }
 pub fn blue_800() -> Color {
     c(0x1e, 0x40, 0xaf)
+}
+pub fn blue_900() -> Color {
+    c(0x1e, 0x3a, 0x8a)
 }
 pub fn red_100() -> Color {
     c(0xfe, 0xe2, 0xe2)
