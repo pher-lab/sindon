@@ -27,14 +27,59 @@
 //!   - icons are approximate single glyphs (the real fix, a bundled icon font,
 //!     is FW-12 and out of scope for this UI-only clone).
 //!
-//! The overlays — settings dropdown, error banner, context menu (slice 3) —
-//! are still TODO.
+//! **Slice 3: the overlays.** The settings dropdown (gear), the actions
+//! dropdown (⋮), the note-row right-click context menu, and the error banner.
+//! These are all `absolute`/`fixed` in React, so the slice is the deliberate
+//! **G5 verification** — can shroud's `Layer` + anchor reproduce them?
+//!
+//! Findings (logged in `docs/knot-ui-repro-gaps.md` under G5):
+//!   - **Cursor-anchored popovers work cleanly.** The context menu
+//!     (`AnchorRect` at the right-click point) is a faithful 1:1 — this is
+//!     the win the slice was meant to confirm.
+//!   - **No way to read a trigger's rect on click.** A dropdown anchored to
+//!     its button (`right-0 top-full`) is universal UX, but only
+//!     `Container::on_hover_enter` hands back the trigger rect (the tooltip
+//!     path); click/press handlers give a *cursor point*, not the rect. So
+//!     the gear/⋮ menus anchor at the cursor instead (close, not exact), or
+//!     one must build a custom `Widget` like `Dropdown` does internally.
+//!   - **No right-align placement.** `AnchorRect` left-aligns the popover at
+//!     `rect.x`; React's `right-0` (right edge meets the trigger's) isn't a
+//!     placement option, so the menus open rightward of the gear, not leftward.
+//!   - **No fixed-edge / offset anchor.** The error banner is
+//!     `top-2 left-1/2 -translate-x-1/2` (top-center of the editor pane).
+//!     `LayerAnchor` offers only `ViewportCenter` (both axes) and `AnchorRect`
+//!     (relative to a rect); neither expresses "top-center" or any fixed
+//!     viewport offset. We push the banner `ViewportCenter` so its *styling*
+//!     is reviewable, but the position is wrong — the strongest argument for
+//!     the future absolute-anchor variant the `#[non_exhaustive]`
+//!     `LayerAnchor` already anticipates.
+//!
+//! Two **framework bugs** the slice flushed out (logged G14 / G15):
+//!   - **G14 — a `Dropdown` inside a layer mis-anchored** (now FIXED). A
+//!     widget's `event` `layout` rect is layer-*local* (the layer is laid out
+//!     at its own origin + a stored offset), but `LayerAnchor::AnchorRect`
+//!     wants viewport coords, so a `<select>` opened inside the settings
+//!     popover threw its option list to the screen's top-left. Fixed by having
+//!     `EventContext::push_layer` translate an `AnchorRect` by the active
+//!     layer offset; the settings selects are real [`Dropdown`]s again.
+//!   - **G15 — a trigger stays stuck in hover after its popover closes** (open).
+//!     The capturing layer swallows the `MouseLeave`, so the gear/⋮ keep their
+//!     hover fill until hovered again.
+//!
+//! Minor: `MenuItem` has no disabled state (the "Export All" row is
+//! `disabled:opacity-40` when there are no notes); `Container` exposes no
+//! `min_width` (`min-w-[140px]` faked with a fixed `width`); `Button` defaults
+//! its hover/press fill to *primary* when only `background` is set (the
+//! transparent `×` flashed blue until both fills were pinned transparent).
 
-use shroud::core::Color;
-use shroud::reactive::Signal;
+use shroud::core::{Color, Point, Rect};
+use shroud::reactive::{Reactive, Signal};
 use shroud::text::FontWeight;
+use shroud::widgets::layer::{LayerAnchor, LayerOptions, Placement};
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, Input, ScrollView, TextWidget};
+use shroud::widgets::{
+    Button, Container, Dropdown, EventContext, Input, MenuItem, ScrollView, TextWidget,
+};
 
 use crate::tokens;
 
@@ -105,12 +150,14 @@ fn sidebar(tree: &mut WidgetTree, parent: usize) {
     );
     tree.add_child(title_row, Container::row().grow(1.0)); // spacer → push group right
 
-    // Action button group (`flex items-center gap-1`).
+    // Action button group (`flex items-center gap-1`). The gear + ⋮ open
+    // anchored popovers; trash + lock stay no-op icons (slice 3 only wires the
+    // overlays the dropdowns surface).
     let group = tree.add_child(title_row, Container::row().align_center().gap(4.0));
-    for glyph in ["\u{2699}", "\u{22EE}", "\u{1F5D1}", "\u{1F512}"] {
-        // ⚙ settings, ⋮ more, 🗑 trash, 🔒 lock
-        icon_button(tree, group, glyph);
-    }
+    menu_icon_trigger(tree, group, "\u{2699}", open_settings_menu); // ⚙ settings
+    menu_icon_trigger(tree, group, "\u{22EE}", open_actions_menu); // ⋮ more
+    icon_button(tree, group, "\u{1F5D1}"); // 🗑 trash
+    icon_button(tree, group, "\u{1F512}"); // 🔒 lock
 
     // New Note button (`w-full py-2 bg-blue-600 ... rounded-lg text-sm`).
     // w-full comes free from the column's stretch; py-2 height is not
@@ -207,7 +254,12 @@ fn note_item(tree: &mut WidgetTree, parent: usize, note: &DummyNote, selected: b
             .hoverable()
             .hover_background(tokens::pick(tokens::gray_300(), tokens::gray_700()));
     }
-    let item = tree.add_child(parent, row.on_press(|_pt, _ctx| { /* would select */ }));
+    // Right-click → context menu anchored at the cursor (the clean G5 win).
+    let item = tree.add_child(
+        parent,
+        row.on_press(|_pt, _ctx| { /* would select */ })
+            .on_context_menu(move |pos, ctx| open_note_context_menu(pos, pinned, ctx)),
+    );
 
     // Title line (`flex items-center gap-1`): optional pin glyph + title.
     let title_line = tree.add_child(item, Container::row().align_center().gap(4.0));
@@ -317,7 +369,19 @@ fn editor_title_section(tree: &mut WidgetTree, parent: usize) {
     // Pinned → blue (the selected note is pinned); export/trash → gray.
     flat_icon_button(tree, row, "\u{1F4CC}", 8.0, tokens::primary()); // 📌 pin
     flat_icon_button(tree, row, "\u{1F4E4}", 8.0, icon_fg()); // 📤 export
-    flat_icon_button(tree, row, "\u{1F5D1}", 8.0, icon_fg()); // 🗑 delete
+    // 🗑 delete — stands in as the error-banner demo trigger (in the real app
+    // the banner appears on a backend error, which this UI-only clone has none
+    // of). Clicking it pushes the banner; the banner's × dismisses it.
+    tree.add_child(
+        row,
+        Button::new("\u{1F5D1}")
+            .font_size(16.0)
+            .radius(8.0)
+            .background(Color::TRANSPARENT)
+            .text_color(icon_fg())
+            .hover_background(tokens::pick(tokens::gray_200(), tokens::gray_800()))
+            .on_click(show_error_banner),
+    );
 
     // Saved status (`text-xs text-gray-500`). The 8px spacer aligns its text
     // with the title *input* above, whose fixed internal padding offsets the
@@ -522,4 +586,273 @@ fn divider(tree: &mut WidgetTree, parent: usize) {
             .height(1.0)
             .background(border()),
     );
+}
+
+// --- Overlays (slice 3) ------------------------------------------------------
+//
+// All four overlays are `absolute`/`fixed` in React; this slice reproduces them
+// with `Layer`s to verify how far shroud's anchors stretch (gap G5). See the
+// module doc for the findings. Shared chrome: popovers are `bg-white
+// dark:bg-gray-700` panels with a `rounded-lg` `border-gray-200/600`; menus use
+// `bg-white dark:bg-gray-800`.
+
+/// Popover panel surface (`bg-white dark:bg-gray-700`).
+fn popover_surface() -> Reactive<Color> {
+    tokens::pick(tokens::white(), tokens::gray_700())
+}
+
+/// Popover border + inner row dividers (`border-gray-200 dark:border-gray-600`).
+/// Lighter than the panel-level [`border`] (gray-300/700).
+fn popover_border() -> Reactive<Color> {
+    tokens::pick(tokens::gray_200(), tokens::gray_600())
+}
+
+/// A 1px divider between popover rows (`border-b border-gray-200/600`). Same
+/// per-side-border workaround as [`divider`] (gap G10), tinted for popovers.
+fn popover_divider(tree: &mut WidgetTree, parent: usize) {
+    tree.add_child(
+        parent,
+        Container::column()
+            .width_full()
+            .height(1.0)
+            .background(popover_border()),
+    );
+}
+
+/// A header icon that opens a popover on press. Unlike [`icon_button`] (a plain
+/// [`Button`]), this is a [`Container`] because its `on_press` hands back the
+/// click *point* — `Button::on_click` gives nothing, and no click/press handler
+/// hands back the trigger's own *rect* (only `on_hover_enter` does, for
+/// tooltips). So a dropdown anchored to its button can't read the button rect
+/// without a custom `Widget`; we anchor at the cursor instead (gap G5).
+fn menu_icon_trigger(
+    tree: &mut WidgetTree,
+    parent: usize,
+    glyph: &'static str,
+    open: fn(Point, &mut EventContext),
+) {
+    let btn = tree.add_child(
+        parent,
+        Container::row()
+            .align_center()
+            .justify_center()
+            .padding(6.0) // p-1.5
+            .radius(6.0)
+            .hoverable()
+            .hover_background(border())
+            .on_press(open),
+    );
+    tree.add_child(btn, TextWidget::new(glyph).font_size(16.0).color(icon_fg()));
+}
+
+/// Build an `AnchorRect` popover layer anchored just below a cursor point —
+/// the shared shape for the gear / ⋮ / context menus. The panel `root` is
+/// supplied by the caller (width + surface differ per menu).
+fn open_popover_at(
+    pos: Point,
+    ctx: &mut EventContext,
+    root: Container,
+    populate: impl FnOnce(&mut WidgetTree, usize) + 'static,
+) {
+    ctx.push_layer(
+        LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
+            rect: Rect::new(pos.x, pos.y, 0.0, 0.0),
+            prefer: Placement::Below,
+        }),
+        root,
+        populate,
+    );
+}
+
+/// The gear (⚙) settings dropdown: `w-48`, a `border-b`-separated stack of
+/// labelled selects (theme / auto-lock / language / font / sort) plus two text
+/// action rows. The `<select>`s are real [`Dropdown`]s nested inside this
+/// popover layer — the case that exercised the G14 fix (see [`select`]).
+fn open_settings_menu(pos: Point, ctx: &mut EventContext) {
+    let panel = Container::column()
+        .width(192.0) // w-48
+        .background(popover_surface())
+        .radius(8.0) // rounded-lg
+        .border(1.0, popover_border());
+    open_popover_at(pos, ctx, panel, |tree, root| {
+        settings_select_row(tree, root, "Theme", &["System", "Light", "Dark"]);
+        popover_divider(tree, root);
+        settings_select_row(
+            tree,
+            root,
+            "Auto-lock",
+            &["Never", "1 min", "5 min", "10 min", "15 min", "30 min"],
+        );
+        popover_divider(tree, root);
+        settings_select_row(tree, root, "Language", &["System", "日本語", "English"]);
+        popover_divider(tree, root);
+        settings_select_row(tree, root, "Font size", &["Small", "Medium", "Large"]);
+        popover_divider(tree, root);
+        settings_sort_row(tree, root);
+        popover_divider(tree, root);
+        settings_text_row(tree, root, "Backup Settings");
+        popover_divider(tree, root);
+        settings_text_row(tree, root, "Change Master Password");
+    });
+}
+
+/// One `px-3 py-2` settings row: an `text-xs` label over a full-width select.
+/// `px-3 py-2` is asymmetric (G4) → uniform `padding(8)`.
+fn settings_select_row(tree: &mut WidgetTree, parent: usize, label: &str, options: &[&str]) {
+    let row = tree.add_child(parent, Container::column().padding(8.0).gap(4.0));
+    tree.add_child(
+        row,
+        TextWidget::new(label)
+            .font_size(12.0)
+            .color(tokens::muted()),
+    );
+    tree.add_child(row, select(options));
+}
+
+/// The sort row: a select + a direction-toggle button (`↓`).
+fn settings_sort_row(tree: &mut WidgetTree, parent: usize) {
+    let row = tree.add_child(parent, Container::column().padding(8.0).gap(4.0));
+    tree.add_child(
+        row,
+        TextWidget::new("Sort")
+            .font_size(12.0)
+            .color(tokens::muted()),
+    );
+    let controls = tree.add_child(row, Container::row().align_center().gap(4.0));
+    tree.add_child(controls, select(&["Updated", "Created", "Title"]));
+    tree.add_child(
+        controls,
+        Button::new("\u{2193}") // ↓ descending
+            .font_size(14.0)
+            .radius(4.0)
+            .background(tokens::pick(tokens::gray_100(), tokens::gray_600()))
+            .text_color(tokens::muted())
+            .hover_background(tokens::pick(tokens::gray_200(), tokens::gray_500()))
+            .press_background(tokens::pick(tokens::gray_200(), tokens::gray_500()))
+            .on_click(|_ctx| {}),
+    );
+}
+
+/// A `<select>`-styled [`Dropdown`] for the settings panel: `bg-gray-100
+/// dark:bg-gray-600`, `border-gray-300 dark:border-gray-500`, `text-sm`,
+/// `rounded`. Seeded at index 0 with a throwaway signal (UI-only clone).
+///
+/// These live *inside* the settings popover layer — the case that flushed out
+/// G14, where a `Dropdown`'s option list anchored to the layer's local origin
+/// instead of under the trigger. Now fixed in the framework
+/// (`EventContext::push_layer` translates an `AnchorRect` by the active layer
+/// offset), so the option list opens under the select even nested in a popover.
+fn select(options: &[&str]) -> Dropdown {
+    Dropdown::new(
+        options.iter().map(|s| s.to_string()).collect(),
+        Signal::new(0_usize),
+    )
+    .font_size(14.0)
+    .radius(4.0)
+    .background(tokens::pick(tokens::gray_100(), tokens::gray_600()))
+    .border_color(tokens::pick(tokens::gray_300(), tokens::gray_500()))
+}
+
+/// A `px-3 py-2` text action row in the settings panel (Backup / Change
+/// Password). React renders these as left-aligned `text-sm` buttons; a
+/// [`MenuItem`] is the closest primitive (left label, hover highlight).
+fn settings_text_row(tree: &mut WidgetTree, parent: usize, label: &str) {
+    tree.add_child(
+        parent,
+        MenuItem::new(label.to_string(), |ctx| ctx.pop_top_layer()),
+    );
+}
+
+/// The ⋮ actions dropdown: Import / Export All / Restore Welcome. `w-48`.
+/// Export-All is `disabled:opacity-40` when there are no notes, but [`MenuItem`]
+/// has no disabled state (minor gap), so it always renders enabled here.
+fn open_actions_menu(pos: Point, ctx: &mut EventContext) {
+    let panel = Container::column()
+        .width(192.0) // w-48
+        .padding(4.0) // py-1
+        .background(popover_surface())
+        .radius(8.0)
+        .border(1.0, popover_border());
+    open_popover_at(pos, ctx, panel, |tree, root| {
+        tree.add_child(root, MenuItem::new("Import...", |c| c.pop_top_layer()));
+        tree.add_child(root, MenuItem::new("Export All", |c| c.pop_top_layer()));
+        popover_divider(tree, root);
+        tree.add_child(
+            root,
+            MenuItem::new("Restore Welcome Note", |c| c.pop_top_layer()),
+        );
+    });
+}
+
+/// The note-row right-click menu: Pin/Unpin, Duplicate, Export, then a red
+/// Delete. `min-w-[140px]` (faked with a fixed `width`, no `Container::min_width`),
+/// `bg-white dark:bg-gray-800`. The faithful, clean G5 case — a popover
+/// anchored straight at the cursor.
+fn open_note_context_menu(pos: Point, pinned: bool, ctx: &mut EventContext) {
+    let menu = Container::column()
+        .width(140.0) // min-w-[140px] (no min_width builder → fixed width)
+        .padding(4.0) // py-1
+        .background(tokens::pick(tokens::white(), tokens::gray_800()))
+        .radius(8.0)
+        .border(1.0, tokens::pick(tokens::gray_200(), tokens::gray_700()));
+    open_popover_at(pos, ctx, menu, move |tree, root| {
+        let pin_label = if pinned { "Unpin" } else { "Pin" };
+        tree.add_child(root, MenuItem::new(pin_label, |c| c.pop_top_layer()));
+        tree.add_child(root, MenuItem::new("Duplicate", |c| c.pop_top_layer()));
+        tree.add_child(root, MenuItem::new("Export...", |c| c.pop_top_layer()));
+        popover_divider(tree, root);
+        tree.add_child(
+            root,
+            MenuItem::new("Delete", |c| c.pop_top_layer())
+                .text_color(tokens::pick(tokens::red_700(), tokens::red_500())),
+        );
+    });
+}
+
+/// The note-error banner: `bg-red-100 dark:bg-red-900/80`, `border-red-300/700`,
+/// rounded, an error message + a `×` dismiss.
+///
+/// React positions it `absolute top-2 left-1/2 -translate-x-1/2` (top-center of
+/// the editor pane). `LayerAnchor` has only `ViewportCenter` (both axes) and
+/// `AnchorRect` (relative to a rect) — neither expresses top-center or a fixed
+/// viewport offset — so this pushes `ViewportCenter`: the *styling* matches but
+/// the position is mid-screen, not top. The clearest argument for the
+/// absolute-anchor variant the `#[non_exhaustive]` `LayerAnchor` anticipates (G5).
+fn show_error_banner(ctx: &mut EventContext) {
+    let banner = Container::row()
+        .align_center()
+        .gap(8.0)
+        .padding(8.0) // px-4 py-2 (G4 → uniform)
+        .radius(8.0)
+        .background(tokens::pick(
+            tokens::red_100(),
+            // dark:bg-red-900/80 — solid red-900 at 80% alpha.
+            Color::from_rgba8(0x7f, 0x1d, 0x1d, 204),
+        ))
+        .border(1.0, tokens::pick(tokens::red_300(), tokens::red_700()));
+    // ViewportCenter is the default popover anchor; no scrim, dismiss on
+    // outside-click. See fn doc for why the position is wrong.
+    ctx.push_layer(LayerOptions::popover(), banner, |tree, root| {
+        tree.add_child(
+            root,
+            TextWidget::new("Couldn't delete note. Please try again.")
+                .font_size(14.0)
+                .color(tokens::pick(tokens::red_700(), tokens::red_200())),
+        );
+        tree.add_child(
+            root,
+            Button::new("\u{00D7}") // ×
+                .font_size(14.0)
+                .background(Color::TRANSPARENT)
+                // React's × is text-only (`hover:text-red-700`, no background).
+                // `Button` defaults its hover/press fills to the *primary* color
+                // when only `background` is set, so without these the × flashed
+                // a blue square — keep both transparent (no `hover_text_color`
+                // exists to darken the glyph, a minor gap).
+                .hover_background(Color::TRANSPARENT)
+                .press_background(Color::TRANSPARENT)
+                .text_color(tokens::pick(tokens::red_500(), tokens::red_300()))
+                .on_click(|c| c.pop_top_layer()),
+        );
+    });
 }

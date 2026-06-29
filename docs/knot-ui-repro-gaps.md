@@ -21,7 +21,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 | Recovery | 未 |
 | Main — Sidebar shell | 完了（slice 1: パネル/ヘッダ/New Note/検索/ノート行） |
 | Main — Editor pane | 完了（slice 2: タイトル欄/操作ボタン/タグ/ツールバー/本文/ステータスバー） |
-| Main — Overlays (設定 dropdown / エラーバナー / context menu) | 未（slice 3） |
+| Main — Overlays (設定 dropdown / エラーバナー / context menu) | 完了（slice 3: 設定/⋮ dropdown・右クリック context menu・エラーバナー。**G5 検証台** — 下記） |
 | 各種 Modal (Settings/Backup/ChangePw/Restore) | 未 |
 | Loading | 未 |
 
@@ -73,10 +73,34 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - Tailwind は `px-4 py-3` / `px-2 py-1` のような非対称 padding が常用。
 - `Container::padding(px)` は一律のみ。`padding_xy(x, y)` / 各辺 padding が欲しい。
 
-### G5. absolute / コーナー配置のプリミティブがない — **中**
+### G5. absolute / コーナー配置のプリミティブがない — **中（slice 3 で検証完了 = 部分的に Layer で代替可）**
 - Unlock 右上の言語 select は `absolute top-4 right-4`。通常フローの外に置く手段が
-  Container 系にない（`Layer` + anchor で代替可能か要検証）。
-- 第一稿では言語 select を省略。
+  Container 系にない（`Layer` + anchor で代替可能か要検証）。第一稿では言語 select を省略。
+- **slice 3 検証（2026-06-29）**: Main の overlay 4種（設定 dropdown / ⋮ actions / 右クリック
+  context menu / エラーバナー）を `Layer` で写経し、`absolute`/`fixed` をどこまで代替できるか確定した。
+  - **✓ カーソル位置 anchor の popover は綺麗に再現可**。context menu は `Container::on_context_menu`
+    が渡すクリック点を `LayerAnchor::AnchorRect { rect: Rect::new(pos.x, pos.y, 0,0), Below }` に
+    流すだけで React と 1:1。これが本命の確認 (= overlay は概ね Layer で賄える)。
+  - **✗ click 時に trigger 自身の rect を取る手段が無い**。dropdown を自分のボタンに anchor する
+    (`right-0 top-full`) のは普遍的 UX だが、trigger の rect を返すのは `Container::on_hover_enter`
+    (tooltip 経路) **だけ**。click/press ハンドラは*カーソル点*しか渡さない (`on_press`/
+    `on_context_menu` の `Point`)。∴ ボタン anchor の dropdown は (a) カーソル anchor で近似するか
+    (b) `Dropdown` のように内部で `event(layout)` を使う custom Widget を書くしかない。clone は (a)。
+    → 候補: `Container::on_click`(rect 付き) ないし `on_press` に rect も渡す変種。
+  - **✗ 右寄せ placement が無い**。`AnchorRect` は popover の*左*辺を `rect.x` に合わせる
+    (+viewport クランプ)。React の `right-0`(右辺を trigger 右辺に) は placement に無いので、
+    gear/⋮ メニューは gear の**右**に開く (React は左に開く)。→ 候補: `Placement` に水平方向
+    (`AlignLeft`/`AlignRight`) を追加、または `AnchorRect` に align フィールド。
+  - **✗✗ 固定エッジ / オフセット anchor が無い（最重要）**。エラーバナーは
+    `absolute top-2 left-1/2 -translate-x-1/2`(エディタペイン上端中央)。`LayerAnchor` は
+    `ViewportCenter`(両軸中央) と `AnchorRect`(rect 相対) のみで、**top-center も任意の viewport
+    オフセットも表現不可**。clone は styling 確認のため `ViewportCenter` で出した（位置は画面中央
+    で誤り）。→ `LayerAnchor` は `#[non_exhaustive]` で「absolute anchor は後で追加可」と既に明記
+    しており、これがその変種 (`Viewport { align, offset }` 等) を入れる最有力の動機。
+  - **付随する小 gap（slice 3 で同時発見）**:
+    - `MenuItem` に disabled 状態が無い（actions の "Export All" は `disabled:opacity-40`)。
+    - `Dropdown` に `grow` が無い（sort 行の select は `flex-1`）。
+    - `Container` に `min_width` builder が無い（context menu `min-w-[140px]` は固定 `width` で代用)。
 
 ### G6. Button の padding / 高さ / 固定幅 / disabled スタイルが非公開 — **中**
 - 正解の submit は `w-full py-3` かつ `disabled:bg-blue-800 disabled:cursor-not-allowed`。
@@ -160,6 +184,72 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   実機 light/dark 正常（ユーザ確認、knot も「予想よりずっと暗い」＝正しく濃くなった）。
 - 教訓: この repro 演習（密な実画面 + ユーザの目）でないと炙れなかった種類のバグ。framework 全体に
   効く最大級の収穫。
+
+### G14. layer 内の widget から開く `AnchorRect` popover が offset 分ズレる → **framework 実バグ → 解消（2026-06-29 landed）**
+- 症状（slice 3、実機）: 設定 dropdown（layer）の中の Theme `<select>`（`Dropdown`）を開くと、
+  選択肢リストが **trigger の下ではなく画面左上**（≈ layer-local 原点）に飛ぶ。`Dropdown` を modal/
+  popover の**中**に置くと必ず再現。main tree 直下の `Dropdown` は正常。
+- 真因（端から端まで追跡）: 各 layer は `WidgetTree::compute_layout*` で
+  `self.layout.compute(layer_root, w, h)`（`tree.rs:799`）と **layer 自身の原点基準**に独立レイアウト
+  され、viewport への `offset` は `place_layer` で別途算出して `layer.offset` に保持、paint/dispatch
+  時に加算する設計。ところが `dispatch_to_node`（`tree.rs:1811/1825`）は `widget.event()` に
+  `self.layout.absolute_rect(node.layout_node)` = **layer-local の rect** をそのまま渡す。`Dropdown`
+  はその `event` の `layout` を `LayerAnchor::AnchorRect{ rect }`（**viewport 座標期待**）へ素通しする
+  （`dropdown.rs:160-184`）ので、子 popover が layer offset 分だけ左上にズレる。`top_layer_offset`
+  の doc 自身が「layer の子 rect は local。viewport にするには offset を足せ」と認めている
+  （`tree.rs:367-374`）が、widget 側にその offset を知る手段が無い。
+- 派生症状: 「設定を閉じるのに外側を2回クリック要る」= ズレた選択肢リストも layer なので、stack に
+  2枚（設定 + 選択肢）積まれ、1クリック=選択肢を閉じ・2クリック目=設定を閉じる、という当然挙動が
+  「謎の2回」に見えていただけ（G14 が主因）。
+- 修正案: (a) layer subtree の dispatch で `event` に渡す `layout` に layer offset を足して
+  viewport 化（cursor 側は既に offset 減算済みなので hit-test との座標系整合に注意）、または
+  (b) `EventContext::layer_offset()` を公開し widget 側で `layout.translate(offset)` してから anchor。
+  どちらも座標系の機微があり、[[feedback-test-translation-layer]] 通り platform 変換層も独立 test 要。
+- 影響範囲: 「modal/popover の中の Dropdown」「サブメニュー」全般。app 作者が自然に踏む。**G13 級の
+  framework 全体バグ**。
+- **修正（landed）**: 案 (b) を採用。`EventContext` に dispatch 中の `current_layer_offset` を持たせ
+  （`dispatch_event` が active layer の offset から設定・dispatch 末尾で `(0,0)` にリセット）、
+  `EventContext::push_layer` が `AnchorRect` の rect をその offset で viewport 化する。widget 側は
+  無改変（`Dropdown`/`on_context_menu` とも「自分が受け取った local rect をそのまま渡す」ままで正しく
+  なる）。main tree は offset 0 ＝ no-op で回帰なし。`event.rs` にユニットテスト3本（layer 内で平行移動 /
+  main tree で不変 / `ViewportCenter` は不変）。`layer.rs` の `AnchorRect` doc も「rect は push する
+  ハンドラの座標系。layer 内なら自動で viewport 化」と更新。clone の設定 select は実 `Dropdown` に復帰。
+
+### G15. capturing layer が trigger の `MouseLeave` を食い、ホバーが固定される → **framework gap（要修正判断）**
+- 症状（slice 3、実機 + ユーザ指摘）: クリックで popover を開く trigger（`hoverable` な
+  `Container`、gear/⋮ 等）が、**外側クリックで popover を閉じた後もホバー色（灰）のまま固定**。
+  もう一度ホバーし直すと直る（実害は軽微だが「全ボタンをホバー状態で固定できてしまう」違和感）。
+- 真因: trigger を押す → 先に `MouseEnter` で hover=1.0。`on_press` が capturing layer を push。
+  layer が上にいる間 main tree はポインタイベントを一切受けない（設計どおり）ので、カーソルが
+  trigger から離れても **`MouseLeave` が来ない** → `hover_anim` が 1.0 のまま。layer を閉じても
+  カーソルは既に別所なので二度と `MouseLeave` が発火しない。
+- 修正案: capturing layer を push した時点で main tree の現ホバーを解除する（`clear_hover`、
+  `tree.rs:1696` が既にある）か、layer 解除時に現在のカーソル位置で hover を再評価する。
+  非インタラクティブ layer（tooltip）が `MouseLeave` を食わない既存の配慮（`layer.rs:96-104`）の
+  「インタラクティブ版」に当たる。
+- 影響範囲: 「クリックで開く menu/dropdown」trigger 全般。FW-13 tooltip の click-through 設計と対。
+
+### G16. 設定パネルの仕上がり差（Dropdown 寸法/角・MenuItem ラベル左寄せ）— **小（polish・要判断）**
+- slice 3 で設定 dropdown を実機確認したユーザ指摘の「惜しい」点。いずれも忠実再現を妨げないが質感差。
+  - **Dropdown が React の `<select>` より大きい**: `Dropdown` は `style` で `padding_trbl(8,12,8,12)` +
+    `measure` で高さ `font+16` を持つ（`dropdown.rs:220/258`）→ ≈46px。React は `px-2 py-1 text-sm`
+    ≈28px。padding/高さの builder が無く詰められない（G3/G6 の「寸法非公開」が **Dropdown にも及ぶ**）。
+  - **Dropdown の角が四角い**: トリガ枠を `stroke_rect_rounded` ではなく 4 本の sharp な `fill_rect`
+    で描く（`dropdown.rs:294-309`、コメントも "sharp corners are fine"）。fill は `radius` 角丸でも
+    枠は直角 → FW-15 で角丸化した `Input`/`SecureInput` と非対称。`Dropdown` 枠も radius 追従にしたい。
+  - **MenuItem のラベルがボックス左端に張り付く**: `menu_item.rs:129` がテキストを `layout.origin.x`
+    （= ボックス左端）に描く。宣言した `padding_trbl(_,12,_,12)` は箱を広げるだけで**ラベルを inset
+    しない**ので、行は左端に寄る。設定パネルの「Backup Settings / Change Master Password」が、上の
+    select 行ラベル（コンテナ padding 8px ぶん inset）より左に出て不揃いに見えるのはこれ。React は
+    全行 `px-3` で揃う。修正案: MenuItem paint で left-padding ぶん inset、または clone 側でパネルに
+    水平 padding を与え行を揃える。
+- いずれも FW-16（整列+寸法系）の候補に合流可。clone は当面そのまま（動作は正しい）。
+
+### Button の hover/press 既定色（小・記録のみ）
+- `Button::background(x)` だけ指定して `hover_background`/`press_background` を省くと、ホバー/押下で
+  **既定の primary（青）にフェード**する（`button.rs:310-319`）。slice 3 でエラーバナーの透明 `×`
+  が青い四角に化けたのはこれ（clone 側で両者を transparent 指定して解消）。バグではないが、
+  「透明ボタン」を作る時に踏みやすい footgun。`hover_text_color` も無い（React の `hover:text-*` 不可）。
 
 ### アイコンについて（gap ではない・記録のみ）
 - 正解は inline SVG アイコン。clone はアイコンフォント未同梱なので、ヘッダ操作・検索・ピン留め
