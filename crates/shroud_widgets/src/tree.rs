@@ -1185,6 +1185,13 @@ impl WidgetTree {
             None => (self.root, (0.0, 0.0), false),
         };
 
+        // Publish the active layer's offset so handlers that push an
+        // `AnchorRect` popover from inside this layer (e.g. a `Dropdown` in a
+        // modal) get their layer-local trigger rect translated to viewport
+        // coordinates — see `EventContext::push_layer`. Drain runs while this
+        // is still set (a re-entrant Focus handler stays in the same space).
+        event_ctx.current_layer_offset = offset;
+
         let result = self.dispatch_with_target(target_root, offset, layer_active, event, event_ctx);
 
         // Drain tree-mutation commands queued by handlers. Loops because
@@ -1192,6 +1199,11 @@ impl WidgetTree {
         // and those handlers can themselves enqueue more commands —
         // `drain_commands` keeps going until the queue settles.
         self.drain_commands(event_ctx);
+
+        // `EventContext` is reused across dispatches and other entry points
+        // (on_frame, file drop, focus flush) that run with no active layer;
+        // reset so those see viewport coordinates rather than this layer's.
+        event_ctx.current_layer_offset = (0.0, 0.0);
 
         result
     }

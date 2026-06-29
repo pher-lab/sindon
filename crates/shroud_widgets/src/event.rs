@@ -1,9 +1,9 @@
 //! Event types and dispatch context.
 
-use crate::layer::LayerOptions;
+use crate::layer::{LayerAnchor, LayerOptions};
 use crate::tree::WidgetTree;
 use crate::widget::Widget;
-use shroud_core::Point;
+use shroud_core::{Point, Rect};
 
 /// Events that widgets can receive.
 #[derive(Debug, Clone)]
@@ -295,6 +295,21 @@ pub struct EventContext {
     /// subsequent `MouseMove` / `MouseUp` straight to it. See
     /// [`Self::capture_pointer`].
     pub(crate) capture_change: Option<bool>,
+    /// Viewport offset of the layer whose subtree is currently dispatching
+    /// — `(0, 0)` for the main tree. Set by
+    /// [`WidgetTree::dispatch_event`](crate::tree::WidgetTree::dispatch_event)
+    /// from the active layer's anchor offset.
+    ///
+    /// Widgets inside a layer see *layer-local* rects in their `event`
+    /// (and a layer-local cursor position), matching paint. So a handler
+    /// that anchors a child popover to its own rect would, without
+    /// correction, place it relative to the layer's origin instead of the
+    /// viewport (the dropdown-in-a-popover bug). [`Self::push_layer`]
+    /// translates an [`LayerAnchor::AnchorRect`] by this offset so the rect
+    /// the handler passes — in its own local space — lands at the right
+    /// viewport position. Exposed via [`Self::layer_offset`] for widgets
+    /// that need the translation explicitly.
+    pub(crate) current_layer_offset: (f32, f32),
 }
 
 impl EventContext {
@@ -304,7 +319,19 @@ impl EventContext {
             commands: Vec::new(),
             clipboard_write: None,
             capture_change: None,
+            current_layer_offset: (0.0, 0.0),
         }
+    }
+
+    /// Viewport offset of the layer currently dispatching this event, or
+    /// `(0, 0)` when the main tree is handling it. Add this to a layer-local
+    /// rect (e.g. a widget's `event` `layout`) to get viewport coordinates.
+    ///
+    /// [`Self::push_layer`] applies this automatically to an
+    /// [`LayerAnchor::AnchorRect`], so most callers don't need it directly;
+    /// it's exposed for widgets that compute an anchor some other way.
+    pub fn layer_offset(&self) -> (f32, f32) {
+        self.current_layer_offset
     }
 
     /// Queue a widget to be inserted as a child of `parent` after the
@@ -415,14 +442,37 @@ impl EventContext {
     /// The command is enqueued and runs after the current dispatch
     /// completes; the topmost layer is the one most recently pushed when
     /// the drain settles.
+    ///
+    /// When the handler pushing this layer is itself inside a layer, an
+    /// [`LayerAnchor::AnchorRect`] is translated from that layer's local
+    /// space into viewport coordinates by [`Self::layer_offset`]. This is
+    /// what lets a [`Dropdown`](crate::Dropdown) (or any anchored popover)
+    /// open in the right place when it lives inside a modal or another
+    /// popover — its `event` `layout` rect is layer-local, and this
+    /// correction puts the child layer under the trigger rather than at
+    /// the parent layer's origin. A no-op for the main tree (offset zero).
     pub fn push_layer<F>(
         &mut self,
-        options: LayerOptions,
+        mut options: LayerOptions,
         root_widget: impl Widget + 'static,
         populate: F,
     ) where
         F: FnOnce(&mut WidgetTree, usize) + 'static,
     {
+        if let LayerAnchor::AnchorRect { rect, prefer } = options.anchor {
+            let (ox, oy) = self.current_layer_offset;
+            if ox != 0.0 || oy != 0.0 {
+                options.anchor = LayerAnchor::AnchorRect {
+                    rect: Rect::new(
+                        rect.origin.x + ox,
+                        rect.origin.y + oy,
+                        rect.size.width,
+                        rect.size.height,
+                    ),
+                    prefer,
+                };
+            }
+        }
         self.commands.push(TreeCommand::PushLayer {
             options,
             root_widget: Box::new(root_widget),
@@ -498,5 +548,80 @@ impl EventContext {
 impl Default for EventContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Container;
+    use crate::layer::Placement;
+
+    fn pushed_anchor(ctx: &EventContext) -> LayerAnchor {
+        match ctx.commands.last().expect("a command was queued") {
+            TreeCommand::PushLayer { options, .. } => options.anchor,
+            _ => panic!("expected a PushLayer command"),
+        }
+    }
+
+    #[test]
+    fn push_layer_translates_anchor_by_active_layer_offset() {
+        // A handler inside a layer at viewport offset (100, 50) anchors a
+        // popover to its own *layer-local* rect; push_layer must translate it
+        // into viewport space so the child lands under the trigger rather than
+        // at the parent layer's origin (gap G14).
+        let mut ctx = EventContext::new();
+        ctx.current_layer_offset = (100.0, 50.0);
+        ctx.push_layer(
+            LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
+                rect: Rect::new(8.0, 40.0, 120.0, 24.0),
+                prefer: Placement::Below,
+            }),
+            Container::column(),
+            |_tree, _root| {},
+        );
+        match pushed_anchor(&ctx) {
+            LayerAnchor::AnchorRect { rect, prefer } => {
+                assert_eq!((rect.origin.x, rect.origin.y), (108.0, 90.0));
+                assert_eq!((rect.size.width, rect.size.height), (120.0, 24.0));
+                assert_eq!(prefer, Placement::Below);
+            }
+            other => panic!("expected AnchorRect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_layer_leaves_anchor_unchanged_in_main_tree() {
+        // Offset zero (main tree): the rect a handler passes is already in
+        // viewport space and must be left exactly as-is.
+        let mut ctx = EventContext::new();
+        ctx.push_layer(
+            LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
+                rect: Rect::new(8.0, 40.0, 0.0, 0.0),
+                prefer: Placement::Below,
+            }),
+            Container::column(),
+            |_tree, _root| {},
+        );
+        match pushed_anchor(&ctx) {
+            LayerAnchor::AnchorRect { rect, .. } => {
+                assert_eq!((rect.origin.x, rect.origin.y), (8.0, 40.0));
+            }
+            other => panic!("expected AnchorRect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_layer_viewport_center_is_never_shifted() {
+        // Only AnchorRect is offset-relative; ViewportCenter (modals, the
+        // error banner) must never be nudged by a stale layer offset.
+        let mut ctx = EventContext::new();
+        ctx.current_layer_offset = (100.0, 50.0);
+        ctx.push_layer(
+            LayerOptions::popover().anchor(LayerAnchor::ViewportCenter),
+            Container::column(),
+            |_tree, _root| {},
+        );
+        assert!(matches!(pushed_anchor(&ctx), LayerAnchor::ViewportCenter));
     }
 }

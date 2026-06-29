@@ -45,15 +45,24 @@ pub enum LayerAnchor {
     /// Center the layer's natural-size root inside the viewport. The
     /// standard modal-dialog placement.
     ViewportCenter,
-    /// Anchor the layer to a trigger rect (screen coordinates). The
-    /// layer's left edge aligns with `rect.x`; vertical placement follows
-    /// `prefer`, with `Auto` flipping above when below would overflow.
-    /// The x-coordinate is clamped so the popover stays inside the
-    /// viewport.
+    /// Anchor the layer to a trigger rect. The layer's left edge aligns
+    /// with `rect.x`; vertical placement follows `prefer`, with `Auto`
+    /// flipping above when below would overflow. The x-coordinate is
+    /// clamped so the popover stays inside the viewport.
+    ///
+    /// `rect` is in the coordinate space of the handler that pushes the
+    /// layer. From the main tree that is viewport space; from inside another
+    /// layer it is that layer's local space, and
+    /// [`EventContext::push_layer`](crate::event::EventContext::push_layer)
+    /// translates it to viewport via
+    /// [`EventContext::layer_offset`](crate::event::EventContext::layer_offset).
+    /// Either way a widget can just pass the `layout` rect it received in
+    /// `event` (or a cursor position from `on_context_menu`) unchanged.
     ///
     /// Typical use: a [`Dropdown`](crate::Dropdown) reads its own layout
     /// rect inside its click handler and pushes a popover layer with this
-    /// anchor variant.
+    /// anchor variant — and it now lands correctly even when the dropdown
+    /// itself lives inside a modal or popover.
     AnchorRect { rect: Rect, prefer: Placement },
 }
 
