@@ -5,6 +5,7 @@
 //! screens use dummy data and navigate by `replace_screen`. Ctrl+D toggles
 //! dark mode so both palettes can be captured from one binary.
 
+mod main_screen;
 mod tokens;
 mod unlock;
 

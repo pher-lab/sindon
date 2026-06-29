@@ -19,7 +19,9 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 | Unlock | 完了（gap 由来の差を除き React 版と一致） |
 | Setup | 未 |
 | Recovery | 未 |
-| Main (Sidebar + Editor) | 未 |
+| Main — Sidebar shell | 進行中（slice 1: パネル/ヘッダ/New Note/検索/ノート行） |
+| Main — Editor pane | 未（slice 2） |
+| Main — Overlays (設定 dropdown / エラーバナー / context menu) | 未（slice 3） |
 | 各種 Modal (Settings/Backup/ChangePw/Restore) | 未 |
 | Loading | 未 |
 
@@ -49,7 +51,19 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 ### G3. Input / SecureInput の padding・高さが非公開 — **中**
 - 正解の入力欄は `px-4 py-3`（≒ 高さ 48px）。shroud の Input/SecureInput は内部 padding 固定で
   寸法を合わせられない。ボタンも同様（`py-3`）。
-- 候補対応: 入力・ボタンに `padding`(x/y) もしくは `min_height` を公開。
+- 実装裏付け（`input.rs:1469`）: 単一行 Input は `FlexStyle::new().padding(8.0)
+  .min_height(font_size + 20.0)` を**ハードコード**。`padding(8)` も `min_height`（font 14 →
+  34px）も非公開。
+- **実害例（Main slice 1 — 検索バーが「妙に縦長」）**: React は「枠付き div（`px-3 py-2`）+
+  bare な borderless input」で ≈36px。shroud で同じ構成にすると「枠付きコンテナ padding 8 +
+  borderless Input（自前 padding 8 + min_height 34）」= **≈50px** に膨らむ。`borderless()` は
+  *枠*を消すだけで*内部 padding と min_height は残る*ため、カスタム chrome 行に Input を
+  畳み込むと縦 padding が二重になる。
+  - しかもこの1要素が G3 と **G4 を同時に踏む**: uniform padding なので「縦を詰める（コンテナ
+    padding を下げる）」と「🔍 アイコンの左インセット」がトレードオフになり両立しない。
+  - clone の暫定: コンテナ padding を 8→4 に下げて高さを ≈42px に寄せた（完全一致は不可）。
+- 候補対応: Input/SecureInput に `padding`(x/y) もしくは `min_height` を公開、または
+  `borderless()` 時に内部 padding/min_height も落とす「chrome 無し」モード。Button も同様。
 
 ### G4. `padding` が上下左右一律のみ — **中**
 - Tailwind は `px-4 py-3` / `px-2 py-1` のような非対称 padding が常用。
@@ -86,5 +100,30 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   対応になったので、未フォーカスでも常時 `border border-gray-300 rounded-lg` 相当が出る。
 - 残る差は G7（フォーカス時に「外側リング」が出る vs 正解は「枠線の色が変わるだけ」）。
   これは設計判断としてまだ open。常時枠が出るようになった分、G7 の体感差は小さくなった。
+
+### G10. 片側 border (`border-r` / `border-b`) が引けない — **中**
+- 正解は仕切り線を片側 border で多用する: サイドバー右端 `border-r`、ヘッダ／検索／タグ各
+  セクション下端 `border-b`、dropdown 内の区切り。
+- shroud の `Container::border(width, color)`（FW-15）は**4辺一括のみ**。1辺だけの線が引けない。
+- 暫定対応（Main slice 1）: 1px の細い `Container`（`height(1).width_full()` または
+  `width(1).height_full()` に border 色を `background`）を仕切り線として挟む。動くが、
+  「box の辺」ではなく「兄弟ノード」なので角の処理や padding 内側への食い込みは別物。
+- 候補対応: `border_bottom(w,c)` / `border_right(w,c)` ないし `border_sides(...)`、
+  もしくは `Divider` プリミティブ。
+
+### G11. flex 整列が `center` 系しかない（`justify-between` / `*-end` / `*-start` 不可）— **中**
+- 正解のヘッダ行は `flex items-center justify-between`（タイトル左・操作ボタン群右）。行・
+  列の両端寄せ・端寄せが頻出（モーダルのフッタボタン、リスト行の右端メタ等）。
+- shroud は `center` / `justify_center`（主軸中央）/ `align_center`（交差軸中央）のみ。
+  `justify-between` / `justify-end` / `align-start` / `align-end` に当たる builder が無い。
+- 暫定対応（slice 1）: 両端の間に `Container::row().grow(1.0)` のスペーサを挟んで
+  `justify-between` を擬似再現。`justify-end` も先頭スペーサで代替可だが冗長。
+- 候補対応: `justify(Justify)` / `align(Align)` で `Start/Center/End/Between/Around` を公開。
+
+### アイコンについて（gap ではない・記録のみ）
+- 正解は inline SVG アイコン。clone はアイコンフォント未同梱なので、ヘッダ操作・検索・ピン留め
+  などは単一グリフ（⚙ ⋮ 🗑 🔒 🔍 📌）で近似した。アイコン描画の正式手段は FW-12（`App::font`
+  + `family(Named)`）で既に解決済みであり、本 UI-only clone の対象外。レイアウト/枠/余白の
+  gap 判定に影響しないため近似で進める。
 
 <!-- 以降、画面を進めながら追記 -->

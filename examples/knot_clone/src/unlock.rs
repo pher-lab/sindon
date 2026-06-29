@@ -100,7 +100,7 @@ pub fn build(tree: &mut WidgetTree) {
             .hover_background(tokens::primary_hover())
             .text_color(Color::WHITE)
             .on_click(|ctx| {
-                ctx.replace_screen(placeholder_main);
+                ctx.replace_screen(crate::main_screen::build);
             }),
     );
 
@@ -113,23 +113,5 @@ pub fn build(tree: &mut WidgetTree) {
             .text_color(tokens::muted())
             .font_size(14.0)
             .on_click(|_ctx| { /* would open recovery */ }),
-    );
-}
-
-/// Stand-in for the unlocked main screen until it's built — just proves the
-/// nav wiring works.
-fn placeholder_main(tree: &mut WidgetTree) {
-    let root = tree.set_root(
-        Container::column()
-            .width_full()
-            .height_full()
-            .background(tokens::background())
-            .center(),
-    );
-    tree.add_child(
-        root,
-        TextWidget::new("Main screen — TODO")
-            .font_size(24.0)
-            .color(tokens::on_surface()),
     );
 }
