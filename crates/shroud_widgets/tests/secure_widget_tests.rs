@@ -622,6 +622,62 @@ fn secure_input_border_color_overrides_the_stroke() {
     assert_eq!(stroke.color, red, "stroke uses the overridden border color");
 }
 
+// ── SecureInput dimensions (FW-17, symmetric with Input) ─────────
+
+#[test]
+fn secure_input_default_dimensions_are_unchanged() {
+    // Regression guard: the default floor stays font 16 + 20 = 36.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let def = tree.add_child(root, SecureInput::new());
+    tree.compute_layout(400.0, 300.0);
+    assert_eq!(tree.layout_rect(def).size.height, 36.0);
+}
+
+#[test]
+fn secure_input_min_height_override_sets_box_height() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let tall = tree.add_child(root, SecureInput::new().min_height(48.0));
+    tree.compute_layout(400.0, 300.0);
+    assert_eq!(
+        tree.layout_rect(tall).size.height,
+        48.0,
+        "min_height overrides the font-derived floor"
+    );
+}
+
+#[test]
+fn secure_input_padding_y_grows_the_box() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let def = tree.add_child(root, SecureInput::new());
+    let padded = tree.add_child(root, SecureInput::new().padding_y(16.0));
+    tree.compute_layout(400.0, 300.0);
+    let h_def = tree.layout_rect(def).size.height;
+    let h_padded = tree.layout_rect(padded).size.height;
+    // Single line, but the derived floor grew by 2*(16-8) = 16px.
+    assert_eq!(
+        h_padded - h_def,
+        16.0,
+        "padding_y grows the derived box height (def={h_def}, padded={h_padded})"
+    );
+}
+
+#[test]
+fn secure_input_padding_x_insets_the_text() {
+    // Probe via the placeholder glyphs (drawn at the text origin); the masked
+    // dots would work too, but the placeholder needs no typing.
+    let def_x = paint_secure_input(SecureInput::new().placeholder("X")).glyphs[0].x;
+    let padded_x =
+        paint_secure_input(SecureInput::new().placeholder("X").padding_x(24.0)).glyphs[0].x;
+    assert_eq!(
+        padded_x - def_x,
+        16,
+        "padding_x(24) insets the text 16px past the default 8 (def={def_x}, padded={padded_x})"
+    );
+}
+
 /// The caret a focused SecureInput draws — a 2px-wide solid fill in the
 /// text color. `None` when no such rect was emitted.
 fn caret_count(ctx: &PaintContext, text_color: Color) -> usize {

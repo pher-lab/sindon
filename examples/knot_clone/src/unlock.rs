@@ -76,16 +76,19 @@ pub fn build(tree: &mut WidgetTree) {
             .weight(FontWeight::MEDIUM)
             .color(tokens::on_surface()),
     );
-    // `border rounded-lg`: the default border tracks `input_border` (gray-300
-    // light / gray-700 dark), and `.radius(8.0)` matches `rounded-lg` (G2 now
-    // landed). Padding/height are still fixed (gap G3), so this doesn't yet hit
-    // `px-4 py-3` (≈48px tall).
+    // `px-4 py-3 border rounded-lg`: the default border tracks `input_border`
+    // (gray-300 light / gray-700 dark), `.radius(8.0)` matches `rounded-lg`
+    // (G2), and `.padding_x(16.0).min_height(48.0)` now hits `px-4` + the 48px
+    // control height (FW-17 / G3 — previously the fixed internal padding kept it
+    // from `px-4 py-3`).
     let input_idx = tree.add_child(
         group,
         SecureInput::new()
             .placeholder("Enter your master password")
             .font_size(16.0)
-            .radius(8.0),
+            .radius(8.0)
+            .padding_x(16.0)
+            .min_height(48.0),
     );
     tree.focus_initially(input_idx);
 

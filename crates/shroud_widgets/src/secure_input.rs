@@ -103,6 +103,17 @@ pub struct SecureInput {
     /// Corner radius (px) for the background fill and border stroke. `0.0` keeps
     /// the historical sharp rectangle and short-circuits the SDF in the shader.
     radius: f32,
+    /// Horizontal text inset (px) between the border and the masked text, on
+    /// each side. Default 8. Feeds the layout padding, the caret and the click
+    /// hit-test. Maps to Tailwind `px-*`. Mirrors [`Input::padding_x`].
+    pad_x: f32,
+    /// Vertical text inset (px). Default 8. The (single) line is centered, so
+    /// this only grows the derived `min_height`. Maps to Tailwind `py-*`.
+    /// Mirrors [`Input::padding_y`].
+    pad_y: f32,
+    /// Explicit `min_height` (px) override for the field's box. `None` derives
+    /// it from the font size. Mirrors [`Input::min_height`].
+    min_height_override: Option<f32>,
     focus_ring_color: Option<Color>,
 }
 
@@ -133,6 +144,9 @@ impl SecureInput {
             border_color: None,
             border_visible: true,
             radius: 0.0,
+            pad_x: 8.0,
+            pad_y: 8.0,
+            min_height_override: None,
             focus_ring_color: None,
         }
     }
@@ -202,6 +216,33 @@ impl SecureInput {
     /// renderer.
     pub fn radius(mut self, px: f32) -> Self {
         self.radius = px.max(0.0);
+        self
+    }
+
+    /// Horizontal text inset (px), on each side. Default 8. Maps to Tailwind
+    /// `px-*`; moves the caret / hit-test to match. Symmetric with
+    /// [`Input::padding_x`](crate::Input::padding_x). Negative values clamp to
+    /// `0.0`.
+    pub fn padding_x(mut self, px: f32) -> Self {
+        self.pad_x = px.max(0.0);
+        self
+    }
+
+    /// Vertical text inset (px). Default 8. Maps to Tailwind `py-*`. The line is
+    /// centered, so this grows the derived [`min_height`](Self::min_height).
+    /// Symmetric with [`Input::padding_y`](crate::Input::padding_y). Negative
+    /// values clamp to `0.0`.
+    pub fn padding_y(mut self, px: f32) -> Self {
+        self.pad_y = px.max(0.0);
+        self
+    }
+
+    /// Explicit minimum box height (px), overriding the font-derived floor. Lets
+    /// an app match a design's exact control height (e.g. a `py-3` ≈48px field).
+    /// Symmetric with [`Input::min_height`](crate::Input::min_height). Negative
+    /// values clamp to `0.0`.
+    pub fn min_height(mut self, px: f32) -> Self {
+        self.min_height_override = Some(px.max(0.0));
         self
     }
 
@@ -332,7 +373,12 @@ impl Widget for SecureInput {
 
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
-        FlexStyle::new().padding(8.0).min_height(font_size + 20.0)
+        let (pad_x, pad_y) = (self.pad_x, self.pad_y);
+        // `+ 4.0` preserves the historical `font_size + 20` at the default pad 8.
+        let derived = font_size + 2.0 * pad_y + 4.0;
+        FlexStyle::new()
+            .padding_trbl(pad_y, pad_x, pad_y, pad_x)
+            .min_height(self.min_height_override.unwrap_or(derived))
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
@@ -359,9 +405,9 @@ impl Widget for SecureInput {
             ctx.stroke_rect_rounded(layout, border, self.radius, 1.0);
         }
 
-        let text_x = layout.origin.x + 8.0;
+        let text_x = layout.origin.x + self.pad_x;
         let text_y = layout.origin.y + (layout.size.height - font_size) / 2.0;
-        let max_width = layout.size.width - 16.0;
+        let max_width = layout.size.width - 2.0 * self.pad_x;
 
         let value = self.value.borrow();
         // X of the caret's leading edge. Defaults to the text start, so an

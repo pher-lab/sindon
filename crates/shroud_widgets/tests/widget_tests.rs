@@ -1061,6 +1061,70 @@ fn input_border_color_overrides_the_stroke() {
     assert_eq!(stroke.color, red, "stroke uses the overridden border color");
 }
 
+// ── Dimensions (FW-17: padding / min_height) ─────────────────────
+
+#[test]
+fn input_default_dimensions_are_unchanged() {
+    // Regression guard: the default single-line floor stays font 16 + 20 = 36
+    // (padding 8 + a 4px hair) so existing layouts don't shift.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(800.0));
+    let def = tree.add_child(root, Input::new());
+    tree.compute_layout(400.0, 800.0);
+    assert_eq!(tree.layout_rect(def).size.height, 36.0);
+}
+
+#[test]
+fn input_min_height_override_sets_box_height() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(800.0));
+    let tall = tree.add_child(root, Input::new().min_height(60.0));
+    tree.compute_layout(400.0, 800.0);
+    assert_eq!(
+        tree.layout_rect(tall).size.height,
+        60.0,
+        "min_height overrides the font-derived floor"
+    );
+}
+
+#[test]
+fn input_padding_y_grows_the_multiline_box() {
+    // Each field is the sole child at y=0 so taffy's per-edge pixel rounding
+    // (line-height 19.2 stacks to sub-pixel boundaries) doesn't skew the delta.
+    fn multiline_height(pad_y: Option<f32>) -> f32 {
+        let mut tree = WidgetTree::new();
+        let root = tree.set_root(Container::column().width(400.0).height(800.0));
+        let mut input = Input::new().multiline().lines(3);
+        if let Some(p) = pad_y {
+            input = input.padding_y(p);
+        }
+        let node = tree.add_child(root, input);
+        tree.compute_layout(400.0, 800.0);
+        tree.layout_rect(node).size.height
+    }
+    let h_def = multiline_height(None);
+    let h_padded = multiline_height(Some(24.0));
+    // Same 3 rows of text, but the top+bottom inset grew by 2*(24-8) = 32px.
+    assert_eq!(
+        h_padded - h_def,
+        32.0,
+        "padding_y adds top+bottom inset to the box (got def={h_def}, padded={h_padded})"
+    );
+}
+
+#[test]
+fn input_padding_x_insets_the_text() {
+    // The field is width-stretched by its parent, so padding_x doesn't change
+    // the box — it insets the drawn text. Compare the first glyph's x.
+    let def_x = paint_input(Input::new().with_value("X")).glyphs[0].x;
+    let padded_x = paint_input(Input::new().with_value("X").padding_x(24.0)).glyphs[0].x;
+    assert_eq!(
+        padded_x - def_x,
+        16,
+        "padding_x(24) insets the text 16px past the default 8 (def={def_x}, padded={padded_x})"
+    );
+}
+
 // ── Theme ────────────────────────────────────────────────────────
 
 #[test]

@@ -719,7 +719,7 @@ impl AppState {
 
     /// Permanently delete a *trashed* note — removing it from the resident vec
     /// and the on-disk store. Guarded to trashed notes so a stray call can't
-    /// hard-delete a live note (the live ✕ path goes through [`trash_note`]).
+    /// hard-delete a live note (the live ✕ path goes through [`Self::trash_note`]).
     /// Errors propagate; the in-memory removal still happens on storage failure
     /// (same defensive stance as the bulk paths). Returns whether a row was
     /// removed.

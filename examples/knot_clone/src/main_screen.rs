@@ -220,20 +220,18 @@ fn icon_button(tree: &mut WidgetTree, parent: usize, glyph: &str) {
 /// SearchBar: a bordered row (`px-3 py-2 border rounded-lg`) holding a
 /// magnifier glyph + a borderless input.
 ///
-/// This one element trips both G3 and G4 at once: `borderless()` drops the
-/// frame but the Input keeps its hardcoded internal `padding(8)` +
-/// `min_height(font+20)` (`input.rs:1469`), so a faithful "py-2 around a bare
-/// input" double-pads vertically and the box balloons to ≈50px (React ≈36px).
-/// And since `padding` is uniform, trimming the height (smaller pad) also
-/// shrinks the magnifier's left inset — can't satisfy both. Compromise: pad 4
-/// (≈42px), favoring height over inset.
+/// This used to trip G3: `borderless()` drops the frame but the Input kept a
+/// hardcoded `padding(8)` + `min_height(font+20)`, so "py-2 around a bare
+/// input" double-padded and ballooned to ≈50px (React ≈36px). Now the input is
+/// zeroed out (`padding_x(0).padding_y(0).min_height(20)`) so the *row's* `py-2`
+/// (padding 8) owns the height → ≈36px (FW-17 / G3).
 fn search_bar(tree: &mut WidgetTree, parent: usize) {
     let bar = tree.add_child(
         parent,
         Container::row()
             .align_center()
             .gap(8.0)
-            .padding(4.0) // see fn doc: G3 (Input min_height) + G4 (uniform pad)
+            .padding(8.0) // py-2; the input no longer adds its own vertical pad
             .radius(8.0)
             .background(tokens::pick(tokens::white(), tokens::gray_900()))
             .border(1.0, border()),
@@ -250,6 +248,11 @@ fn search_bar(tree: &mut WidgetTree, parent: usize) {
             .borderless()
             .grow(1.0)
             .font_size(14.0)
+            // Zero the input's own chrome so the row's padding + gap own the
+            // layout (the icon-to-text gap is the row's `gap(8)`, not padding).
+            .padding_x(0.0)
+            .padding_y(0.0)
+            .min_height(20.0)
             .background(Color::TRANSPARENT)
             .placeholder("Search notes..."),
     );
@@ -370,10 +373,12 @@ fn editor_title_section(tree: &mut WidgetTree, parent: usize) {
     // Title row (`flex items-center gap-3`).
     let row = tree.add_child(sec, Container::row().align_center().gap(12.0));
     // Title input: `flex-1 text-2xl font-bold bg-transparent border-none`. The
-    // `font-bold` can't be expressed — Input has no weight builder (gap G12) —
-    // and the fixed internal padding/height keep it from a true `text-2xl`
-    // line (gap G3). Text color defaults to `on_surface` so it tracks the
-    // theme toggle.
+    // `font-bold` still can't be expressed — Input has no weight builder (gap
+    // G12) — but `min_height(32)` now gives it the true `text-2xl` (2rem) line
+    // box instead of the 44px font-derived floor (FW-17 / G3). The default 8px
+    // `padding_x` keeps the text at 24px (section `padding(16)` + 8), matching
+    // `px-6`, which the "Saved"/tag spacers below also target. Text color
+    // defaults to `on_surface` so it tracks the theme toggle.
     tree.add_child(
         row,
         Input::new()
@@ -381,6 +386,7 @@ fn editor_title_section(tree: &mut WidgetTree, parent: usize) {
             .borderless()
             .grow(1.0)
             .font_size(24.0) // text-2xl
+            .min_height(32.0) // 2rem line box
             .background(Color::TRANSPARENT)
             .placeholder("Untitled note"),
     );
@@ -509,12 +515,11 @@ fn editor_toolbar(tree: &mut WidgetTree, parent: usize) {
 ///
 /// `grow(1.0)` (not `height_full`) is deliberate: `height_full` made the input
 /// claim the *whole* pane height and paint over the toolbar/status dividers,
-/// so `grow` (fill the remaining column space) is correct here. The fixed
-/// internal padding still can't reach `16px 24px`, so a 16px spacer fakes the
-/// `px-6` left inset (gaps G3 + G4).
+/// so `grow` (fill the remaining column space) is correct here. The content
+/// `padding: 16px 24px` is now expressed directly with `padding_x(24)` +
+/// `padding_y(16)` (FW-17 / G3), replacing the old 16px left-inset spacer.
 fn editor_body(tree: &mut WidgetTree, parent: usize) {
     let row = tree.add_child(parent, Container::row().grow(1.0));
-    tree.add_child(row, Container::row().width(16.0)); // left inset → text at ≈24px
     tree.add_child(
         row,
         Input::new()
@@ -524,6 +529,8 @@ fn editor_body(tree: &mut WidgetTree, parent: usize) {
             .grow(1.0)
             .height_full()
             .font_size(15.0)
+            .padding_x(24.0) // px-6
+            .padding_y(16.0) // py-4
             .background(Color::TRANSPARENT)
             .placeholder("Start writing..."),
     );

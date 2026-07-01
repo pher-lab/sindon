@@ -466,6 +466,19 @@ pub struct Input {
     /// Corner radius (px) for the background fill and border stroke. `0.0` keeps
     /// the historical sharp rectangle and short-circuits the SDF in the shader.
     radius: f32,
+    /// Horizontal text inset (px) between the border and the text, on each
+    /// side. Default 8. Feeds the layout padding, the caret / hit-test
+    /// geometry, and the wrap width. Maps to Tailwind `px-*`.
+    pad_x: f32,
+    /// Vertical text inset (px). Default 8. In single-line mode the text is
+    /// centered so this only feeds the derived `min_height`; in multi-line mode
+    /// it is the top / bottom inset of the scrolling viewport. Maps to Tailwind
+    /// `py-*`.
+    pad_y: f32,
+    /// Explicit `min_height` (px) override for the field's box. `None` derives
+    /// it from the font size (single-line) or line count (multi-line). Lets an
+    /// app match a design's exact control height (e.g. a 36px search bar).
+    min_height_override: Option<f32>,
     focus_ring_color: Option<Color>,
     /// Override for the selection highlight color. `None` reads
     /// `theme.colors.selection_background` each frame.
@@ -577,6 +590,9 @@ impl Input {
             border_color: None,
             border_visible: true,
             radius: 0.0,
+            pad_x: 8.0,
+            pad_y: 8.0,
+            min_height_override: None,
             focus_ring_color: None,
             selection_color: None,
             undo_stack: RefCell::new(VecDeque::new()),
@@ -880,6 +896,36 @@ impl Input {
     /// over-large values are clamped to half the shorter side in the renderer.
     pub fn radius(mut self, px: f32) -> Self {
         self.radius = px.max(0.0);
+        self
+    }
+
+    /// Horizontal text inset (px) — the padding between the field's border and
+    /// the text, on each side. Default 8. Maps to Tailwind `px-*`. Widens (or
+    /// tightens) the caret / hit-test geometry and the multi-line wrap width to
+    /// match, so a boxed field can carry the same generous inset as its design.
+    /// Negative values clamp to `0.0`.
+    pub fn padding_x(mut self, px: f32) -> Self {
+        self.pad_x = px.max(0.0);
+        self
+    }
+
+    /// Vertical text inset (px). Default 8. Maps to Tailwind `py-*`. In
+    /// single-line mode the text is centered, so this only grows the derived
+    /// [`min_height`](Self::min_height); in multi-line mode it is the top /
+    /// bottom inset of the internally-scrolling viewport. Negative values clamp
+    /// to `0.0`.
+    pub fn padding_y(mut self, px: f32) -> Self {
+        self.pad_y = px.max(0.0);
+        self
+    }
+
+    /// Explicit minimum box height (px), overriding the value derived from font
+    /// size (single-line) or line count (multi-line). Lets an app match a
+    /// design's exact control height — e.g. a compact 36px search bar or a
+    /// `py-3` ≈48px field — instead of the built-in floor. Negative values
+    /// clamp to `0.0`.
+    pub fn min_height(mut self, px: f32) -> Self {
+        self.min_height_override = Some(px.max(0.0));
         self
     }
 
@@ -1451,6 +1497,7 @@ impl Widget for Input {
 
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
+        let (pad_x, pad_y) = (self.pad_x, self.pad_y);
         let mut style = if self.multiline {
             let line_height = font_size * 1.2;
             // When the field fills its parent's height it owns a viewport that
@@ -1462,11 +1509,19 @@ impl Widget for Input {
             } else {
                 self.line_count.unwrap_or(3) as f32
             };
+            // Default floor = rows of text plus the top/bottom insets (so a
+            // taller `padding_y` grows the box); `min_height` overrides it.
+            let derived = rows * line_height + 2.0 * pad_y;
             FlexStyle::new()
-                .padding(8.0)
-                .min_height(rows * line_height + 16.0)
+                .padding_trbl(pad_y, pad_x, pad_y, pad_x)
+                .min_height(self.min_height_override.unwrap_or(derived))
         } else {
-            FlexStyle::new().padding(8.0).min_height(font_size + 20.0)
+            // `+ 4.0` keeps a hair of breathing room around the centered line,
+            // preserving the historical `font_size + 20` at the default pad 8.
+            let derived = font_size + 2.0 * pad_y + 4.0;
+            FlexStyle::new()
+                .padding_trbl(pad_y, pad_x, pad_y, pad_x)
+                .min_height(self.min_height_override.unwrap_or(derived))
         };
         if self.fill_height {
             style = style.height_full();
@@ -1502,16 +1557,16 @@ impl Widget for Input {
             ctx.stroke_rect_rounded(layout, border, self.radius, 1.0);
         }
 
-        let text_x = layout.origin.x + 8.0;
+        let text_x = layout.origin.x + self.pad_x;
         // Single-line: vertically center the (one) line of text so the field
         // looks balanced. Multi-line: top-align to padding so the block grows
         // downward as the user types and ArrowUp/Down stay predictable.
         let text_y = if self.multiline {
-            layout.origin.y + 8.0
+            layout.origin.y + self.pad_y
         } else {
             layout.origin.y + (layout.size.height - font_size) / 2.0
         };
-        let max_width = layout.size.width - 16.0;
+        let max_width = layout.size.width - 2.0 * self.pad_x;
         // Pass max_width as the wrap constraint only in multi-line mode.
         // Single-line inputs intentionally let text overflow horizontally
         // (and don't draw outside their bounds because the wgpu pipeline
@@ -1567,7 +1622,7 @@ impl Widget for Input {
         // While composing, the (non-empty) preedit means there is always
         // something to draw, so the placeholder path is suppressed.
         let value_is_empty = self.value.borrow().is_empty() && !composing;
-        let viewport_h = (layout.size.height - 16.0).max(0.0);
+        let viewport_h = (layout.size.height - 2.0 * self.pad_y).max(0.0);
         // `displayed` is the eased offset the text is actually drawn at; the
         // logical target lives in `scroll_anim`. Hit-testing, the offset push,
         // and the scrollbar all use `displayed` so they match what is on screen
@@ -1947,7 +2002,7 @@ impl Widget for Input {
             let thumb_color = ctx.theme.colors.on_surface_variant;
 
             let track_x = layout.right() - 1.0 - SCROLLBAR_WIDTH - SCROLLBAR_INSET;
-            let track_top = layout.origin.y + 8.0;
+            let track_top = layout.origin.y + self.pad_y;
             ctx.fill_rect(
                 Rect::new(track_x, track_top, SCROLLBAR_WIDTH, viewport_h),
                 track_color,

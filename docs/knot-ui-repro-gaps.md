@@ -48,12 +48,16 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   (`secure_input_*_chrome` 系)。Unlock のパスワード欄は `.radius(8.0)` だけで
   `rounded-lg border-gray-300` に（border は既定で `input_border` 追従）。
 
-### G3. Input / SecureInput の padding・高さが非公開 — **中**
-- 正解の入力欄は `px-4 py-3`（≒ 高さ 48px）。shroud の Input/SecureInput は内部 padding 固定で
-  寸法を合わせられない。ボタンも同様（`py-3`）。
-- 実装裏付け（`input.rs:1469`）: 単一行 Input は `FlexStyle::new().padding(8.0)
-  .min_height(font_size + 20.0)` を**ハードコード**。`padding(8)` も `min_height`（font 14 →
-  34px）も非公開。
+### G3. Input / SecureInput の padding・高さが非公開 → **解消（FW-17、2026-07-02 landed）**
+- 正解の入力欄は `px-4 py-3`（≒ 高さ 48px）。~~shroud の Input/SecureInput は内部 padding 固定で
+  寸法を合わせられない。~~ボタンも同様（`py-3` → G6 で別途）。
+- ~~実装裏付け（`input.rs:1469`）: 単一行 Input は `FlexStyle::new().padding(8.0)
+  .min_height(font_size + 20.0)` を**ハードコード**。~~
+- 対応: Input / SecureInput に `padding_x(px)`（左右インセット、Tailwind `px-*`）/ `padding_y(px)`
+  （上下インセット、`py-*`）/ `min_height(px)`（font・行数由来 floor の明示上書き）を対称追加。
+  paint 側のハードコード（`text_x` / `max_width` / multiline の `text_y` / `viewport_h` /
+  scrollbar / wrap 幅）を全部この値に置換。**デフォルト（pad 8）はビット等価**なので既存レイアウトは
+  不変。widgets/secure 各 +4 テスト。↓の実害はすべて実 API で解消（下記「clone 配線」）。
 - **実害例（Main slice 1 — 検索バーが「妙に縦長」）**: React は「枠付き div（`px-3 py-2`）+
   bare な borderless input」で ≈36px。shroud で同じ構成にすると「枠付きコンテナ padding 8 +
   borderless Input（自前 padding 8 + min_height 34）」= **≈50px** に膨らむ。`borderless()` は
@@ -61,17 +65,22 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   畳み込むと縦 padding が二重になる。
   - しかもこの1要素が G3 と **G4 を同時に踏む**: uniform padding なので「縦を詰める（コンテナ
     padding を下げる）」と「🔍 アイコンの左インセット」がトレードオフになり両立しない。
-  - clone の暫定: コンテナ padding を 8→4 に下げて高さを ≈42px に寄せた（完全一致は不可）。
-- **実害例 2（Main slice 2 — Editor 本文/タイトル）**: 本文 CodeMirror は `padding: 16px 24px`、
-  タイトル欄は `text-2xl`（24px）の高い 1 行。shroud の Input は内部 padding 8px・min_height
-  固定なので、本文の左右 24px インセットもタイトルの行高も合わせられない（`borderless()` でも
-  内部 padding は残る）。clone は borderless + transparent で枠だけ消し、padding 差は許容。
-- 候補対応: Input/SecureInput に `padding`(x/y) もしくは `min_height` を公開、または
-  `borderless()` 時に内部 padding/min_height も落とす「chrome 無し」モード。Button も同様。
+  - ~~clone の暫定: コンテナ padding を 8→4 に下げて高さを ≈42px に寄せた。~~
+    **解消**: input を `padding_x(0).padding_y(0).min_height(20)` にゼロ化し、行の `py-2`
+    (`padding(8)`) に高さを委譲 → ≈36px。アイコン↔テキストの間隔は行の `gap(8)` が持つので
+    「縦を詰めると左インセットも縮む」トレードオフ自体が消えた。
+- **実害例 2（Main slice 2 — Editor 本文/タイトル）→ 解消**: 本文は `padding_x(24).padding_y(16)`
+  で `padding:16px 24px` を直接表現（旧・左 inset スペーサ削除）。タイトルは `min_height(32)` で
+  `text-2xl`（2rem）の行箱に（font-derived 44px → 32px）。※太字だけは G12（Input weight）待ちで未。
+- **clone 配線（FW-17 実使用）**: Unlock パスワード `padding_x(16).min_height(48)`（`px-4 py-3`）/
+  検索バー（上記）/ 本文・タイトル（上記）。**実機 OK**（2026-07-02 ユーザ確認、light/dark とも自然）。
 
-### G4. `padding` が上下左右一律のみ — **中**
+### G4. `padding` が上下左右一律のみ — **中（Input/SecureInput 側は FW-17 で解消、Container は未）**
 - Tailwind は `px-4 py-3` / `px-2 py-1` のような非対称 padding が常用。
-- `Container::padding(px)` は一律のみ。`padding_xy(x, y)` / 各辺 padding が欲しい。
+- **Input/SecureInput**: `padding_x`/`padding_y`（FW-17）で軸別に指定可になった（`px-4 py-3` 等）。
+- **Container**: `Container::padding(px)` は依然一律のみ。内部には `FlexStyle::padding_trbl` が
+  あるが公開 builder 無し。clone は各セクション（`px-6 py-4` 等）を uniform `padding` で近似のまま。
+  候補=`Container::padding_xy(x, y)` / 各辺 padding の公開（FW-18 系）。
 
 ### G5. absolute / コーナー配置のプリミティブがない — **中（slice 3 で検証完了 = 部分的に Layer で代替可）**
 - Unlock 右上の言語 select は `absolute top-4 right-4`。通常フローの外に置く手段が
