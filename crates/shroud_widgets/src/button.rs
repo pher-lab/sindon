@@ -50,6 +50,11 @@ pub struct Button {
     hover_bg: Option<Reactive<Color>>,
     press_bg: Option<Reactive<Color>>,
     text_color: Option<Reactive<Color>>,
+    /// Label color at full hover, faded in on the same curve as the
+    /// background. `None` keeps `text_color` constant. Lets a text-only
+    /// button (a link) darken its label on hover the way `hover:text-*`
+    /// does, without a background change.
+    hover_text_color: Option<Reactive<Color>>,
     focus_ring_color: Option<Reactive<Color>>,
     radius: f32,
     visible: Reactive<bool>,
@@ -79,6 +84,7 @@ impl Button {
             hover_bg: None,
             press_bg: None,
             text_color: None,
+            hover_text_color: None,
             focus_ring_color: None,
             radius: 0.0,
             visible: Reactive::Static(true),
@@ -105,6 +111,7 @@ impl Button {
             hover_bg: None,
             press_bg: None,
             text_color: None,
+            hover_text_color: None,
             focus_ring_color: None,
             radius: 0.0,
             visible: Reactive::Static(true),
@@ -181,6 +188,17 @@ impl Button {
     /// Set text color.
     pub fn text_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
         self.text_color = Some(color.into());
+        self
+    }
+
+    /// Set the label color at full hover. The label fades from
+    /// [`text_color`](Self::text_color) to this on the same curve as the
+    /// background hover fade. Use for a text-only button — a link that
+    /// darkens its label on hover (`hover:text-gray-700`) — typically paired
+    /// with transparent `hover_background` / `press_background` so no fill
+    /// appears. Leaving it unset keeps the label color constant.
+    pub fn hover_text_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
+        self.hover_text_color = Some(color.into());
         self
     }
 
@@ -317,7 +335,7 @@ impl Widget for Button {
             .as_ref()
             .map(|c| c.get())
             .unwrap_or(colors.primary_pressed);
-        let text_color = self
+        let base_text = self
             .text_color
             .as_ref()
             .map(|c| c.get())
@@ -326,21 +344,34 @@ impl Widget for Button {
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);
 
-        // Pressed reads as instant; otherwise fade between normal and hover.
-        // `get()` votes for another frame while the fade is in flight, and
-        // the endpoints short-circuit so a settled state paints its exact
-        // color (float lerp isn't bit-exact at t==1).
+        // Hover fade progress, read once. `get()` votes for another frame
+        // while the fade is in flight; pressed pins it to 0 (the press color
+        // is used directly, reading as instant).
+        let hover_t = if self.pressed {
+            0.0
+        } else {
+            self.hover_anim.as_ref().map_or(0.0, |a| a.get())
+        };
+
+        // Background. Endpoints short-circuit so a settled state paints its
+        // exact color (float lerp isn't bit-exact at t==1).
         let bg = if self.pressed {
             press
+        } else if hover_t >= 1.0 {
+            hover
+        } else if hover_t <= 0.0 {
+            normal
         } else {
-            let t = self.hover_anim.as_ref().map_or(0.0, |a| a.get());
-            if t >= 1.0 {
-                hover
-            } else if t <= 0.0 {
-                normal
-            } else {
-                normal.lerp(&hover, t)
-            }
+            normal.lerp(&hover, hover_t)
+        };
+
+        // Label color: fades toward `hover_text_color` on the same curve when
+        // one is set (a text-only link that darkens on hover); otherwise the
+        // base color throughout.
+        let text_color = match self.hover_text_color.as_ref().map(|c| c.get()) {
+            Some(hover_text) if hover_t >= 1.0 => hover_text,
+            Some(hover_text) if hover_t > 0.0 => base_text.lerp(&hover_text, hover_t),
+            _ => base_text,
         };
 
         // Background
