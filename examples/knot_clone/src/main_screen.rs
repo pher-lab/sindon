@@ -17,11 +17,16 @@
 //!     only uniform `Container::padding(px)` exists, so these are approximated.
 //!   - **G6**  `Button` has no padding/height/disabled — `w-full py-2` is met
 //!     only by column align-stretch; the `py-2` height is not controllable.
-//!   - **G10** per-side border — `border-r`/`border-b`/`border-t` and the
-//!     toolbar's vertical `w-px` rules are faked with 1px divider boxes
-//!     (`Container::border` paints all four sides only).
-//!   - **G11** only `*center` alignment — `justify-between` (header, toolbar)
-//!     and `text-right` (status bar) are faked with `grow(1.0)` spacers.
+//!   - **G10** per-side border — **resolved (FW-16)**. The sidebar `border-r`
+//!     and the header/search/title/toolbar/status `border-b`/`border-t` now use
+//!     `Container::border_top/right/bottom/left`; only the toolbar's vertical
+//!     `w-px` group rules stay as 1px sibling boxes (a real border can't sit
+//!     *between* two children).
+//!   - **G11** cross-/main-axis alignment — **resolved (FW-16)**. The sidebar
+//!     header (`justify-between`) and the status bar (`text-right`) now use
+//!     `Container::justify(Justify::SpaceBetween / End)` instead of `grow(1.0)`
+//!     spacers. (The toolbar's `flex-1` gap before the preview toggle is a
+//!     genuine spacer in React too, so it stays a `grow` child.)
 //!   - **G12** `Input` has no font-weight — the `text-2xl font-bold` title
 //!     can't be bold (`TextWidget` has `weight`, `Input` doesn't).
 //!   - icons are approximate single glyphs (the real fix, a bundled icon font,
@@ -74,6 +79,7 @@
 //! it also darkens its glyph on hover via the new `Button::hover_text_color`).
 
 use shroud::core::{Color, Point, Rect};
+use shroud::layout::Justify;
 use shroud::reactive::{Reactive, Signal};
 use shroud::text::FontWeight;
 use shroud::widgets::layer::{LayerAnchor, LayerOptions, Placement};
@@ -111,17 +117,6 @@ pub fn build(tree: &mut WidgetTree) {
     );
 
     sidebar(tree, root);
-
-    // `border-r border-gray-300 dark:border-gray-700` on the sidebar — faked
-    // as a 1px divider column between sidebar and editor (gap G10).
-    tree.add_child(
-        root,
-        Container::column()
-            .width(1.0)
-            .height_full()
-            .background(border()),
-    );
-
     editor_pane(tree, root);
 }
 
@@ -133,15 +128,28 @@ fn sidebar(tree: &mut WidgetTree, parent: usize) {
         Container::column()
             .width(256.0) // w-64
             .height_full()
-            .background(panel()),
+            .background(panel())
+            .border_right(1.0, border()), // border-r border-gray-300/700 (FW-16 / G10)
     );
 
     // --- Header (`p-4`, `mb-3` between the title row and New Note button) ---
-    let header = tree.add_child(side, Container::column().padding(16.0).gap(12.0));
+    // Header `border-b` via a real bottom border (FW-16 / G10).
+    let header = tree.add_child(
+        side,
+        Container::column()
+            .padding(16.0)
+            .gap(12.0)
+            .border_bottom(1.0, border()),
+    );
 
-    // Title row: `flex items-center justify-between`. justify-between faked
-    // with a grow spacer (gap G11).
-    let title_row = tree.add_child(header, Container::row().align_center());
+    // Title row: `flex items-center justify-between` — the title hugs the left,
+    // the action group the right (FW-16 / G11, was a grow spacer).
+    let title_row = tree.add_child(
+        header,
+        Container::row()
+            .align_center()
+            .justify(Justify::SpaceBetween),
+    );
     tree.add_child(
         title_row,
         TextWidget::new("Knot")
@@ -149,7 +157,6 @@ fn sidebar(tree: &mut WidgetTree, parent: usize) {
             .weight(FontWeight::SEMIBOLD)
             .color(tokens::on_surface()),
     );
-    tree.add_child(title_row, Container::row().grow(1.0)); // spacer → push group right
 
     // Action button group (`flex items-center gap-1`). The gear + ⋮ open
     // anchored popovers; trash + lock stay no-op icons (slice 3 only wires the
@@ -174,13 +181,14 @@ fn sidebar(tree: &mut WidgetTree, parent: usize) {
             .on_click(|_ctx| { /* would create a note */ }),
     );
 
-    // Header `border-b` (gap G10).
-    divider(tree, side);
-
     // --- Search section (`p-3 border-b`) ---
-    let search_sec = tree.add_child(side, Container::column().padding(12.0));
+    let search_sec = tree.add_child(
+        side,
+        Container::column()
+            .padding(12.0)
+            .border_bottom(1.0, border()),
+    );
     search_bar(tree, search_sec);
-    divider(tree, side);
 
     // --- Note list (`flex-1 overflow-y-auto`, inner `flex flex-col gap-1 p-2`) ---
     let list = tree.add_child(side, ScrollView::new().grow(1.0).padding(8.0).gap(4.0));
@@ -340,12 +348,10 @@ fn editor_pane(tree: &mut WidgetTree, parent: usize) {
             .background(editor_bg()),
     );
 
+    // Each section carries its own `border-b`/`border-t` now (FW-16 / G10).
     editor_title_section(tree, pane);
-    divider(tree, pane); // title `border-b` (G10)
     editor_toolbar(tree, pane);
-    divider(tree, pane); // toolbar `border-b` (G10)
     editor_body(tree, pane);
-    divider(tree, pane); // status `border-t` (G10)
     editor_status_bar(tree, pane);
 }
 
@@ -353,7 +359,13 @@ fn editor_pane(tree: &mut WidgetTree, parent: usize) {
 /// saved-status line, and the tag chips. `px-6 py-4` is asymmetric (G4); we use
 /// uniform `padding(16)`.
 fn editor_title_section(tree: &mut WidgetTree, parent: usize) {
-    let sec = tree.add_child(parent, Container::column().padding(16.0).gap(8.0));
+    let sec = tree.add_child(
+        parent,
+        Container::column()
+            .padding(16.0)
+            .gap(8.0)
+            .border_bottom(1.0, border()), // title `border-b` (FW-16 / G10)
+    );
 
     // Title row (`flex items-center gap-3`).
     let row = tree.add_child(sec, Container::row().align_center().gap(12.0));
@@ -457,7 +469,11 @@ fn tag_chip(tree: &mut WidgetTree, parent: usize, tag: &str) {
 fn editor_toolbar(tree: &mut WidgetTree, parent: usize) {
     let bar = tree.add_child(
         parent,
-        Container::row().align_center().gap(4.0).padding(8.0),
+        Container::row()
+            .align_center()
+            .gap(4.0)
+            .padding(8.0)
+            .border_bottom(1.0, border()), // toolbar `border-b` (FW-16 / G10)
     );
     tree.add_child(bar, Container::row().width(16.0)); // left inset → ≈px-6
 
@@ -513,11 +529,18 @@ fn editor_body(tree: &mut WidgetTree, parent: usize) {
     );
 }
 
-/// Status bar (`border-t px-6 py-1 text-xs text-gray-400 text-right`). The
-/// right alignment is faked with a leading `grow(1.0)` spacer (G11).
+/// Status bar (`border-t px-6 py-1 text-xs text-gray-400 text-right`): a real
+/// top border (FW-16 / G10) and `justify(End)` for the right-aligned text
+/// (FW-16 / G11, was a leading grow spacer).
 fn editor_status_bar(tree: &mut WidgetTree, parent: usize) {
-    let row = tree.add_child(parent, Container::row().align_center().padding(4.0));
-    tree.add_child(row, Container::row().grow(1.0)); // spacer → push text right
+    let row = tree.add_child(
+        parent,
+        Container::row()
+            .align_center()
+            .padding(4.0)
+            .justify(Justify::End)
+            .border_top(1.0, border()),
+    );
     tree.add_child(
         row,
         TextWidget::new("142 characters \u{00B7} 24 words")
@@ -587,17 +610,6 @@ fn icon_fg() -> shroud::reactive::Reactive<Color> {
     tokens::pick(tokens::gray_600(), tokens::gray_400())
 }
 
-/// A 1px horizontal rule standing in for a `border-b` (gap G10).
-fn divider(tree: &mut WidgetTree, parent: usize) {
-    tree.add_child(
-        parent,
-        Container::column()
-            .width_full()
-            .height(1.0)
-            .background(border()),
-    );
-}
-
 // --- Overlays (slice 3) ------------------------------------------------------
 //
 // All four overlays are `absolute`/`fixed` in React; this slice reproduces them
@@ -617,8 +629,10 @@ fn popover_border() -> Reactive<Color> {
     tokens::pick(tokens::gray_200(), tokens::gray_600())
 }
 
-/// A 1px divider between popover rows (`border-b border-gray-200/600`). Same
-/// per-side-border workaround as [`divider`] (gap G10), tinted for popovers.
+/// A 1px divider *between* popover rows (`border-b border-gray-200/600`),
+/// tinted for popovers. A sibling 1px box rather than a `border_bottom` on the
+/// row above, since these separators sit between menu rows built by different
+/// helpers — a real per-side border can't span two siblings.
 fn popover_divider(tree: &mut WidgetTree, parent: usize) {
     tree.add_child(
         parent,

@@ -8,7 +8,7 @@ mod engine;
 mod style;
 
 pub use engine::{LayoutEngine, MeasureQuery};
-pub use style::FlexStyle;
+pub use style::{Align, FlexStyle, Justify};
 
 // Re-export the Taffy NodeId so widgets can hold their layout node handle.
 pub use taffy::NodeId as LayoutNodeId;

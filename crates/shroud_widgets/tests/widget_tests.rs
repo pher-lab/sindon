@@ -813,6 +813,190 @@ fn container_negative_border_width_clamps_to_zero() {
     assert_eq!(ctx.rects.len(), 1, "negative width clamps to no stroke");
 }
 
+// ── Container single-side borders / dividers (G10) ───────────────
+//
+// `paint_container` forces a 120×80 box at the origin, so each side line
+// lands at a known rect. Side borders are sharp fills (border_width == 0,
+// radius == 0), distinct from the four-sided `border()` stroke.
+
+#[test]
+fn container_border_bottom_draws_line_at_bottom_edge() {
+    let gray = Color::rgb(0.5, 0.5, 0.5);
+    let ctx = paint_container(Container::column().border_bottom(2.0, gray));
+    assert_eq!(ctx.rects.len(), 1, "no background → just the bottom line");
+    let r = &ctx.rects[0];
+    assert_eq!(r.color, gray);
+    assert_eq!(
+        r.border_width, 0.0,
+        "a side border is a sharp fill, not a stroke"
+    );
+    assert_eq!((r.x, r.y), (0.0, 78.0), "hugs the bottom edge (80 - 2)");
+    assert_eq!(
+        (r.width, r.height),
+        (120.0, 2.0),
+        "spans full width, 2px tall"
+    );
+}
+
+#[test]
+fn container_border_right_hugs_right_edge() {
+    let ctx = paint_container(Container::column().border_right(1.0, Color::WHITE));
+    assert_eq!(ctx.rects.len(), 1);
+    let r = &ctx.rects[0];
+    assert_eq!((r.x, r.y), (119.0, 0.0), "hugs the right edge (120 - 1)");
+    assert_eq!((r.width, r.height), (1.0, 80.0), "1px wide, full height");
+}
+
+#[test]
+fn container_default_has_no_side_borders() {
+    let ctx = paint_container(Container::column().background(Color::WHITE));
+    assert_eq!(ctx.rects.len(), 1, "just the fill, no divider lines");
+}
+
+#[test]
+fn container_side_borders_paint_over_fill_and_four_side_border() {
+    // Fill, then the four-sided stroke, then the divider lines on top:
+    // 1 (bg) + 1 (border stroke) + 2 (top & left dividers) = 4 rects.
+    let ctx = paint_container(
+        Container::column()
+            .background(Color::WHITE)
+            .border(1.0, Color::rgb(0.8, 0.8, 0.8))
+            .border_top(1.0, Color::rgb(1.0, 0.0, 0.0))
+            .border_left(1.0, Color::rgb(0.0, 1.0, 0.0)),
+    );
+    assert_eq!(ctx.rects.len(), 4, "bg + 4-side stroke + 2 dividers");
+    assert_eq!(ctx.rects[0].border_width, 0.0, "rect[0] is the fill");
+    assert_eq!(
+        ctx.rects[1].border_width, 1.0,
+        "rect[1] is the 4-side stroke"
+    );
+    // The two divider lines are sharp fills painted last.
+    assert_eq!(ctx.rects[2].border_width, 0.0);
+    assert_eq!(ctx.rects[3].border_width, 0.0);
+}
+
+#[test]
+fn container_zero_side_border_width_draws_nothing() {
+    let ctx = paint_container(
+        Container::column()
+            .background(Color::WHITE)
+            .border_bottom(0.0, Color::rgb(1.0, 0.0, 0.0))
+            .border_right(-3.0, Color::rgb(0.0, 0.0, 1.0)),
+    );
+    assert_eq!(ctx.rects.len(), 1, "zero / negative width draws no line");
+}
+
+#[test]
+fn container_four_side_border_paints_over_a_full_bleed_child() {
+    // Regression (knot-ui-repro sidebar): a stretched child with its own
+    // background (a full-width ScrollView) must not obscure the parent's
+    // border. Borders paint in `paint_post_children`, so the border rect is
+    // emitted *after* the child's fill and survives on top.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::column()
+            .width(120.0)
+            .height(80.0)
+            .border(1.0, Color::rgb(1.0, 0.0, 0.0)),
+    );
+    tree.add_child(
+        root,
+        Container::column()
+            .width_full()
+            .height_full()
+            .background(Color::WHITE),
+    );
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    // Parent has no bg of its own → [child fill, parent border stroke].
+    assert_eq!(ctx.rects.len(), 2);
+    assert_eq!(ctx.rects[0].border_width, 0.0, "child fill paints first");
+    assert_eq!(
+        ctx.rects[1].border_width, 1.0,
+        "parent border paints last, on top of the child"
+    );
+}
+
+#[test]
+fn container_side_border_paints_over_a_full_bleed_child() {
+    // The exact reported bug: a full-width child covered the sidebar's
+    // `border_right`. The right divider must be emitted after the child fill.
+    let red = Color::rgb(1.0, 0.0, 0.0);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::column()
+            .width(120.0)
+            .height(80.0)
+            .border_right(1.0, red),
+    );
+    tree.add_child(
+        root,
+        Container::column()
+            .width_full()
+            .height_full()
+            .background(Color::WHITE),
+    );
+    tree.compute_layout(400.0, 300.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(ctx.rects.len(), 2);
+    // rect[0] is the child's full-bleed fill; rect[1] is the right divider.
+    let line = &ctx.rects[1];
+    assert_eq!(
+        line.color, red,
+        "the right divider paints last, over the child"
+    );
+    assert_eq!(line.x, 119.0, "and still hugs the right edge (120 - 1)");
+}
+
+// ── Container justify / align wiring (G11) ───────────────────────
+
+#[test]
+fn container_justify_space_between_positions_children_at_the_ends() {
+    // End-to-end proof that `Container::justify` reaches layout: two 50px
+    // children in a 400px row land at x=0 and x=350 — the "title left,
+    // actions right" header the old grow-spacer hack was faking.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        Container::row()
+            .width(400.0)
+            .height(40.0)
+            .justify(shroud_layout::Justify::SpaceBetween),
+    );
+    tree.add_child(
+        root,
+        Container::column()
+            .width(50.0)
+            .height(20.0)
+            .background(Color::WHITE),
+    );
+    tree.add_child(
+        root,
+        Container::column()
+            .width(50.0)
+            .height(20.0)
+            .background(Color::WHITE),
+    );
+    tree.compute_layout(400.0, 40.0);
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    // Two child fills; the parent has no background of its own.
+    assert_eq!(ctx.rects.len(), 2);
+    let xs: Vec<f32> = ctx.rects.iter().map(|r| r.x).collect();
+    assert!(xs.contains(&0.0), "one child hugs the left");
+    assert!(xs.contains(&350.0), "the other hugs the right (400 - 50)");
+}
+
+#[test]
+fn container_justify_align_are_chainable() {
+    let _c = Container::row()
+        .justify(shroud_layout::Justify::End)
+        .align(shroud_layout::Align::Start)
+        .border_bottom(1.0, Color::WHITE)
+        .border_right(1.0, Color::WHITE);
+}
+
 // ── Input chrome (FW-14) ─────────────────────────────────────────
 //
 // A default single-line Input paints exactly two rects: the background

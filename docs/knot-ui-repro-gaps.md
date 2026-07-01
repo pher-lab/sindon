@@ -139,24 +139,28 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - 残る差は G7（フォーカス時に「外側リング」が出る vs 正解は「枠線の色が変わるだけ」）。
   これは設計判断としてまだ open。常時枠が出るようになった分、G7 の体感差は小さくなった。
 
-### G10. 片側 border (`border-r` / `border-b`) が引けない — **中**
+### G10. 片側 border (`border-r` / `border-b`) が引けない → **解消（FW-16、2026-07-02 landed）**
 - 正解は仕切り線を片側 border で多用する: サイドバー右端 `border-r`、ヘッダ／検索／タグ各
   セクション下端 `border-b`、dropdown 内の区切り。
-- shroud の `Container::border(width, color)`（FW-15）は**4辺一括のみ**。1辺だけの線が引けない。
-- 暫定対応（Main slice 1）: 1px の細い `Container`（`height(1).width_full()` または
-  `width(1).height_full()` に border 色を `background`）を仕切り線として挟む。動くが、
-  「box の辺」ではなく「兄弟ノード」なので角の処理や padding 内側への食い込みは別物。
-- 候補対応: `border_bottom(w,c)` / `border_right(w,c)` ないし `border_sides(...)`、
-  もしくは `Divider` プリミティブ。
+- ~~shroud の `Container::border(width, color)`（FW-15）は**4辺一括のみ**。1辺だけの線が引けない。~~
+- 対応: `Container::border_top/right/bottom/left(width, color)` を追加。各辺を sharp な
+  `fill_rect` で描画（Tailwind `border-r`/`border-b` 直対応）、color は `Reactive<Color>` で
+  live theme 追従、`width<=0` は無描画、4辺 `border()` とは独立。clone の 1px divider 兄弟は
+  実 `border_*` に置換（`divider` fn 削除）。popover 行間の区切りだけは兄弟 divider を温存
+  （別ヘルパで作る行の**間**に入るので box の辺にならない）。
+- **★ この実装中に framework 実バグ発見・同時修正（G17）**: 片側 border（や4辺 `border()`）が
+  full-bleed な子背景に上書きされて消える問題。詳細は G17。
 
-### G11. flex 整列が `center` 系しかない（`justify-between` / `*-end` / `*-start` 不可）— **中**
+### G11. flex 整列が `center` 系しかない（`justify-between` / `*-end` / `*-start` 不可）→ **解消（FW-16、2026-07-02 landed）**
 - 正解のヘッダ行は `flex items-center justify-between`（タイトル左・操作ボタン群右）。行・
   列の両端寄せ・端寄せが頻出（モーダルのフッタボタン、リスト行の右端メタ等）。
-- shroud は `center` / `justify_center`（主軸中央）/ `align_center`（交差軸中央）のみ。
-  `justify-between` / `justify-end` / `align-start` / `align-end` に当たる builder が無い。
-- 暫定対応（slice 1）: 両端の間に `Container::row().grow(1.0)` のスペーサを挟んで
-  `justify-between` を擬似再現。`justify-end` も先頭スペーサで代替可だが冗長。
-- 候補対応: `justify(Justify)` / `align(Align)` で `Start/Center/End/Between/Around` を公開。
+- ~~shroud は `center` / `justify_center`（主軸中央）/ `align_center`（交差軸中央）のみ。~~
+- 対応: shroud ネイティブの `Justify`（Start/Center/End/SpaceBetween/SpaceAround/SpaceEvenly）
+  / `Align`（Start/Center/End/Stretch）enum を `shroud_layout` に追加 →
+  `FlexStyle::justify/align` + `Container::justify/align`。taffy を widget API に漏らさず
+  `From` で内部マッピング（既存 center 系は温存）。clone のヘッダ `justify-between`・ステータス
+  `text-right` は `grow(1.0)` スペーサ → `justify(SpaceBetween)`/`justify(End)` に置換。
+  （ツールバーの `flex-1` スペーサは React も本物の spacer なので `grow` のまま。）
 
 ### G12. `Input` / `SecureInput` に font-weight（太字）が無い — **中（Main slice 2 で発見）**
 - 正解の Editor タイトル欄は `text-2xl font-bold`。`TextWidget` には `weight(FontWeight)` が
@@ -251,7 +255,24 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
     select 行ラベル（コンテナ padding 8px ぶん inset）より左に出て不揃いに見えるのはこれ。React は
     全行 `px-3` で揃う。修正案: MenuItem paint で left-padding ぶん inset、または clone 側でパネルに
     水平 padding を与え行を揃える。
-- いずれも FW-16（整列+寸法系）の候補に合流可。clone は当面そのまま（動作は正しい）。
+- いずれも FW-17 系（寸法公開）の候補に合流可（FW-16 は整列+片側 border のみに絞った）。
+  clone は当面そのまま（動作は正しい）。
+
+### G17. Container の border が full-bleed な子背景に上書きされる → **framework 実バグ → 解消（FW-16、2026-07-02 landed）**
+- 症状（実機、ユーザ指摘）: サイドバーに `border_right`（G10）を付けたのに**右端の線が見えない**。
+  FW-15 で入れた4辺 `border()` も同じ穴を持つ（full-bleed な子があると消える）。
+- 真因（端から端まで追跡）: `WidgetTree::paint_node`（`tree.rs:1148-1154`）は **親の `paint()` を子より
+  先**に描く（`paint()` → children → `paint_post_children()`）。一方 `ScrollView::paint`
+  （`scroll_view.rs:298`）は自分の layout 矩形**全体**を背景で塗る。サイドバー幅いっぱい（256px）の
+  ノートリスト ScrollView が、先に描かれたサイドバーの右 border（x=255）を**上塗り**していた。旧実装の
+  1px divider は**兄弟ノード**（全子孫の後に描画）だったので隠れなかった＝ FW-16 で box の辺に移した
+  瞬間に踏んだ。
+- 修正: Container の border 描画（4辺ストローク + 片側 divider）を `paint()` → **`paint_post_children()`**
+  に移動。子の後に描かれる＝常に最前面になり、full-bleed な子背景でも隠れない。CSS の border が
+  content box の外側に出て子に隠れないのと同じ挙動。塗り（background/hover）は `paint()` のまま。
+- 影響範囲: 「full-bleed な子（ScrollView 等）を持つ枠付き Container」全般。app 作者が自然に踏む。
+  回帰テスト2本（4辺 border / 片側 border が full-bleed 子の rect の**後**に emit される）。
+- **G13 二重ガンマ・G14 layer anchor に続く「repro でしか炙れない framework 実バグ」第3号**。
 
 ### Button の hover/press 既定色（小・記録のみ）
 - `Button::background(x)` だけ指定して `hover_background`/`press_background` を省くと、ホバー/押下で

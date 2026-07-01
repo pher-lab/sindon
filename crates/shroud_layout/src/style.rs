@@ -192,6 +192,25 @@ impl FlexStyle {
         self
     }
 
+    /// Distribute children along the main axis (CSS `justify-content`).
+    ///
+    /// The general form of [`Self::justify_center`] — see [`Justify`] for the
+    /// full range (`Start` / `End` / `SpaceBetween` / …). Maps the shroud
+    /// enum to Taffy so the widget-facing API stays free of Taffy types.
+    pub fn justify(self, justify: Justify) -> Self {
+        self.justify_content(justify.into())
+    }
+
+    /// Align children on the cross axis (CSS `align-items`).
+    ///
+    /// The general form of [`Self::align_center`] — see [`Align`] for the full
+    /// range (`Start` / `End` / `Stretch`). Note the same min-content caveat as
+    /// [`Self::align_center`]: `Center` / `Start` / `End` size each child to its
+    /// own cross extent, while the default `Stretch` fills the cross axis.
+    pub fn align(self, align: Align) -> Self {
+        self.align_items(align.into())
+    }
+
     /// Center items on the cross axis only.
     pub fn align_center(self) -> Self {
         self.align_items(AlignItems::Center)
@@ -310,5 +329,71 @@ impl Default for FlexStyle {
 impl From<FlexStyle> for Style {
     fn from(fs: FlexStyle) -> Self {
         fs.build()
+    }
+}
+
+/// Main-axis distribution of a flex container's children (CSS
+/// `justify-content`), mirroring the Tailwind `justify-*` utilities.
+///
+/// The shroud-native counterpart to Taffy's `JustifyContent`, so widgets can
+/// expose the full range (`Container::justify`) without leaking Taffy types
+/// into their API. Pair with [`Align`] for the cross axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Justify {
+    /// Pack children at the main-axis start (`justify-start`).
+    Start,
+    /// Center children on the main axis (`justify-center`).
+    Center,
+    /// Pack children at the main-axis end (`justify-end`).
+    End,
+    /// Even space *between* children, none at the ends (`justify-between`) —
+    /// the idiom for "title left, actions right" header rows.
+    SpaceBetween,
+    /// Equal space around each child, so the end gaps are half the size of
+    /// the gaps between children (`justify-around`).
+    SpaceAround,
+    /// Equal space between children *and* at the ends (`justify-evenly`).
+    SpaceEvenly,
+}
+
+/// Cross-axis alignment of a flex container's children (CSS `align-items`),
+/// mirroring the Tailwind `items-*` utilities.
+///
+/// The shroud-native counterpart to Taffy's `AlignItems`; the general form of
+/// [`FlexStyle::align_center`]. The default (when never set) is `Stretch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    /// Pack children at the cross-axis start (`items-start`).
+    Start,
+    /// Center children on the cross axis (`items-center`).
+    Center,
+    /// Pack children at the cross-axis end (`items-end`).
+    End,
+    /// Stretch children to fill the cross axis (`items-stretch`, the flex
+    /// default) — restores stretching after a builder set something else.
+    Stretch,
+}
+
+impl From<Justify> for JustifyContent {
+    fn from(j: Justify) -> Self {
+        match j {
+            Justify::Start => JustifyContent::Start,
+            Justify::Center => JustifyContent::Center,
+            Justify::End => JustifyContent::End,
+            Justify::SpaceBetween => JustifyContent::SpaceBetween,
+            Justify::SpaceAround => JustifyContent::SpaceAround,
+            Justify::SpaceEvenly => JustifyContent::SpaceEvenly,
+        }
+    }
+}
+
+impl From<Align> for AlignItems {
+    fn from(a: Align) -> Self {
+        match a {
+            Align::Start => AlignItems::Start,
+            Align::Center => AlignItems::Center,
+            Align::End => AlignItems::End,
+            Align::Stretch => AlignItems::Stretch,
+        }
     }
 }

@@ -1,4 +1,4 @@
-use shroud_layout::{FlexStyle, LayoutEngine};
+use shroud_layout::{Align, FlexStyle, Justify, LayoutEngine};
 use taffy::prelude::*;
 
 #[test]
@@ -183,6 +183,92 @@ fn style_builder_chaining() {
     assert_eq!(style.flex_grow, 1.0);
     assert_eq!(style.align_items, Some(AlignItems::Center));
     assert_eq!(style.justify_content, Some(JustifyContent::Center));
+}
+
+#[test]
+fn justify_maps_full_range_to_taffy() {
+    // The shroud-native `Justify` enum is the general form of `justify_center`;
+    // each variant must land on the matching Taffy `JustifyContent` so the
+    // widget-facing API can stay Taffy-free without losing expressiveness.
+    let cases = [
+        (Justify::Start, JustifyContent::Start),
+        (Justify::Center, JustifyContent::Center),
+        (Justify::End, JustifyContent::End),
+        (Justify::SpaceBetween, JustifyContent::SpaceBetween),
+        (Justify::SpaceAround, JustifyContent::SpaceAround),
+        (Justify::SpaceEvenly, JustifyContent::SpaceEvenly),
+    ];
+    for (j, expected) in cases {
+        let style: taffy::Style = FlexStyle::new().row().justify(j).into();
+        assert_eq!(style.justify_content, Some(expected), "{j:?}");
+    }
+}
+
+#[test]
+fn align_maps_full_range_to_taffy() {
+    let cases = [
+        (Align::Start, AlignItems::Start),
+        (Align::Center, AlignItems::Center),
+        (Align::End, AlignItems::End),
+        (Align::Stretch, AlignItems::Stretch),
+    ];
+    for (a, expected) in cases {
+        let style: taffy::Style = FlexStyle::new().row().align(a).into();
+        assert_eq!(style.align_items, Some(expected), "{a:?}");
+    }
+}
+
+#[test]
+fn justify_space_between_pushes_children_to_the_ends() {
+    // The header idiom: first child pinned left, last child pinned right, all
+    // the slack distributed as one gap between them. This is the layout G11
+    // was faking with a `grow(1.0)` spacer.
+    let mut engine = LayoutEngine::new();
+    let left = engine.add_leaf(FlexStyle::new().width(50.0).height(20.0));
+    let right = engine.add_leaf(FlexStyle::new().width(50.0).height(20.0));
+    let root = engine.add_container(
+        FlexStyle::new()
+            .row()
+            .width(400.0)
+            .height(40.0)
+            .justify(Justify::SpaceBetween),
+        &[left, right],
+    );
+
+    engine.compute(root, 800.0, 600.0);
+
+    assert_eq!(
+        engine.layout(left).origin.x,
+        0.0,
+        "first child hugs the left"
+    );
+    assert_eq!(
+        engine.layout(right).origin.x,
+        350.0,
+        "last child's right edge hugs the container's right (400 - 50)"
+    );
+}
+
+#[test]
+fn align_end_pins_children_to_the_cross_axis_end() {
+    // A short child in a tall row, aligned to the bottom (cross-axis end)
+    // rather than stretched or centered.
+    let mut engine = LayoutEngine::new();
+    let child = engine.add_leaf(FlexStyle::new().width(30.0).height(20.0));
+    let root = engine.add_container(
+        FlexStyle::new()
+            .row()
+            .width(200.0)
+            .height(100.0)
+            .align(Align::End),
+        &[child],
+    );
+
+    engine.compute(root, 800.0, 600.0);
+
+    let r = engine.layout(child);
+    assert_eq!(r.size.height, 20.0, "End keeps the child's natural height");
+    assert_eq!(r.origin.y, 80.0, "bottom edge sits at the container bottom");
 }
 
 #[test]

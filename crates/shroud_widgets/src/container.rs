@@ -6,7 +6,7 @@ use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
 use shroud_core::{Color, Lerp, Point, Rect};
-use shroud_layout::FlexStyle;
+use shroud_layout::{Align, FlexStyle, Justify};
 use shroud_reactive::{Animated, Easing, Reactive};
 
 /// Default hover color-transition duration — a short fade (120 ms) so a
@@ -34,6 +34,23 @@ type HoverEnterHandler = Box<dyn FnMut(Rect, &mut EventContext)>;
 /// position, so the handler just gets the event context (e.g. to pop the
 /// tooltip layer it opened on enter).
 type HoverExitHandler = Box<dyn FnMut(&mut EventContext)>;
+
+/// One edge's border: stroke thickness in px paired with its (reactive)
+/// color. Backs the single-side [`Container::border_top`] etc. builders,
+/// which draw a sharp line along one layout edge — the flexbox-native way
+/// to reproduce a Tailwind `border-r` / `border-b` divider without the
+/// four-sided [`Container::border`].
+type SideBorder = (f32, Reactive<Color>);
+
+/// Normalize a side-border builder argument: `width <= 0.0` clamps to `None`
+/// (no line), matching the four-sided [`Container::border`] contract.
+fn side_border(width: f32, color: impl Into<Reactive<Color>>) -> Option<SideBorder> {
+    if width > 0.0 {
+        Some((width, color.into()))
+    } else {
+        None
+    }
+}
 
 /// A flexbox container widget.
 ///
@@ -74,6 +91,15 @@ pub struct Container {
     /// Border color, re-read every paint like [`background`](Self::background).
     /// `None` when no border is set.
     border_color: Option<Reactive<Color>>,
+    /// Per-edge single-side borders (top, right, bottom, left). Each is a
+    /// sharp line drawn along that layout edge, independent of the four-sided
+    /// [`border`](Self::border_width) — the divider idiom (`border-r` /
+    /// `border-b`). `None` = that edge has no line. Set via
+    /// [`border_top`](Self::border_top) etc.
+    border_top: Option<SideBorder>,
+    border_right: Option<SideBorder>,
+    border_bottom: Option<SideBorder>,
+    border_left: Option<SideBorder>,
     visible: Reactive<bool>,
     /// Optional right-click handler. When set, `MouseDown { button: Right }`
     /// inside the container's layout rect invokes the handler with the
@@ -124,6 +150,10 @@ impl Container {
             radius: 0.0,
             border_width: 0.0,
             border_color: None,
+            border_top: None,
+            border_right: None,
+            border_bottom: None,
+            border_left: None,
             visible: Reactive::Static(true),
             on_context_menu: None,
             on_press: None,
@@ -149,6 +179,10 @@ impl Container {
             radius: 0.0,
             border_width: 0.0,
             border_color: None,
+            border_top: None,
+            border_right: None,
+            border_bottom: None,
+            border_left: None,
             visible: Reactive::Static(true),
             on_context_menu: None,
             on_press: None,
@@ -246,6 +280,39 @@ impl Container {
         self
     }
 
+    /// Draw a `width`-px line along the container's **top** edge in `color`
+    /// (CSS `border-top`). Independent of the four-sided [`border`](Self::border):
+    /// a sharp line hugging one layout edge, the flexbox-native replacement for
+    /// the "1px divider Container" hack. The color is [`Reactive`], re-read
+    /// every paint. `width <= 0.0` draws nothing.
+    pub fn border_top(mut self, width: f32, color: impl Into<Reactive<Color>>) -> Self {
+        self.border_top = side_border(width, color);
+        self
+    }
+
+    /// Draw a `width`-px line along the container's **right** edge in `color`
+    /// (CSS `border-right`) — the sidebar `border-r` idiom. See
+    /// [`border_top`](Self::border_top).
+    pub fn border_right(mut self, width: f32, color: impl Into<Reactive<Color>>) -> Self {
+        self.border_right = side_border(width, color);
+        self
+    }
+
+    /// Draw a `width`-px line along the container's **bottom** edge in `color`
+    /// (CSS `border-bottom`) — the section-separator `border-b` idiom. See
+    /// [`border_top`](Self::border_top).
+    pub fn border_bottom(mut self, width: f32, color: impl Into<Reactive<Color>>) -> Self {
+        self.border_bottom = side_border(width, color);
+        self
+    }
+
+    /// Draw a `width`-px line along the container's **left** edge in `color`
+    /// (CSS `border-left`). See [`border_top`](Self::border_top).
+    pub fn border_left(mut self, width: f32, color: impl Into<Reactive<Color>>) -> Self {
+        self.border_left = side_border(width, color);
+        self
+    }
+
     /// Set padding on all sides.
     pub fn padding(mut self, px: f32) -> Self {
         self.style = self.style.padding(px);
@@ -321,6 +388,26 @@ impl Container {
     /// centering it through this parent setting.
     pub fn align_center(mut self) -> Self {
         self.style = self.style.align_center();
+        self
+    }
+
+    /// Distribute children along the main axis (CSS `justify-content`) — the
+    /// general form of [`Container::justify_center`]. Use
+    /// [`Justify::SpaceBetween`] for the ubiquitous "title left, actions right"
+    /// header row, or `Start` / `End` to pin the group to one end. See
+    /// [`Justify`] for the full range.
+    pub fn justify(mut self, justify: Justify) -> Self {
+        self.style = self.style.justify(justify);
+        self
+    }
+
+    /// Align children on the cross axis (CSS `align-items`) — the general form
+    /// of [`Container::align_center`]. `Start` / `Center` / `End` size each
+    /// child to its own cross extent; the default `Stretch` fills the cross
+    /// axis. See [`Align`] and the min-content caveat on
+    /// [`Container::align_center`].
+    pub fn align(mut self, align: Align) -> Self {
+        self.style = self.style.align(align);
         self
     }
 
@@ -533,14 +620,46 @@ impl Widget for Container {
         } else if let Some(color) = self.background.as_ref().map(|c| c.get()) {
             ctx.fill_rect_rounded(layout, color, self.radius);
         }
+    }
 
-        // Border stroke, painted over the fill so it reads on top of a
-        // background and on its own for a transparent outlined box. Reuses the
-        // same rounded-SDF path as Input's frame.
+    /// Borders paint *after* the children so a full-bleed child background
+    /// can't obscure them. A container's border is a frame around the whole
+    /// box — the intuitive behavior (and how CSS borders sit outside the
+    /// content box) — but our flex model doesn't inset children by the border
+    /// width, so a stretched child with its own background (e.g. a full-width
+    /// `ScrollView`) reaches the very edge and would overpaint a border drawn
+    /// pre-children.
+    fn paint_post_children(&self, layout: Rect, ctx: &mut PaintContext) {
+        // Four-sided border stroke, over the fill and children so it reads on
+        // top of a background and on its own for a transparent outlined box.
+        // Reuses the same rounded-SDF path as Input's frame.
         if self.border_width > 0.0 {
             if let Some(color) = self.border_color.as_ref().map(|c| c.get()) {
                 ctx.stroke_rect_rounded(layout, color, self.radius, self.border_width);
             }
+        }
+
+        // Single-side borders (dividers). Each is a sharp filled line hugging
+        // one layout edge, painted after the four-sided stroke so an explicit
+        // divider always reads on top. Corners are square — a one-sided line
+        // has no rounding to reconcile with `radius`.
+        let (x, y, w, h) = (
+            layout.origin.x,
+            layout.origin.y,
+            layout.size.width,
+            layout.size.height,
+        );
+        if let Some((t, color)) = &self.border_top {
+            ctx.fill_rect(Rect::new(x, y, w, *t), color.get());
+        }
+        if let Some((t, color)) = &self.border_bottom {
+            ctx.fill_rect(Rect::new(x, y + h - t, w, *t), color.get());
+        }
+        if let Some((t, color)) = &self.border_left {
+            ctx.fill_rect(Rect::new(x, y, *t, h), color.get());
+        }
+        if let Some((t, color)) = &self.border_right {
+            ctx.fill_rect(Rect::new(x + w - t, y, *t, h), color.get());
         }
     }
 
