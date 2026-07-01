@@ -110,7 +110,14 @@ pub fn build(tree: &mut WidgetTree) {
         link_row,
         Button::new("Forgot password?")
             .background(Color::TRANSPARENT)
+            // Text-only link (`text-gray-500 hover:text-gray-700`): transparent
+            // fills so no box appears, and the label darkens on hover via
+            // `hover_text_color` (FW addition this branch) — that color change
+            // is what reads as "this is clickable".
+            .hover_background(Color::TRANSPARENT)
+            .press_background(Color::TRANSPARENT)
             .text_color(tokens::muted())
+            .hover_text_color(tokens::pick(tokens::gray_700(), tokens::gray_300()))
             .font_size(14.0)
             .on_click(|_ctx| { /* would open recovery */ }),
     );

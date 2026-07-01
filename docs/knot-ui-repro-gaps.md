@@ -215,19 +215,27 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   main tree で不変 / `ViewportCenter` は不変）。`layer.rs` の `AnchorRect` doc も「rect は push する
   ハンドラの座標系。layer 内なら自動で viewport 化」と更新。clone の設定 select は実 `Dropdown` に復帰。
 
-### G15. capturing layer が trigger の `MouseLeave` を食い、ホバーが固定される → **framework gap（要修正判断）**
+### G15. capturing layer が trigger の `MouseLeave` を食い、ホバーが固定される → **framework gap（真因特定・棚上げ：実害軽微）**
 - 症状（slice 3、実機 + ユーザ指摘）: クリックで popover を開く trigger（`hoverable` な
-  `Container`、gear/⋮ 等）が、**外側クリックで popover を閉じた後もホバー色（灰）のまま固定**。
-  もう一度ホバーし直すと直る（実害は軽微だが「全ボタンをホバー状態で固定できてしまう」違和感）。
-- 真因: trigger を押す → 先に `MouseEnter` で hover=1.0。`on_press` が capturing layer を push。
-  layer が上にいる間 main tree はポインタイベントを一切受けない（設計どおり）ので、カーソルが
-  trigger から離れても **`MouseLeave` が来ない** → `hover_anim` が 1.0 のまま。layer を閉じても
-  カーソルは既に別所なので二度と `MouseLeave` が発火しない。
-- 修正案: capturing layer を push した時点で main tree の現ホバーを解除する（`clear_hover`、
-  `tree.rs:1696` が既にある）か、layer 解除時に現在のカーソル位置で hover を再評価する。
-  非インタラクティブ layer（tooltip）が `MouseLeave` を食わない既存の配慮（`layer.rs:96-104`）の
-  「インタラクティブ版」に当たる。
-- 影響範囲: 「クリックで開く menu/dropdown」trigger 全般。FW-13 tooltip の click-through 設計と対。
+  `Container`、gear/⋮ 等）が、popover を閉じた後も**ホバー色（灰）のまま固定**。もう一度ホバーし
+  直すと直る（実害は軽微だが「全ボタンをホバー状態で固定できてしまう」違和感）。
+- **第一次仮説（外れ）**: 「layer push 時に main tree の現ホバーを `clear_hover` で消せばよい」。実装して
+  診断ログを仕込んだところ、**push 時点で `self.hovered` は毎回 `None`** だった → `clear_hover` は完全に
+  no-op。撤去済み。
+- **真因（診断で判明）**: gear の `hover_anim` は 1.0（灰色）なのに、それを hover として追跡している
+  ノードが無い（`hovered=None`）＝**hover の「見た目（anim）」と「状態（`self.hovered`）」が layer 境界を
+  またいで desync**。gear に来るべき `MouseEnter` の対の `MouseLeave` が layer 遷移のどこかで迷子になり、
+  `hover_anim` が孤児化して 1.0 に張り付く。enter/leave は `self.hovered` の遷移に紐づくので、状態が
+  既に None だと二度と leave が出ない。
+- **素直な修正が効かない二重の壁**: (a) push 時は `hovered=None` なので直接消せない、(b) 「push/pop 時に
+  カーソル位置から hover 再評価」も、**drain 時点では新 layer のレイアウトが未計算**（`layer.offset` は
+  次フレームの `compute_layout` まで stale/0）なので hit-test を当てられない。
+- **正攻法（要・別途設計）**: WidgetTree に最終カーソル位置を保持し、レイアウト確定後（次フレーム冒頭 or
+  paint 前）に layer push/pop を検知して hover を再同期する。あるいは enter/leave を `hover_anim` を持つ
+  全 Container に対し layer 遷移でフラッシュする。いずれも hover/layer 相互作用に踏み込むので test 必須。
+- **判断**: ユーザ評価どおり**実害軽微**につき棚上げ（真因はここに記録）。FW-13 tooltip の click-through
+  設計（`layer.rs:96-104`、非 interactive は `MouseLeave` を食わない）の「interactive 版の取りこぼし」に
+  当たる。影響範囲は「クリックで開く menu/dropdown」trigger 全般。
 
 ### G16. 設定パネルの仕上がり差（Dropdown 寸法/角・MenuItem ラベル左寄せ）— **小（polish・要判断）**
 - slice 3 で設定 dropdown を実機確認したユーザ指摘の「惜しい」点。いずれも忠実再現を妨げないが質感差。

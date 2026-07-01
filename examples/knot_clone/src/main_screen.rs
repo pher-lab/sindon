@@ -70,7 +70,8 @@
 //! `disabled:opacity-40` when there are no notes); `Container` exposes no
 //! `min_width` (`min-w-[140px]` faked with a fixed `width`); `Button` defaults
 //! its hover/press fill to *primary* when only `background` is set (the
-//! transparent `×` flashed blue until both fills were pinned transparent).
+//! transparent `×` flashed blue until both fills were pinned transparent — now
+//! it also darkens its glyph on hover via the new `Button::hover_text_color`).
 
 use shroud::core::{Color, Point, Rect};
 use shroud::reactive::{Reactive, Signal};
@@ -190,6 +191,10 @@ fn sidebar(tree: &mut WidgetTree, parent: usize) {
 
 /// Small square header button: `p-1.5 rounded`, transparent until hover.
 /// `p-1.5` (6px) is uniform so it maps cleanly; the icon is a single glyph.
+///
+/// `press_background` matches `hover_background`: React styles only
+/// `hover:bg-gray-300`, no distinct press, but `Button` otherwise defaults
+/// its press fill to *primary* (blue) when only `background` is set.
 fn icon_button(tree: &mut WidgetTree, parent: usize, glyph: &str) {
     tree.add_child(
         parent,
@@ -199,6 +204,7 @@ fn icon_button(tree: &mut WidgetTree, parent: usize, glyph: &str) {
             .background(Color::TRANSPARENT)
             .text_color(icon_fg())
             .hover_background(border())
+            .press_background(border())
             .on_click(|_ctx| {}),
     );
 }
@@ -380,6 +386,7 @@ fn editor_title_section(tree: &mut WidgetTree, parent: usize) {
             .background(Color::TRANSPARENT)
             .text_color(icon_fg())
             .hover_background(tokens::pick(tokens::gray_200(), tokens::gray_800()))
+            .press_background(tokens::pick(tokens::gray_200(), tokens::gray_800()))
             .on_click(show_error_banner),
     );
 
@@ -543,6 +550,9 @@ fn flat_icon_button(
             .background(Color::TRANSPARENT)
             .text_color(text_color)
             .hover_background(tokens::pick(tokens::gray_200(), tokens::gray_800()))
+            // Match hover so the press doesn't fall back to Button's default
+            // primary (blue) fill — React styles only hover here.
+            .press_background(tokens::pick(tokens::gray_200(), tokens::gray_800()))
             .on_click(|_ctx| {}),
     );
 }
@@ -844,14 +854,14 @@ fn show_error_banner(ctx: &mut EventContext) {
             Button::new("\u{00D7}") // ×
                 .font_size(14.0)
                 .background(Color::TRANSPARENT)
-                // React's × is text-only (`hover:text-red-700`, no background).
-                // `Button` defaults its hover/press fills to the *primary* color
-                // when only `background` is set, so without these the × flashed
-                // a blue square — keep both transparent (no `hover_text_color`
-                // exists to darken the glyph, a minor gap).
+                // React's × is text-only (`text-red-500 hover:text-red-700`):
+                // transparent fills (Button otherwise defaults hover/press to
+                // primary blue) and the glyph darkens on hover via
+                // `hover_text_color`.
                 .hover_background(Color::TRANSPARENT)
                 .press_background(Color::TRANSPARENT)
                 .text_color(tokens::pick(tokens::red_500(), tokens::red_300()))
+                .hover_text_color(tokens::pick(tokens::red_700(), tokens::red_200()))
                 .on_click(|c| c.pop_top_layer()),
         );
     });
