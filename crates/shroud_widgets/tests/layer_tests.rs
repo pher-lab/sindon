@@ -19,7 +19,7 @@ use shroud_widgets::layer::{LayerAnchor, LayerOptions, Placement};
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::shortcut::Shortcut;
 use shroud_widgets::tree::WidgetTree;
-use shroud_widgets::{Button, Container, Input, TextWidget};
+use shroud_widgets::{Button, Container, Input, ScrollView, TextWidget};
 
 /// Run layout with measure so leaf widgets (Button, TextWidget) get an
 /// intrinsic size — without this, Button collapses to 0x0 and click
@@ -214,6 +214,60 @@ fn modal_scrim_covers_viewport() {
     assert_eq!(scrim.x, 0.0);
     assert_eq!(scrim.y, 0.0);
     assert!(scrim.color.a < 1.0, "scrim should be semi-transparent");
+}
+
+#[test]
+fn scrollview_clip_inside_centered_layer_is_offset_to_viewport() {
+    // Regression for the Restore-modal bug: a ScrollView pushes a clip = its
+    // layout rect, which inside a layer is layer-*local*. The tree paints the
+    // layer subtree under a push_offset(layer_offset), so the ScrollView's
+    // clipped children draw offset — but push_clip used to leave the clip at
+    // local coords, scissoring the content away. The clip must be folded by
+    // the same layer offset the content is drawn at.
+    let mut tree = WidgetTree::new();
+    tree.set_root(Container::column().width(800.0).height(600.0));
+    // A 200x100 modal card, centered → offset ((800-200)/2, (600-100)/2)
+    // = (300, 250). It holds a ScrollView with a background child so a rect
+    // (carrying the active clip) is emitted.
+    let card = tree.push_layer(
+        LayerOptions::modal(),
+        Container::column().width(200.0).height(100.0),
+    );
+    let sv = tree.add_child(card, ScrollView::new().width_full().height_full());
+    tree.add_child(
+        sv,
+        Container::column()
+            .width(50.0)
+            .height(50.0)
+            .background(Color::rgb(0.6, 0.2, 0.2)),
+    );
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    // The child's rect carries the ScrollView's clip. Its clip must be shifted
+    // to the layer's viewport position (~x>=300, ~y>=250), not left at 0.
+    let child = ctx
+        .rects
+        .iter()
+        .find(|r| (r.width - 50.0).abs() < 0.5 && (r.height - 50.0).abs() < 0.5)
+        .expect("child rect present");
+    let clip = child.clip_rect.expect("child inside ScrollView is clipped");
+    assert!(
+        clip.origin.x >= 299.5 && clip.origin.y >= 249.5,
+        "ScrollView clip must be offset into viewport space, got x={} y={}",
+        clip.origin.x,
+        clip.origin.y
+    );
+    // And the child itself is painted inside its own clip (not scissored away).
+    assert!(
+        child.x >= clip.origin.x - 0.5 && child.x < clip.origin.x + clip.size.width,
+        "child x={} should sit within clip x={}..{}",
+        child.x,
+        clip.origin.x,
+        clip.origin.x + clip.size.width
+    );
 }
 
 #[test]

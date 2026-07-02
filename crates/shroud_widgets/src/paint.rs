@@ -128,7 +128,26 @@ impl PaintContext {
 
     /// Push a clip rectangle. If a clip is already active, the pushed clip is
     /// intersected with the current clip (nested clipping semantics).
+    ///
+    /// The active offset is folded in — just like [`fill_rect`](Self::fill_rect),
+    /// [`draw_glyph`](Self::draw_glyph), [`push_rotation`](Self::push_rotation),
+    /// and [`set_ime_cursor_area`](Self::set_ime_cursor_area) — because the
+    /// `rect` is given in the *widget-local* space the caller received in
+    /// `paint`, whereas the content it wraps is drawn with the offset applied.
+    /// Without this, a clip pushed inside a translated context (a `ScrollView`,
+    /// or any clipping widget nested in a centered/anchored layer whose offset
+    /// the tree applies before painting the subtree) would scissor against
+    /// local coords while its content draws offset — clipping the content away.
+    /// The main tree paints at offset `(0, 0)`, so this is a no-op there;
+    /// inside a layer it lands the clip in the same absolute space as the draws.
     pub fn push_clip(&mut self, rect: Rect) {
+        let (ox, oy) = self.current_offset();
+        let rect = Rect::new(
+            rect.origin.x + ox,
+            rect.origin.y + oy,
+            rect.size.width,
+            rect.size.height,
+        );
         let effective = match self.clip_stack.last() {
             Some(parent) => rect.intersect(parent).unwrap_or(Rect::ZERO),
             None => rect,
@@ -536,6 +555,49 @@ mod tests {
         ctx.pop_rotation();
         assert_eq!(ctx.current_rotation(), None);
         ctx.pop_offset();
+    }
+
+    #[test]
+    fn push_clip_folds_in_the_active_offset() {
+        // A clip is given in widget-local coords, but the content it wraps is
+        // drawn with the active offset applied (fill_rect / draw_glyph add it).
+        // So push_clip must fold the offset in too, or a ScrollView / clipping
+        // widget nested in a translated layer would scissor against local
+        // coords and clip its own offset-drawn content away. Regression guard
+        // for the Restore-modal bug: a centered layer's offset (~316px) left
+        // the clip at x=0 while glyphs drew at x=332+, hiding 400+ glyphs.
+        let mut ctx = PaintContext::default();
+        ctx.push_offset(100.0, 50.0);
+        ctx.push_clip(Rect::new(10.0, 20.0, 200.0, 80.0));
+        assert_eq!(
+            ctx.current_clip(),
+            Some(Rect::new(110.0, 70.0, 200.0, 80.0)),
+            "clip origin must be shifted by the active offset"
+        );
+        // A rect drawn at the same local origin lands inside the clip — the
+        // two now share one absolute space.
+        ctx.fill_rect(Rect::new(10.0, 20.0, 5.0, 5.0), Color::WHITE);
+        let r = ctx.rects.last().unwrap();
+        let clip = r.clip_rect.unwrap();
+        assert!(
+            r.x >= clip.origin.x && r.x < clip.origin.x + clip.size.width,
+            "drawn rect x={} should sit inside its clip x={}..{}",
+            r.x,
+            clip.origin.x,
+            clip.origin.x + clip.size.width
+        );
+        ctx.pop_clip();
+        ctx.pop_offset();
+    }
+
+    #[test]
+    fn push_clip_no_offset_is_unchanged() {
+        // Main-tree paint runs at offset (0,0): the fold must be a no-op there
+        // so existing (offset-free) clip math is preserved.
+        let mut ctx = PaintContext::default();
+        ctx.push_clip(Rect::new(10.0, 10.0, 80.0, 80.0));
+        assert_eq!(ctx.current_clip(), Some(Rect::new(10.0, 10.0, 80.0, 80.0)));
+        ctx.pop_clip();
     }
 
     #[test]
