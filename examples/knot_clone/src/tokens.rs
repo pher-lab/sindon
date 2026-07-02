@@ -105,11 +105,26 @@ pub fn red_300() -> Color {
 pub fn red_500() -> Color {
     c(0xef, 0x44, 0x44)
 }
+pub fn red_600() -> Color {
+    c(0xdc, 0x26, 0x26)
+}
 pub fn red_700() -> Color {
     c(0xb9, 0x1c, 0x1c)
 }
 pub fn red_900() -> Color {
     c(0x7f, 0x1d, 0x1d)
+}
+pub fn yellow_500() -> Color {
+    c(0xea, 0xb3, 0x08)
+}
+pub fn yellow_600() -> Color {
+    c(0xca, 0x8a, 0x04)
+}
+pub fn green_500() -> Color {
+    c(0x22, 0xc5, 0x5e)
+}
+pub fn green_600() -> Color {
+    c(0x16, 0xa3, 0x4a)
 }
 
 // --- Theme assembly --------------------------------------------------------

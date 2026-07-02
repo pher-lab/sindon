@@ -721,9 +721,19 @@ fn open_settings_menu(pos: Point, ctx: &mut EventContext) {
         popover_divider(tree, root);
         settings_sort_row(tree, root);
         popover_divider(tree, root);
-        settings_text_row(tree, root, "Backup Settings");
+        settings_text_row(
+            tree,
+            root,
+            "Backup Settings",
+            crate::modals::open_backup_settings,
+        );
         popover_divider(tree, root);
-        settings_text_row(tree, root, "Change Master Password");
+        settings_text_row(
+            tree,
+            root,
+            "Change Master Password",
+            crate::modals::open_change_password,
+        );
     });
 }
 
@@ -787,10 +797,22 @@ fn select(options: &[&str]) -> Dropdown {
 /// A `px-3 py-2` text action row in the settings panel (Backup / Change
 /// Password). React renders these as left-aligned `text-sm` buttons; a
 /// [`MenuItem`] is the closest primitive (left label, hover highlight).
-fn settings_text_row(tree: &mut WidgetTree, parent: usize, label: &str) {
+///
+/// Selecting a row closes the settings popover and then opens `action`'s modal
+/// (slice 4). Both commands queue on the `EventContext`, so they drain in order
+/// — the popover pops, the modal pushes on the now-empty stack.
+fn settings_text_row(
+    tree: &mut WidgetTree,
+    parent: usize,
+    label: &str,
+    action: fn(&mut EventContext),
+) {
     tree.add_child(
         parent,
-        MenuItem::new(label.to_string(), |ctx| ctx.pop_top_layer()),
+        MenuItem::new(label.to_string(), move |ctx| {
+            ctx.pop_top_layer();
+            action(ctx);
+        }),
     );
 }
 

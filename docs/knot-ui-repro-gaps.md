@@ -22,7 +22,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 | Main — Sidebar shell | 完了（slice 1: パネル/ヘッダ/New Note/検索/ノート行） |
 | Main — Editor pane | 完了（slice 2: タイトル欄/操作ボタン/タグ/ツールバー/本文/ステータスバー） |
 | Main — Overlays (設定 dropdown / エラーバナー / context menu) | 完了（slice 3: 設定/⋮ dropdown・右クリック context menu・エラーバナー。**G5 検証台** — 下記） |
-| 各種 Modal (Settings/Backup/ChangePw/Restore) | 未 |
+| 各種 Modal (Backup/ChangePw/Restore + 共通 ConfirmDialog) | 完了（slice 4: scrim+centered card を `LayerOptions::modal` で。3段スタック(Backup→Restore→Confirm)・sticky header/scroll/footer・checkbox・strength meter・grid 近似。**G18(shadow 無) 発見 + G19(layer clip オフセット未適用) 実バグ発見・修正** — 下記） |
 | Loading | 未 |
 
 ---
@@ -282,6 +282,63 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - 影響範囲: 「full-bleed な子（ScrollView 等）を持つ枠付き Container」全般。app 作者が自然に踏む。
   回帰テスト2本（4辺 border / 片側 border が full-bleed 子の rect の**後**に emit される）。
 - **G13 二重ガンマ・G14 layer anchor に続く「repro でしか炙れない framework 実バグ」第3号**。
+
+### G18. drop-shadow / elevation プリミティブが無い（+ viewport 相対サイズ無し）→ **新規（slice 4 で発見・要判断）**
+- 正解のモーダルは全て `shadow-xl`。scrim（`bg-black/50`）の上にカードを**浮かせる**のはこの影で、
+  影が無いとカードが scrim に**べた張り**して立体感が消える（特にダーク背景で境界が溶ける）。
+- shroud には shadow/elevation プリミティブが**一切無い**（`DrawRect` は fill + radius + border のみ、
+  render にも box-shadow 相当なし）。∴ 4モーダルとも影なしのフラットなカードで再現。
+- 併発: **viewport 相対サイズ（`vh`/`vw`）も無い**。Restore モーダルは `max-h-[80vh]`。shroud の
+  `max_height` は px 固定なので、既知の 720px ウィンドウ前提で `max_height(576)`（=80%）をハードコード。
+  ウィンドウリサイズに追従しない。
+- 候補対応: (a) `Container::shadow(offset, blur, color)` ないし `Theme::Elevation` レベル + SDF 影シェーダ
+  （rect の外周にぼかしを足す。radius 対応の SDF 基盤は FW-14/15 で既にある）。(b) `max_height_vh` /
+  viewport 相対長さの導入（layout に viewport サイズを渡す口が要る）。いずれも中規模。**影は「モーダルが
+  本物に見えるか」の質感差として最大。** FW-18 系の寸法公開とは別軸の新規 framework 機能。
+
+### G19. layer 内の clip がオフセット未適用 → **framework 実バグ第4号 → 解消（2026-07-03 landed）**
+- 症状（実機、slice 4）: Restore モーダル（唯一 ScrollView を持つモーダル）で、**バックアップ行の中身が
+  壊れる**。ファイル名（1行目・`truncate`）が消え、日付（2行目）だけ・しかも右が見切れ・Restore/Delete
+  ボタンも消失。スクロール自体は正常。他3モーダル（ScrollView 無し）は無傷。
+- 切り分け（レイアウトエンジンで実測、スクショ不可信のため）: card→ScrollView→行の rect は**全 path で
+  完全に正しい**（root/9行 overflow/layer path すべて info=261・fname truncate・date 261・actions
+  x=297–408）。∴ **レイアウトは無罪 = paint の問題**。
+- 真因（paint 実測で確定）: `PaintContext::push_clip` が**現在の offset を畳み込んでいなかった**唯一の
+  offset 系プリミティブ。`fill_rect`/`draw_glyph`/`push_rotation`/`set_ime_cursor_area` は全部
+  「引数は widget ローカル座標 → active offset を足して絶対座標へ」なのに、`push_clip` だけ生の rect を
+  そのまま積む。**main tree は offset=(0,0) なので無害**（∴ サイドバーの ScrollView は無事）だが、
+  **中央寄せ layer は offset≈316px を子孫描画に適用する**（`tree.rs:1131` が layer subtree を
+  `push_offset(layer_offset)` 内で描画）ため、ScrollView の clip は x=0（ローカル）のまま・グリフは
+  x=332+（offset 適用済）で描かれ、**584 グリフ中 423 が自分の clip の外**に落ちて scissor で消える。
+- 修正: `push_clip` で `current_offset()` を rect に畳み込む（`push_rotation` と対称）。
+  landed 後の実測で clip が x=316/344（グリフ range 332–531 と一致）に移り、外れグリフ 423→56
+  （残 56 は fold 下にスクロールアウトした行＝正しく空 clip）。
+- 検証: unit test 2本（`push_clip_folds_in_the_active_offset` / offset 0 は不変）+ layer 統合 test 1本
+  （中央 layer 内 ScrollView の子 rect の clip が viewport 座標に平行移動）。全 270+ widget test・
+  workspace 緑・fmt/clippy 緑。**G13/G14/G17 に続く「repro でしか炙れない framework 実バグ」第4号**。
+  G14（dispatch の layer-local rect）と同族の座標系バグだが、あちらは**イベント**、こちらは**paint clip**。
+
+### slice 4 所見（Modal 群、2026-07-03）
+モーダル4種を `LayerOptions::modal`（scrim + `ViewportCenter` + outside-click/Escape dismiss）で写経。
+overlay の slice 3（`popover` プリセット）に対し、これは **`modal` プリセットの本命検証**。
+- **✓ scrim + centered card は 1:1**。React の `fixed inset-0 bg-black/50 flex items-center
+  justify-center` + centered card が `LayerOptions::modal` にそのまま乗る。overlay で温めた Layer 基盤が
+  そのまま modal に効くことを確認（本 slice の主目的）。
+- **✓ 多段レイヤースタックが素直に積める**。Backup Settings →（"Restore…"）→ Restore →（行の
+  "Restore"/"Delete"）→ ConfirmDialog の **3段スタック**（scrim も3枚重畳）。`push_layer` は queue 式なので
+  MenuItem の「設定 popover を pop → modal を push」も1ハンドラで順に drain。React の条件付きマウント
+  （`{show && <Modal/>}`）と挙動一致。
+- **✓ sticky header / scroll / footer**（Restore の `max-h-[80vh] flex flex-col` + `flex-1
+  overflow-y-auto`）が、`max_height` 付き column + 中央の `grow` ScrollView + 上下 `border` セクションで
+  成立。スクロール自体（固定ヘッダ/フッタ + 中央だけスクロール + バー）は実機一発 OK。
+  **但し中身が壊れた → G19（framework 実バグ第4号）を発見・修正**（下記）。
+- **✗ shadow が無い → G18**（上記、最大の質感差）。
+- **踏んだ既知 gap**: G4（`px-6 py-4` 等の非対称 padding は uniform 近似）、G6（footer の `py-2` 高さ・
+  `disabled:` スタイル不可、幅は `grow` で代替）、G12（`Input`/`SecureInput`/`Checkbox` の色が静的
+  `Color` で theme 非追従 → 既定 chrome に委ね white/gray-800 の微差を許容）、**grid**（`grid-cols-2` は
+  レイアウトプリミティブ無し → 2 grow 列で近似）。
+- **未再現の状態**: ChangePassword の success サブ状態（中央の緑チェック）、`disabled:opacity-*` の
+  無効化見た目、`ml-auto` は grow スペーサで代替。strength meter は静的に level 2（Fair）で表示。
 
 ### Button の hover/press 既定色（小・記録のみ）
 - `Button::background(x)` だけ指定して `hover_background`/`press_background` を省くと、ホバー/押下で

@@ -6,6 +6,7 @@
 //! dark mode so both palettes can be captured from one binary.
 
 mod main_screen;
+mod modals;
 mod tokens;
 mod unlock;
 
