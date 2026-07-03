@@ -400,6 +400,29 @@ impl Container {
         self
     }
 
+    /// Set padding per axis: `x` on the left and right, `y` on the top and
+    /// bottom (CSS `padding: y x`). The ubiquitous Tailwind `px-* py-*` idiom
+    /// — a section header at `px-6 py-4`, a chip at `px-2 py-1` — that the
+    /// uniform [`padding`](Self::padding) can't express. Negative values clamp
+    /// to `0.0`. For fully independent edges use [`padding_trbl`](Self::padding_trbl).
+    pub fn padding_xy(mut self, x: f32, y: f32) -> Self {
+        let (x, y) = (x.max(0.0), y.max(0.0));
+        self.style = self.style.padding_trbl(y, x, y, x);
+        self
+    }
+
+    /// Set padding per edge: `top`, `right`, `bottom`, `left` (CSS shorthand
+    /// order). The most general form — reach for [`padding`](Self::padding) or
+    /// [`padding_xy`](Self::padding_xy) first, and use this only when the edges
+    /// genuinely differ (e.g. a panel insetting its content asymmetrically).
+    /// Negative values clamp to `0.0`.
+    pub fn padding_trbl(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        self.style =
+            self.style
+                .padding_trbl(top.max(0.0), right.max(0.0), bottom.max(0.0), left.max(0.0));
+        self
+    }
+
     /// Set gap between children.
     pub fn gap(mut self, px: f32) -> Self {
         self.style = self.style.gap(px);

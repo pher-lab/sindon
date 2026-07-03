@@ -75,12 +75,13 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - **clone 配線（FW-17 実使用）**: Unlock パスワード `padding_x(16).min_height(48)`（`px-4 py-3`）/
   検索バー（上記）/ 本文・タイトル（上記）。**実機 OK**（2026-07-02 ユーザ確認、light/dark とも自然）。
 
-### G4. `padding` が上下左右一律のみ — **中（Input/SecureInput 側は FW-17 で解消、Container は未）**
+### G4. `padding` が上下左右一律のみ → **解消（Input/SecureInput = FW-17、Container = FW-19、2026-07-03 landed）**
 - Tailwind は `px-4 py-3` / `px-2 py-1` のような非対称 padding が常用。
-- **Input/SecureInput**: `padding_x`/`padding_y`（FW-17）で軸別に指定可になった（`px-4 py-3` 等）。
-- **Container**: `Container::padding(px)` は依然一律のみ。内部には `FlexStyle::padding_trbl` が
-  あるが公開 builder 無し。clone は各セクション（`px-6 py-4` 等）を uniform `padding` で近似のまま。
-  候補=`Container::padding_xy(x, y)` / 各辺 padding の公開（FW-19 系。FW-18 は G18 shadow で消化済）。
+- **Input/SecureInput**: `padding_x`/`padding_y`（FW-17）で軸別に指定可（`px-4 py-3` 等）。
+- **Container**: `Container::padding_xy(x, y)`（`px-* py-*`）+ `Container::padding_trbl(top, right,
+  bottom, left)`（全辺独立）を公開（FW-19）。内部 `FlexStyle::padding_trbl` の薄いラッパで負値クランプ。
+  clone のエディタタイトル節は uniform `padding(16)`＋子の 8px inset の近似 →
+  真の `padding_xy(24, 16)`（`px-6 py-4`）へ置換し、補正スペーサを撤去（右端 8px ズレも解消）。
 
 ### G5. absolute / コーナー配置のプリミティブがない — **中（slice 3 で検証完了 = 部分的に Layer で代替可）**
 - Unlock 右上の言語 select は `absolute top-4 right-4`。通常フローの外に置く手段が
@@ -111,15 +112,16 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
     - `Dropdown` に `grow` が無い（sort 行の select は `flex-1`）。
     - `Container` に `min_width` builder が無い（context menu `min-w-[140px]` は固定 `width` で代用)。
 
-### G6. Button の padding / 高さ / 固定幅 / disabled スタイルが非公開 — **中**
+### G6. Button の padding / 高さ / 固定幅 / disabled スタイルが非公開 → **解消（FW-19、2026-07-03 landed）**
 - 正解の submit は `w-full py-3` かつ `disabled:bg-blue-800 disabled:cursor-not-allowed`。
-- Button は `radius`/`background`/`text_color`/`hover_background`/`press_background`/`grow` は
-  あるが padding・高さ・**固定幅**・disabled 状態スタイルがない。w-full は flex stretch で代替可。
-- **実害例（Main slice 2 — ツールバーのボタン幅がバラつく）**: アイコンを単一グリフで近似して
-  いるため advance 幅が `B`/`I`/`1.`/`[[`/絵文字で異なり、ボタンが不揃いに見える。正解は 18×18 の
-  SVG を `p-2` で囲んだ均一な正方形。Button に `width`/`min_width` が無いので揃えられない（固定幅
-  コンテナで包んでも Button 自体は内容 hug なので hover 背景が枠を埋めない）。根因の半分は
-  アイコンフォント未同梱（FW-12、本 clone の対象外）だが、`Button::min_width` があれば均一化できる。
+- ~~Button は `radius`/`background`/`text_color`/…/`grow` はあるが padding・高さ・固定幅・disabled が無い。~~
+- 対応: `Button::padding_x/y`（既定 8 でビット等価、ハードコード `padding(8)` を置換。`py-3` は
+  `padding_y(12)`）/ `min_width`（**measured-leaf 不変条件**を守り style `min_size` でなく `measure`
+  側で content を `min_width - 2*pad_x` に floor → 単一グリフ icon ボタンを均一化）/ `disabled(Reactive<bool>)`
+  （hover/press フェード停止・`focusable()=false` で Tab 除外・`on_click` 不発）/ `disabled_background`
+  （既定は通常背景+ラベルをアルファ半減、テーマ非依存の greyed-out）。`w-full` は従来どおり flex stretch。
+- 残: `cursor: not-allowed`（カーソル形状 API 自体が無い）は非対象。アイコン均一化の根因の半分は
+  アイコンフォント未同梱（FW-12、本 clone の対象外）だが、`min_width` で幅は揃えられるようになった。
 
 ### G7. focus モデルの差（外側リング vs border 色変化）— **小〜中（要判断）**
 - 正解は `focus:outline-none focus:border-blue-500`＝**枠線の色が変わるだけ**。
@@ -171,14 +173,17 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   `text-right` は `grow(1.0)` スペーサ → `justify(SpaceBetween)`/`justify(End)` に置換。
   （ツールバーの `flex-1` スペーサは React も本物の spacer なので `grow` のまま。）
 
-### G12. `Input` / `SecureInput` に font-weight（太字）が無い — **中（Main slice 2 で発見）**
-- 正解の Editor タイトル欄は `text-2xl font-bold`。`TextWidget` には `weight(FontWeight)` が
-  あるが、`Input` には `font_size` しか無く太字にできない。
-- 暫定対応（slice 2）: タイトル欄は `font_size(24)` のみ。太字は再現せず。
-- 候補対応: `Input::weight(FontWeight)`（描画は既に shape_rich が weight 対応済なので配線のみ）。
-- 補足（小・派生）: `Input::background` / `border_color` / `text_color` は **`Color`** を取り
-  `Reactive<Color>` ではない（Container/Button は `Reactive` 受け）。明示指定すると live
-  テーマ切替に追従しない。clone は既定（`on_surface`/`input_border` 追従）に委ねて回避。
+### G12. `Input` に font-weight（太字）が無い + chrome setter が非 Reactive → **解消（FW-19、2026-07-03 landed）**
+- 正解の Editor タイトル欄は `text-2xl font-bold`。~~`Input` には `font_size` しか無く太字にできない。~~
+- 対応: `Input::weight(FontWeight)`。**要点は「配線のみ」ではなく caret/hit-test/選択の幾何も同じ
+  weight で整形する**こと（色だけの highlight と違い bold は advance が変わるので、plain 整形の幾何を
+  流用すると caret がズレる）。text engine に attrs 版を追加（`offset_at_point_attrs` /
+  `selection_rects_attrs`(+`_with_trailing_attrs`) / `caret_at_offset_attrs`。既存メソッドは
+  `TextAttrs::default()` へ委譲＝挙動不変）。clone のタイトルは `font_size(24).weight(BOLD)` に。
+- 併せて **chrome setter を Reactive 化**: `Input::background` / `border_color` / `text_color` /
+  `focus_ring_color` / `selection_color` を `Color` → `impl Into<Reactive<Color>>`（Container/Button と
+  対称、live テーマ追従）。`Color` は `Into` で従来呼び出しと source 互換 ∴ knot 無改変。
+- 非対象: `SecureInput` の weight は mask ゆえ無意味、chrome-Reactive も Input のみ先行。
 
 ### G13. 色が全体的に淡い → **二重ガンマ（framework 描画バグ）→ 解消（2026-06-29 landed）**
 - 症状: ライト/ダーク両方で色が washed・低コントラスト（特にダークで `gray-900` 背景が灰色に浮く）。
@@ -423,11 +428,13 @@ full-bleed 子が border を上書き** / **G19 push_clip の layer offset 未�
 表現力 gap は **FW-15（border 系 G1/G2/G9）/ FW-16（整列 G11 + 片側 border G10）/ FW-17（入力寸法 G3）/
 FW-18（drop-shadow G18 の shadow 半分）** として graduate 済み。
 
-**未解決で FW-19 系に持ち越す gap**（画面写経で出揃った・演習後に FW-18 で G18 shadow を消化）:
-- **G6** Button の padding/高さ/固定幅(min_width)/disabled スタイル非公開
-- **G12** Input/SecureInput の font-weight 無し（+ chrome setter が非 Reactive）
-- **G16** Dropdown 寸法/角丸・MenuItem ラベル左寄せ
-- **G4（Container 側）** 非対称 padding（`padding_xy`/各辺）の公開 builder 無し
+**FW-19（最小）で消化した gap**（2026-07-03、画面写経で出揃った残 gap の「app author が自然に踏む」3点）:
+- **G6** Button の padding/高さ/固定幅(min_width)/disabled → **解消（FW-19）**
+- **G12** Input の font-weight + chrome setter 非 Reactive → **解消（FW-19、Input のみ）**
+- **G4（Container 側）** 非対称 padding（`padding_xy`/`padding_trbl`）→ **解消（FW-19）**
+
+**なお未解決で持ち越す gap**:
+- **G16** Dropdown 寸法/角丸・MenuItem ラベル左寄せ（polish）
 - **G18 の残り半分** viewport 相対サイズ vh/vw 無し（shadow/elevation は **FW-18 で解消済**）
 - **G3 系の残り** 固定ピクセル高の multiline viewport 無し（slice 6 で追記）
 - **G5** absolute/固定エッジ anchor（`LayerAnchor` の absolute 変種）、右寄せ placement、click 時の

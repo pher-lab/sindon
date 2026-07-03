@@ -733,6 +733,32 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> usize {
+        self.offset_at_point_attrs(
+            text,
+            x,
+            y,
+            font_size,
+            line_height,
+            max_width,
+            &TextAttrs::default(),
+        )
+    }
+
+    /// Like [`offset_at_point`](Self::offset_at_point) but shaping with explicit
+    /// font attributes. Pass the same `attrs` the caller renders with — a
+    /// heavier weight advances glyphs differently, so hit-testing under a
+    /// mismatched weight lands the caret off the painted glyphs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn offset_at_point_attrs(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> usize {
         if text.is_empty() {
             return 0;
         }
@@ -742,7 +768,7 @@ impl TextEngine {
         buffer.set_text(
             &mut self.font_system,
             text,
-            &TextAttrs::default().as_cosmic(),
+            &attrs.as_cosmic(),
             Shaping::Advanced,
             None,
         );
@@ -779,7 +805,42 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> Vec<Rect> {
-        self.selection_rects_impl(text, start, end, font_size, line_height, max_width, false)
+        self.selection_rects_impl(
+            text,
+            start,
+            end,
+            font_size,
+            line_height,
+            max_width,
+            &TextAttrs::default(),
+            false,
+        )
+    }
+
+    /// Like [`selection_rects`](Self::selection_rects) but shaping with explicit
+    /// font attributes — pass the attrs the caller renders with so the rects
+    /// line up with the painted glyphs (a heavier weight advances differently).
+    #[allow(clippy::too_many_arguments)]
+    pub fn selection_rects_attrs(
+        &mut self,
+        text: &str,
+        start: usize,
+        end: usize,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> Vec<Rect> {
+        self.selection_rects_impl(
+            text,
+            start,
+            end,
+            font_size,
+            line_height,
+            max_width,
+            attrs,
+            false,
+        )
     }
 
     /// Like [`selection_rects`](Self::selection_rects), but every visual
@@ -801,11 +862,47 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> Vec<Rect> {
-        self.selection_rects_impl(text, start, end, font_size, line_height, max_width, true)
+        self.selection_rects_impl(
+            text,
+            start,
+            end,
+            font_size,
+            line_height,
+            max_width,
+            &TextAttrs::default(),
+            true,
+        )
     }
 
-    // Shared body for the two public `selection_rects*` methods: same 7-arg
-    // shape plus a `trailing` mode flag, so the arg count is one over the lint.
+    /// Like [`selection_rects_with_trailing`](Self::selection_rects_with_trailing)
+    /// but shaping with explicit font attributes — the variant an `Input` with a
+    /// non-default weight paints its selection with.
+    #[allow(clippy::too_many_arguments)]
+    pub fn selection_rects_with_trailing_attrs(
+        &mut self,
+        text: &str,
+        start: usize,
+        end: usize,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> Vec<Rect> {
+        self.selection_rects_impl(
+            text,
+            start,
+            end,
+            font_size,
+            line_height,
+            max_width,
+            attrs,
+            true,
+        )
+    }
+
+    // Shared body for the public `selection_rects*` methods: the 7-arg shape
+    // plus explicit `attrs` and a `trailing` mode flag, so the arg count is
+    // over the lint.
     #[allow(clippy::too_many_arguments)]
     fn selection_rects_impl(
         &mut self,
@@ -815,6 +912,7 @@ impl TextEngine {
         font_size: f32,
         line_height: f32,
         max_width: Option<f32>,
+        attrs: &TextAttrs,
         trailing: bool,
     ) -> Vec<Rect> {
         /// Trailing-sliver width as a fraction of the font size — roughly a
@@ -833,7 +931,7 @@ impl TextEngine {
         buffer.set_text(
             &mut self.font_system,
             text,
-            &TextAttrs::default().as_cosmic(),
+            &attrs.as_cosmic(),
             Shaping::Advanced,
             None,
         );
@@ -920,6 +1018,29 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> (f32, f32) {
+        self.caret_at_offset_attrs(
+            text,
+            offset,
+            font_size,
+            line_height,
+            max_width,
+            &TextAttrs::default(),
+        )
+    }
+
+    /// Like [`caret_at_offset`](Self::caret_at_offset) but shaping with explicit
+    /// font attributes — pass the attrs the caller renders with so the caret
+    /// tracks the painted glyphs under a non-default weight.
+    #[allow(clippy::too_many_arguments)]
+    pub fn caret_at_offset_attrs(
+        &mut self,
+        text: &str,
+        offset: usize,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> (f32, f32) {
         if text.is_empty() {
             return (0.0, 0.0);
         }
@@ -935,7 +1056,7 @@ impl TextEngine {
                 next += 1;
             }
             if let Some(r) = self
-                .selection_rects(text, off, next, font_size, line_height, max_width)
+                .selection_rects_attrs(text, off, next, font_size, line_height, max_width, attrs)
                 .first()
             {
                 return (r.origin.x, r.origin.y);
@@ -944,7 +1065,7 @@ impl TextEngine {
         // End of text, or the next char carries no glyph (a hard `\n`): the end
         // of the prefix's last line is the right answer, and prefix shaping
         // gives it without a wrap-boundary ambiguity.
-        self.cursor_position(&text[..off], font_size, line_height, max_width)
+        self.cursor_position_attrs(&text[..off], font_size, line_height, max_width, attrs)
     }
 
     /// Rasterize a glyph into an atlas-ready bitmap.

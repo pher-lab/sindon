@@ -48,8 +48,8 @@ use crate::paint::PaintContext;
 use crate::widget::Widget;
 use shroud_core::{Color, Point, Rect};
 use shroud_layout::FlexStyle;
-use shroud_reactive::{Animated, Easing, Signal};
-use shroud_text::TextSpan;
+use shroud_reactive::{Animated, Easing, Reactive, Signal};
+use shroud_text::{FontWeight, TextAttrs, TextSpan};
 use zeroize::Zeroizing;
 
 /// A standard text input field.
@@ -121,10 +121,17 @@ pub struct KeyEdit {
 /// previously-emitted range or fall on a non-`char` boundary are skipped rather
 /// than panicking the paint-side slice — a misbehaving highlighter degrades to
 /// less color, never a crash.
-fn build_highlight_spans(text: &str, mut ranges: Vec<(usize, usize, Color)>) -> Vec<TextSpan> {
+fn build_highlight_spans(
+    text: &str,
+    mut ranges: Vec<(usize, usize, Color)>,
+    attrs: &TextAttrs,
+) -> Vec<TextSpan> {
     ranges.sort_by_key(|&(lo, _, _)| lo);
     let mut spans: Vec<TextSpan> = Vec::new();
     let mut pos = 0usize;
+    // Every span carries the field's base attrs (family / weight / style) so a
+    // highlighted field shapes at the same weight as the plain path — the
+    // colored ranges only add color on top, keeping the geometry identical.
     for (lo, hi, color) in ranges {
         let lo = lo.min(text.len());
         let hi = hi.min(text.len());
@@ -133,13 +140,17 @@ fn build_highlight_spans(text: &str, mut ranges: Vec<(usize, usize, Color)>) -> 
             continue;
         }
         if lo > pos {
-            spans.push(TextSpan::new(text[pos..lo].to_string()));
+            spans.push(TextSpan::new(text[pos..lo].to_string()).attrs(attrs.clone()));
         }
-        spans.push(TextSpan::new(text[lo..hi].to_string()).color(color));
+        spans.push(
+            TextSpan::new(text[lo..hi].to_string())
+                .attrs(attrs.clone())
+                .color(color),
+        );
         pos = hi;
     }
     if pos < text.len() {
-        spans.push(TextSpan::new(text[pos..].to_string()));
+        spans.push(TextSpan::new(text[pos..].to_string()).attrs(attrs.clone()));
     }
     spans
 }
@@ -455,10 +466,10 @@ pub struct Input {
     // input has keyboard focus, so the bg/border do not change with
     // focus state — the ring is the single source of "I'm focused".
     // Apps that want extra emphasis can supply their own theme overrides.
-    bg_color: Option<Color>,
-    text_color: Option<Color>,
-    placeholder_color: Option<Color>,
-    border_color: Option<Color>,
+    bg_color: Option<Reactive<Color>>,
+    text_color: Option<Reactive<Color>>,
+    placeholder_color: Option<Reactive<Color>>,
+    border_color: Option<Reactive<Color>>,
     /// Whether to draw the 1px border at all. `false` (via [`borderless`]) skips
     /// the stroke, leaving just the (optionally rounded) background fill — handy
     /// for inline / search-bar styling. [`borderless`]: Self::borderless
@@ -479,10 +490,15 @@ pub struct Input {
     /// it from the font size (single-line) or line count (multi-line). Lets an
     /// app match a design's exact control height (e.g. a 36px search bar).
     min_height_override: Option<f32>,
-    focus_ring_color: Option<Color>,
+    focus_ring_color: Option<Reactive<Color>>,
     /// Override for the selection highlight color. `None` reads
     /// `theme.colors.selection_background` each frame.
-    selection_color: Option<Color>,
+    selection_color: Option<Reactive<Color>>,
+    /// Font family / weight / style the value + placeholder shape with. Defaults
+    /// to the plain sans-serif so existing fields are unaffected; the caret,
+    /// hit-test, and selection geometry all shape through this so a heavier
+    /// [`weight`](Self::weight) stays aligned with the painted glyphs.
+    attrs: TextAttrs,
     /// Undo history: states to return to, oldest at the front. Bounded to
     /// [`UNDO_CAP`]; the front is evicted (and wiped) past the cap. `RefCell`
     /// because a checkpoint can be recorded from the interior-mutable `&self`
@@ -595,6 +611,7 @@ impl Input {
             min_height_override: None,
             focus_ring_color: None,
             selection_color: None,
+            attrs: TextAttrs::default(),
             undo_stack: RefCell::new(VecDeque::new()),
             redo_stack: RefCell::new(VecDeque::new()),
             last_edit: Cell::new(None),
@@ -867,18 +884,31 @@ impl Input {
         self
     }
 
-    /// Set the background color.
-    pub fn background(mut self, color: Color) -> Self {
-        self.bg_color = Some(color);
+    /// Set the background color. Accepts a literal `Color` or a signal-backed
+    /// source (`Signal<Color>`, `Memo<Color>`, `Reactive::derive(...)`), re-read
+    /// every paint so an explicit background can track a live theme swap.
+    pub fn background(mut self, color: impl Into<Reactive<Color>>) -> Self {
+        self.bg_color = Some(color.into());
         self
     }
 
     /// Override the 1px border color. `None` (the default) reads
     /// `theme.colors.input_border` each frame, so every input tracks the theme;
     /// set this to give one field a distinct frame. Has no effect once
-    /// [`borderless`](Self::borderless) is used.
-    pub fn border_color(mut self, color: Color) -> Self {
-        self.border_color = Some(color);
+    /// [`borderless`](Self::borderless) is used. [`Reactive`], re-read every
+    /// paint like [`background`](Self::background).
+    pub fn border_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
+        self.border_color = Some(color.into());
+        self
+    }
+
+    /// Set the font weight the value shapes with (e.g. `FontWeight::BOLD`).
+    /// Default is `FontWeight::NORMAL`. The caret, hit-test, and selection
+    /// geometry all shape through the same weight, so a bold field stays
+    /// editable with the caret tracking the (wider) glyphs — the missing piece
+    /// for a `text-2xl font-bold` title field.
+    pub fn weight(mut self, weight: FontWeight) -> Self {
+        self.attrs.weight = weight;
         self
     }
 
@@ -929,24 +959,27 @@ impl Input {
         self
     }
 
-    /// Set the text color.
-    pub fn text_color(mut self, color: Color) -> Self {
-        self.text_color = Some(color);
+    /// Set the text color. [`Reactive`], re-read every paint so it can track a
+    /// live theme swap.
+    pub fn text_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
+        self.text_color = Some(color.into());
         self
     }
 
     /// Override the keyboard-focus ring color. `None` (the default) reads
-    /// `theme.focus.ring_color` each frame.
-    pub fn focus_ring_color(mut self, color: Color) -> Self {
-        self.focus_ring_color = Some(color);
+    /// `theme.focus.ring_color` each frame. [`Reactive`], like the other color
+    /// setters.
+    pub fn focus_ring_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
+        self.focus_ring_color = Some(color.into());
         self
     }
 
     /// Override the text-selection highlight color. `None` (the default)
     /// reads `theme.colors.selection_background` each frame. A translucent
-    /// color keeps the selected glyphs legible on top.
-    pub fn selection_color(mut self, color: Color) -> Self {
-        self.selection_color = Some(color);
+    /// color keeps the selected glyphs legible on top. [`Reactive`], like the
+    /// other color setters.
+    pub fn selection_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
+        self.selection_color = Some(color.into());
         self
     }
 
@@ -1246,11 +1279,17 @@ impl Input {
     }
 
     fn resolve_bg(&self, colors: &shroud_core::Colors) -> Color {
-        self.bg_color.unwrap_or(colors.input_background)
+        self.bg_color
+            .as_ref()
+            .map(|c| c.get())
+            .unwrap_or(colors.input_background)
     }
 
     fn resolve_border(&self, colors: &shroud_core::Colors) -> Color {
-        self.border_color.unwrap_or(colors.input_border)
+        self.border_color
+            .as_ref()
+            .map(|c| c.get())
+            .unwrap_or(colors.input_border)
     }
 
     /// Find the previous char boundary before `pos` in `s`.
@@ -1539,9 +1578,15 @@ impl Widget for Input {
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);
         let line_height = font_size * 1.2;
-        let text_color = self.text_color.unwrap_or(ctx.theme.colors.on_surface);
+        let text_color = self
+            .text_color
+            .as_ref()
+            .map(|c| c.get())
+            .unwrap_or(ctx.theme.colors.on_surface);
         let placeholder_color = self
             .placeholder_color
+            .as_ref()
+            .map(|c| c.get())
             .unwrap_or(ctx.theme.colors.input_placeholder);
         let bg = self.resolve_bg(&ctx.theme.colors);
 
@@ -1634,12 +1679,12 @@ impl Widget for Input {
                 line_height
             } else if let Some(ct) = composed_text.as_deref() {
                 ctx.text_engine
-                    .shape_text(ct, font_size, line_height, wrap_width)
+                    .shape_text_attrs(ct, font_size, line_height, wrap_width, &self.attrs)
                     .height
             } else {
                 let v = self.value.borrow();
                 ctx.text_engine
-                    .shape_text(&v, font_size, line_height, wrap_width)
+                    .shape_text_attrs(&v, font_size, line_height, wrap_width, &self.attrs)
                     .height
             };
             max_scroll = (content_h - viewport_h).max(0.0);
@@ -1664,13 +1709,14 @@ impl Widget for Input {
             let rel_y = pos.y - text_y + displayed;
             let offset = {
                 let v = self.value.borrow();
-                ctx.text_engine.offset_at_point(
+                ctx.text_engine.offset_at_point_attrs(
                     &v,
                     rel_x,
                     rel_y,
                     font_size,
                     line_height,
                     wrap_width,
+                    &self.attrs,
                 )
             };
             match self.pending_select.replace(SelectUnit::Caret) {
@@ -1722,8 +1768,14 @@ impl Widget for Input {
                 let cursor = self.cursor.get();
                 let (cx, cy) = {
                     let v = self.value.borrow();
-                    ctx.text_engine
-                        .caret_at_offset(&v, cursor, font_size, line_height, wrap_width)
+                    ctx.text_engine.caret_at_offset_attrs(
+                        &v,
+                        cursor,
+                        font_size,
+                        line_height,
+                        wrap_width,
+                        &self.attrs,
+                    )
                 };
                 let target_x = self.desired_x.get().unwrap_or(cx);
                 self.desired_x.set(Some(target_x));
@@ -1733,26 +1785,28 @@ impl Widget for Input {
                     // exactly the wanted "ArrowDown on the last line jumps to
                     // end" behavior.
                     let v = self.value.borrow();
-                    ctx.text_engine.offset_at_point(
+                    ctx.text_engine.offset_at_point_attrs(
                         &v,
                         target_x,
                         cy + line_height,
                         font_size,
                         line_height,
                         wrap_width,
+                        &self.attrs,
                     )
                 } else if cy < line_height {
                     // Already on the first visual row: ArrowUp jumps to start.
                     0
                 } else {
                     let v = self.value.borrow();
-                    ctx.text_engine.offset_at_point(
+                    ctx.text_engine.offset_at_point_attrs(
                         &v,
                         target_x,
                         cy - line_height,
                         font_size,
                         line_height,
                         wrap_width,
+                        &self.attrs,
                     )
                 };
                 if new_cursor == cursor {
@@ -1777,24 +1831,26 @@ impl Widget for Input {
         // against the composed (preedit-spliced) string at `composed_caret`.
         let caret_xy = if self.focused {
             if let Some(ct) = composed_text.as_deref() {
-                Some(ctx.text_engine.caret_at_offset(
+                Some(ctx.text_engine.caret_at_offset_attrs(
                     ct,
                     composed_caret,
                     font_size,
                     line_height,
                     wrap_width,
+                    &self.attrs,
                 ))
             } else if value_is_empty {
                 Some((0.0, 0.0))
             } else {
                 let cursor = self.cursor.get();
                 let v = self.value.borrow();
-                Some(ctx.text_engine.caret_at_offset(
+                Some(ctx.text_engine.caret_at_offset_attrs(
                     &v,
                     cursor,
                     font_size,
                     line_height,
                     wrap_width,
+                    &self.attrs,
                 ))
             }
         } else {
@@ -1849,19 +1905,23 @@ impl Widget for Input {
             if let Some((lo, hi)) = self.selection_range() {
                 let sel_color = self
                     .selection_color
+                    .as_ref()
+                    .map(|c| c.get())
                     .unwrap_or(ctx.theme.colors.selection_background);
                 let rects = {
                     let v = self.value.borrow();
                     // `_with_trailing`: a multi-line selection draws a small
                     // sliver past each non-final row's last glyph so the
-                    // included line breaks are visible (FW-6).
-                    ctx.text_engine.selection_rects_with_trailing(
+                    // included line breaks are visible (FW-6). Shaped with the
+                    // field's attrs so the highlight tracks a bold value.
+                    ctx.text_engine.selection_rects_with_trailing_attrs(
                         &v,
                         lo,
                         hi,
                         font_size,
                         line_height,
                         wrap_width,
+                        &self.attrs,
                     )
                 };
                 for r in rects {
@@ -1912,15 +1972,25 @@ impl Widget for Input {
                 // `build_highlight_spans`), so the caret math lines up with these
                 // glyphs. Otherwise the plain path is used unchanged.
                 let shaped = if let Some(ct) = composed_text.as_deref() {
-                    ctx.text_engine
-                        .shape_text(ct, font_size, line_height, wrap_width)
+                    ctx.text_engine.shape_text_attrs(
+                        ct,
+                        font_size,
+                        line_height,
+                        wrap_width,
+                        &self.attrs,
+                    )
                 } else if let Some(hl) = self.highlighter.as_ref() {
-                    let spans = build_highlight_spans(&value, hl(&value));
+                    let spans = build_highlight_spans(&value, hl(&value), &self.attrs);
                     ctx.text_engine
                         .shape_rich(&spans, font_size, line_height, wrap_width)
                 } else {
-                    ctx.text_engine
-                        .shape_text(&value, font_size, line_height, wrap_width)
+                    ctx.text_engine.shape_text_attrs(
+                        &value,
+                        font_size,
+                        line_height,
+                        wrap_width,
+                        &self.attrs,
+                    )
                 };
 
                 for glyph in &shaped.glyphs {
@@ -1944,9 +2014,15 @@ impl Widget for Input {
         // the bottom of each. Inside the multi-line clip/offset, so it scrolls
         // with the glyphs.
         if let (Some(ct), Some((ps, pe))) = (composed_text.as_deref(), preedit_span) {
-            let rects =
-                ctx.text_engine
-                    .selection_rects(ct, ps, pe, font_size, line_height, wrap_width);
+            let rects = ctx.text_engine.selection_rects_attrs(
+                ct,
+                ps,
+                pe,
+                font_size,
+                line_height,
+                wrap_width,
+                &self.attrs,
+            );
             for r in rects {
                 ctx.fill_rect(
                     Rect::new(
@@ -2026,7 +2102,11 @@ impl Widget for Input {
         if self.focused && ctx.focus_visible() {
             // Ring tracks the field's corner radius, so a rounded input gets a
             // rounded ring instead of a square one around rounded corners.
-            ctx.paint_focus_ring(layout, self.focus_ring_color, self.radius);
+            ctx.paint_focus_ring(
+                layout,
+                self.focus_ring_color.as_ref().map(|c| c.get()),
+                self.radius,
+            );
         }
     }
 

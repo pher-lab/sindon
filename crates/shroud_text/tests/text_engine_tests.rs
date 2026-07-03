@@ -1139,3 +1139,72 @@ fn clear_shape_cache_preserves_correctness() {
     let after = engine.shape_text("round trip", 16.0, 20.0, None);
     assert_shaped_eq(&after, &before, "shape after clear");
 }
+
+// ── Attrs-carrying caret / selection geometry (FW-19 / G12) ──────────
+// An editable `Input` with a non-default weight must place its caret and
+// selection against glyphs shaped at the *same* weight. These prove the
+// `_attrs` geometry variants thread the attrs all the way through, so the
+// caret sits at the block width that the matching `shape_text_attrs` reports
+// (and doesn't silently fall back to a normal-weight shape).
+
+#[test]
+fn caret_at_end_tracks_the_weight_it_shapes_with() {
+    let mut engine = TextEngine::new();
+    let text = "Wjgy Mix";
+    let (fs, lh) = (28.0, 28.0 * 1.2);
+
+    // Regular: the default `caret_at_offset` matches the default shaping.
+    let regular = engine.shape_text_attrs(text, fs, lh, None, &TextAttrs::default());
+    let (reg_x, _) = engine.caret_at_offset(text, text.len(), fs, lh, None);
+    assert!(
+        (reg_x - regular.width).abs() < 1.0,
+        "regular caret x ({reg_x}) should sit at the shaped width ({})",
+        regular.width
+    );
+
+    // Bold: the caret must line up with the *bold* shaped width, not the
+    // regular one. If `_attrs` dropped the weight, this would land at the
+    // narrower normal-weight width and (given a real bold face exists on this
+    // system, per `cache_key_distinguishes_attrs`) miss the block edge.
+    let bold_attrs = TextAttrs::default().weight(FontWeight::BOLD);
+    let bold = engine.shape_text_attrs(text, fs, lh, None, &bold_attrs);
+    let (bold_x, _) = engine.caret_at_offset_attrs(text, text.len(), fs, lh, None, &bold_attrs);
+    assert!(
+        (bold_x - bold.width).abs() < 1.0,
+        "bold caret x ({bold_x}) should sit at the bold shaped width ({})",
+        bold.width
+    );
+}
+
+#[test]
+fn selection_rects_attrs_span_the_weight_they_shape_with() {
+    let mut engine = TextEngine::new();
+    let text = "Selection";
+    let (fs, lh) = (22.0, 22.0 * 1.2);
+    let bold_attrs = TextAttrs::default().weight(FontWeight::BOLD);
+
+    let bold = engine.shape_text_attrs(text, fs, lh, None, &bold_attrs);
+    let rects = engine.selection_rects_attrs(text, 0, text.len(), fs, lh, None, &bold_attrs);
+    let covered: f32 = rects.iter().map(|r| r.size.width).sum();
+    assert!(
+        (covered - bold.width).abs() < 1.5,
+        "bold selection width ({covered}) should match the bold shaped width ({})",
+        bold.width
+    );
+}
+
+#[test]
+fn offset_at_point_attrs_matches_the_default_for_default_attrs() {
+    // The default-attrs delegation must be behavior-preserving: the new
+    // `_attrs` path fed `TextAttrs::default()` resolves the same offset the
+    // pre-existing `offset_at_point` does.
+    let mut engine = TextEngine::new();
+    let text = "click target";
+    let (fs, lh) = (18.0, 18.0 * 1.2);
+    for x in [0.0_f32, 15.0, 40.0, 200.0] {
+        let base = engine.offset_at_point(text, x, 5.0, fs, lh, None);
+        let via_attrs =
+            engine.offset_at_point_attrs(text, x, 5.0, fs, lh, None, &TextAttrs::default());
+        assert_eq!(base, via_attrs, "default-attrs offset must match at x={x}");
+    }
+}

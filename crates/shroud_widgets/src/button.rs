@@ -56,7 +56,25 @@ pub struct Button {
     /// does, without a background change.
     hover_text_color: Option<Reactive<Color>>,
     focus_ring_color: Option<Reactive<Color>>,
+    /// Background at full disabled, replacing the normal fill when
+    /// [`disabled`](Self::disabled) reads true. `None` dims the normal
+    /// background (and label) to half alpha — a theme-agnostic "greyed out"
+    /// that reads on any surface. Set via [`disabled_background`](Self::disabled_background).
+    disabled_bg: Option<Reactive<Color>>,
+    /// Whether the button is inert: it drops its hover/press feedback, skips
+    /// keyboard focus, and does not fire `on_click`. Reactive so a form can
+    /// gate its submit on a signal. Defaults to always-enabled.
+    disabled: Reactive<bool>,
     radius: f32,
+    /// Horizontal padding (px) between the button edge and its label, each
+    /// side — Tailwind `px-*`. Default 8.
+    pad_x: f32,
+    /// Vertical padding (px), top and bottom — Tailwind `py-*`. Default 8.
+    pad_y: f32,
+    /// Explicit minimum box width (px). `None` sizes to the label. Lets a row
+    /// of icon buttons stay uniform despite differing glyph advances. See
+    /// [`Button::min_width`].
+    min_width: Option<f32>,
     visible: Reactive<bool>,
     /// flex-grow factor — `0.0` (default) means the button sizes to its
     /// intrinsic label width; positive values make it claim its share of
@@ -86,7 +104,12 @@ impl Button {
             text_color: None,
             hover_text_color: None,
             focus_ring_color: None,
+            disabled_bg: None,
+            disabled: Reactive::Static(false),
             radius: 0.0,
+            pad_x: 8.0,
+            pad_y: 8.0,
+            min_width: None,
             visible: Reactive::Static(true),
             flex_grow: 0.0,
         }
@@ -113,7 +136,12 @@ impl Button {
             text_color: None,
             hover_text_color: None,
             focus_ring_color: None,
+            disabled_bg: None,
+            disabled: Reactive::Static(false),
             radius: 0.0,
+            pad_x: 8.0,
+            pad_y: 8.0,
+            min_width: None,
             visible: Reactive::Static(true),
             flex_grow: 0.0,
         }
@@ -220,6 +248,53 @@ impl Button {
         self
     }
 
+    /// Horizontal padding (px) between the button edge and its label, on each
+    /// side — Tailwind `px-*`. Default 8. Negative values clamp to `0.0`.
+    pub fn padding_x(mut self, px: f32) -> Self {
+        self.pad_x = px.max(0.0);
+        self
+    }
+
+    /// Vertical padding (px), top and bottom — Tailwind `py-*`. Default 8. The
+    /// natural way to grow a filled button to a design's height (`py-3` ≈ a
+    /// 48px control) without a fixed `height` that would clip a wrapped label.
+    /// Negative values clamp to `0.0`.
+    pub fn padding_y(mut self, px: f32) -> Self {
+        self.pad_y = px.max(0.0);
+        self
+    }
+
+    /// Set a minimum box width (px). The button still grows past this to fit a
+    /// wider label, but never shrinks below it — so a toolbar row of icon
+    /// buttons stays uniform even though `B` / `I` / `1.` shape to different
+    /// advances. Negative values clamp to `0.0`.
+    pub fn min_width(mut self, px: f32) -> Self {
+        self.min_width = Some(px.max(0.0));
+        self
+    }
+
+    /// Gate the button on a disabled state (reactive).
+    ///
+    /// While `true` the button drops its hover / press feedback, is skipped by
+    /// keyboard focus (Tab), and does not fire [`on_click`](Self::on_click) —
+    /// the natural shape for a form submit that stays inert until its fields
+    /// validate. The disabled fill defaults to the normal background dimmed to
+    /// half alpha (a theme-agnostic "greyed out"); override it with
+    /// [`disabled_background`](Self::disabled_background). Accepts a literal
+    /// `bool` or a signal-backed source.
+    pub fn disabled(mut self, v: impl Into<Reactive<bool>>) -> Self {
+        self.disabled = v.into();
+        self
+    }
+
+    /// Override the background painted while [`disabled`](Self::disabled) reads
+    /// true (Tailwind `disabled:bg-*`), replacing the default half-alpha dim.
+    /// Reactive, like the other color setters.
+    pub fn disabled_background(mut self, color: impl Into<Reactive<Color>>) -> Self {
+        self.disabled_bg = Some(color.into());
+        self
+    }
+
     /// Flex-grow factor along the parent container's main axis.
     ///
     /// `0.0` (the default) leaves the button at its intrinsic label width.
@@ -251,7 +326,8 @@ impl Button {
 
 impl Widget for Button {
     fn focusable(&self) -> bool {
-        true
+        // A disabled button is inert, so it drops out of the Tab order too.
+        !self.disabled.get()
     }
 
     fn style(&self) -> FlexStyle {
@@ -268,7 +344,9 @@ impl Widget for Button {
         // same visual height without a style `min_size`. See `TextWidget::style`
         // for the same fix; `SecureInput` has no `measure`, so it's immune and
         // keeps its `min_height`.
-        let mut style = FlexStyle::new().padding(8.0).center();
+        let mut style = FlexStyle::new()
+            .padding_trbl(self.pad_y, self.pad_x, self.pad_y, self.pad_x)
+            .center();
         if self.flex_grow > 0.0 {
             style = style.grow(self.flex_grow);
         }
@@ -315,7 +393,15 @@ impl Widget for Button {
         // Ceil width so Taffy's pixel rounding never shortens us below the
         // natural shape width (see TextWidget::measure for the full story).
         let height = shaped.height.max(font_size).ceil();
-        Some(Size::new(shaped.width.ceil(), height))
+        // `min_width` is a *box* floor, but a measured leaf reports content
+        // size and Taffy adds the horizontal padding on top — so subtract it
+        // here to keep the guard on `min_size` (the measured-leaf invariant,
+        // above). A `min_width` shorter than the label is a no-op.
+        let mut width = shaped.width.ceil();
+        if let Some(mw) = self.min_width {
+            width = width.max((mw - 2.0 * self.pad_x).max(0.0));
+        }
+        Some(Size::new(width, height))
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
@@ -344,18 +430,28 @@ impl Widget for Button {
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);
 
+        let disabled = self.disabled.get();
+
         // Hover fade progress, read once. `get()` votes for another frame
         // while the fade is in flight; pressed pins it to 0 (the press color
-        // is used directly, reading as instant).
-        let hover_t = if self.pressed {
+        // is used directly, reading as instant). A disabled button ignores
+        // both — it must read inert regardless of a stale hover animation.
+        let hover_t = if self.pressed || disabled {
             0.0
         } else {
             self.hover_anim.as_ref().map_or(0.0, |a| a.get())
         };
 
         // Background. Endpoints short-circuit so a settled state paints its
-        // exact color (float lerp isn't bit-exact at t==1).
-        let bg = if self.pressed {
+        // exact color (float lerp isn't bit-exact at t==1). Disabled wins over
+        // every state: the explicit `disabled_bg`, else the normal fill dimmed
+        // to half alpha.
+        let bg = if disabled {
+            self.disabled_bg.as_ref().map(|c| c.get()).unwrap_or(Color {
+                a: normal.a * 0.5,
+                ..normal
+            })
+        } else if self.pressed {
             press
         } else if hover_t >= 1.0 {
             hover
@@ -365,13 +461,20 @@ impl Widget for Button {
             normal.lerp(&hover, hover_t)
         };
 
-        // Label color: fades toward `hover_text_color` on the same curve when
-        // one is set (a text-only link that darkens on hover); otherwise the
-        // base color throughout.
-        let text_color = match self.hover_text_color.as_ref().map(|c| c.get()) {
-            Some(hover_text) if hover_t >= 1.0 => hover_text,
-            Some(hover_text) if hover_t > 0.0 => base_text.lerp(&hover_text, hover_t),
-            _ => base_text,
+        // Label color: dimmed to match a disabled fill; otherwise fades toward
+        // `hover_text_color` on the same curve when one is set (a text-only
+        // link that darkens on hover), else the base color throughout.
+        let text_color = if disabled {
+            Color {
+                a: base_text.a * 0.5,
+                ..base_text
+            }
+        } else {
+            match self.hover_text_color.as_ref().map(|c| c.get()) {
+                Some(hover_text) if hover_t >= 1.0 => hover_text,
+                Some(hover_text) if hover_t > 0.0 => base_text.lerp(&hover_text, hover_t),
+                _ => base_text,
+            }
         };
 
         // Background
@@ -405,13 +508,18 @@ impl Widget for Button {
             }
         }
 
-        if self.focused && ctx.focus_visible() {
+        if self.focused && !disabled && ctx.focus_visible() {
             let override_color = self.focus_ring_color.as_ref().map(|c| c.get());
             ctx.paint_focus_ring(layout, override_color, self.radius);
         }
     }
 
     fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
+        // A disabled button is inert: swallow no state, fire no click. Left
+        // fully transparent to events so nothing latches a stale press/hover.
+        if self.disabled.get() {
+            return EventResult::Ignored;
+        }
         match event {
             WidgetEvent::MouseEnter => {
                 self.drive_hover(1.0);

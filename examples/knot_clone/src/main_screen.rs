@@ -359,13 +359,15 @@ fn editor_pane(tree: &mut WidgetTree, parent: usize) {
 }
 
 /// Title section (`border-b px-6 py-4`): the title input + action buttons, a
-/// saved-status line, and the tag chips. `px-6 py-4` is asymmetric (G4); we use
-/// uniform `padding(16)`.
+/// saved-status line, and the tag chips. The asymmetric `px-6 py-4` is now
+/// expressed directly with `padding_xy(24, 16)` (FW-19 / G4) — previously a
+/// uniform `padding(16)` that leaned on each child's 8px inset to reach the
+/// 24px `px-6`, which also drifted the action group's right edge 8px too far.
 fn editor_title_section(tree: &mut WidgetTree, parent: usize) {
     let sec = tree.add_child(
         parent,
         Container::column()
-            .padding(16.0)
+            .padding_xy(24.0, 16.0) // px-6 py-4 (FW-19 / G4)
             .gap(8.0)
             .border_bottom(1.0, border()), // title `border-b` (FW-16 / G10)
     );
@@ -373,12 +375,10 @@ fn editor_title_section(tree: &mut WidgetTree, parent: usize) {
     // Title row (`flex items-center gap-3`).
     let row = tree.add_child(sec, Container::row().align_center().gap(12.0));
     // Title input: `flex-1 text-2xl font-bold bg-transparent border-none`. The
-    // `font-bold` still can't be expressed — Input has no weight builder (gap
-    // G12) — but `min_height(32)` now gives it the true `text-2xl` (2rem) line
-    // box instead of the 44px font-derived floor (FW-17 / G3). The default 8px
-    // `padding_x` keeps the text at 24px (section `padding(16)` + 8), matching
-    // `px-6`, which the "Saved"/tag spacers below also target. Text color
-    // defaults to `on_surface` so it tracks the theme toggle.
+    // `font-bold` is now real via `weight(BOLD)` (FW-19 / G12), and `min_height(32)`
+    // gives the true `text-2xl` (2rem) line box (FW-17 / G3). Its `padding_x` is
+    // zeroed so the section's own `px-6` (24px) owns the left inset directly —
+    // the "Saved"/tag rows below drop their compensating spacers to match.
     tree.add_child(
         row,
         Input::new()
@@ -386,7 +386,9 @@ fn editor_title_section(tree: &mut WidgetTree, parent: usize) {
             .borderless()
             .grow(1.0)
             .font_size(24.0) // text-2xl
+            .weight(FontWeight::BOLD) // font-bold (FW-19 / G12)
             .min_height(32.0) // 2rem line box
+            .padding_x(0.0) // section px-6 owns the inset now
             .background(Color::TRANSPARENT)
             .placeholder("Untitled note"),
     );
@@ -408,12 +410,9 @@ fn editor_title_section(tree: &mut WidgetTree, parent: usize) {
             .on_click(show_error_banner),
     );
 
-    // Saved status (`text-xs text-gray-500`). The 8px spacer aligns its text
-    // with the title *input* above, whose fixed internal padding offsets the
-    // text by 8px past the section padding (G3) — without it title and status
-    // visibly stagger.
+    // Saved status (`text-xs text-gray-500`). The title input's inset is now 0,
+    // so this sits flush at the section's `px-6` — no compensating spacer (G4).
     let saved = tree.add_child(sec, Container::row().align_center());
-    tree.add_child(saved, Container::row().width(8.0));
     tree.add_child(
         saved,
         TextWidget::new("Saved")
@@ -421,13 +420,12 @@ fn editor_title_section(tree: &mut WidgetTree, parent: usize) {
             .color(tokens::muted()),
     );
 
-    // Tag chips (`flex flex-wrap items-center gap-1.5`) + a borderless add box.
-    // Leading 8px spacer matches the title-input inset (see "Saved" above).
+    // Tag chips (`flex flex-wrap items-center gap-1.5`) + a borderless add box,
+    // also flush at `px-6` now (the leading spacer is gone with G4).
     let tags = tree.add_child(
         sec,
         Container::row().align_center().gap(6.0).flex_wrap(true),
     );
-    tree.add_child(tags, Container::row().width(8.0));
     for &tag in NOTES[SELECTED].2 {
         tag_chip(tree, tags, tag);
     }
