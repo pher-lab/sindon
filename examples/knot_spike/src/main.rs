@@ -30,8 +30,8 @@ use shroud::reactive::{Reactive, Signal};
 use shroud::security::SecureString;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{
-    Button, Container, Dropdown, LayerAnchor, LayerOptions, MenuItem, Placement, ScrollView,
-    SecureInput, TextWidget,
+    Button, Container, Dropdown, HAlign, LayerAnchor, LayerOptions, MenuItem, Placement,
+    ScrollView, SecureInput, TextWidget,
 };
 
 const DEMO_PASSWORD: &str = "knot-demo-2026";
@@ -234,6 +234,7 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
                     LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
                         rect: anchor,
                         prefer: Placement::Below,
+                        align: HAlign::Start,
                     }),
                     menu_root,
                     move |tree, root| {

@@ -17,7 +17,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
-use crate::layer::{LayerAnchor, LayerOptions, Placement};
+use crate::layer::{HAlign, LayerAnchor, LayerOptions, Placement};
 use crate::menu_item::MenuItem;
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
@@ -206,6 +206,8 @@ impl Dropdown {
         let layer_options = LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
             rect: trigger_rect,
             prefer: Placement::Auto,
+            // Left-aligned under the trigger, matching a native <select>.
+            align: HAlign::Start,
         });
 
         let popover = DropdownPopover {

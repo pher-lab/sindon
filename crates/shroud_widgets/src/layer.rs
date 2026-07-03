@@ -9,12 +9,16 @@
 //! `push_layer` / `pop_layer` primitives; from event handlers, see
 //! [`EventContext::push_layer`](crate::event::EventContext::push_layer).
 //!
-//! Two anchors are implemented:
+//! Three anchors are implemented:
 //!
 //! - [`LayerAnchor::ViewportCenter`] — modal dialogs.
 //! - [`LayerAnchor::AnchorRect`] — popovers attached to a trigger rect
-//!   (dropdowns, context menus). The variant is `#[non_exhaustive]` so
-//!   absolute-positioned anchors can be added later without a break.
+//!   (dropdowns, context menus), horizontally aligned via [`HAlign`] and
+//!   vertically placed via [`Placement`].
+//! - [`LayerAnchor::Viewport`] — a fixed corner/edge of the viewport plus a
+//!   pixel offset, for CSS-`absolute`-style placement such as a top-center
+//!   toast/banner. `LayerAnchor` stays `#[non_exhaustive]` so further anchor
+//!   kinds can be added later without a break.
 
 use shroud_core::{Color, Rect};
 
@@ -38,17 +42,59 @@ pub enum Placement {
     Auto,
 }
 
+/// Horizontal alignment for [`LayerAnchor::AnchorRect`] and
+/// [`LayerAnchor::Viewport`].
+///
+/// For `AnchorRect` the alignment is relative to the *trigger rect*; for
+/// `Viewport` it is relative to the *viewport*. Either way the resolved
+/// x-coordinate is clamped so the layer stays on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HAlign {
+    /// Left edges align. `AnchorRect`: the popover's left edge meets the
+    /// trigger's left edge (CSS `left-0`) — the default dropdown/menu drop.
+    /// `Viewport`: pin to the left viewport edge.
+    #[default]
+    Start,
+    /// Centers align. `AnchorRect`: the popover is centered over the
+    /// trigger. `Viewport`: horizontally centered in the viewport.
+    Center,
+    /// Right edges align. `AnchorRect`: the popover's right edge meets the
+    /// trigger's right edge (CSS `right-0`), opening leftward from the
+    /// trigger. `Viewport`: pin to the right viewport edge.
+    End,
+}
+
+/// Vertical position for a [`LayerAnchor::Viewport`] layer, relative to the
+/// viewport.
+///
+/// Rect-anchored layers use [`Placement`] instead, which adds the `Auto`
+/// flip; a viewport-pinned layer has no trigger to flip around, so it takes a
+/// plain top / center / bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VAlign {
+    /// Pin to the top viewport edge.
+    #[default]
+    Start,
+    /// Vertically centered in the viewport.
+    Center,
+    /// Pin to the bottom viewport edge.
+    End,
+}
+
 /// Where a layer is placed relative to the viewport or another widget.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum LayerAnchor {
     /// Center the layer's natural-size root inside the viewport. The
-    /// standard modal-dialog placement.
+    /// standard modal-dialog placement. Equivalent to
+    /// `Viewport { h: HAlign::Center, v: VAlign::Center, offset: (0.0, 0.0) }`,
+    /// kept as a named shorthand for the common modal case.
     ViewportCenter,
-    /// Anchor the layer to a trigger rect. The layer's left edge aligns
-    /// with `rect.x`; vertical placement follows `prefer`, with `Auto`
-    /// flipping above when below would overflow. The x-coordinate is
-    /// clamped so the popover stays inside the viewport.
+    /// Anchor the layer to a trigger rect. Horizontal placement follows
+    /// `align` (left edges by default, [`HAlign::End`] for CSS `right-0`);
+    /// vertical placement follows `prefer`, with `Auto` flipping above when
+    /// below would overflow. Both coordinates are clamped so the popover
+    /// stays inside the viewport.
     ///
     /// `rect` is in the coordinate space of the handler that pushes the
     /// layer. From the main tree that is viewport space; from inside another
@@ -62,8 +108,30 @@ pub enum LayerAnchor {
     /// Typical use: a [`Dropdown`](crate::Dropdown) reads its own layout
     /// rect inside its click handler and pushes a popover layer with this
     /// anchor variant — and it now lands correctly even when the dropdown
-    /// itself lives inside a modal or popover.
-    AnchorRect { rect: Rect, prefer: Placement },
+    /// itself lives inside a modal or popover. A menu button anchored to
+    /// *itself* gets its rect from
+    /// [`Container::on_press_rect`](crate::Container::on_press_rect).
+    AnchorRect {
+        rect: Rect,
+        prefer: Placement,
+        align: HAlign,
+    },
+    /// Pin the layer to a fixed viewport corner/edge plus a pixel offset —
+    /// CSS-`absolute`/`fixed`-style placement with no trigger. A top-center
+    /// banner (`top-2 left-1/2 -translate-x-1/2`) is
+    /// `Viewport { h: HAlign::Center, v: VAlign::Start, offset: (0.0, 8.0) }`.
+    ///
+    /// Unlike [`Self::AnchorRect`], the position is resolved purely against
+    /// the viewport and is independent of the pushing layer's own offset (so
+    /// [`push_layer`](crate::event::EventContext::push_layer) never
+    /// translates it). `offset` nudges the resolved corner (positive x =
+    /// right, positive y = down); the final position is clamped to keep the
+    /// layer on screen.
+    Viewport {
+        h: HAlign,
+        v: VAlign,
+        offset: (f32, f32),
+    },
 }
 
 /// Configuration for a pushed layer.

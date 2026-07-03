@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use shroud::app::FrameContext;
 use shroud::core::Rect;
-use shroud::widgets::layer::{LayerAnchor, LayerOptions, Placement};
+use shroud::widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement};
 use shroud::widgets::{Container, EventContext, TextWidget};
 
 use crate::settings;
@@ -141,6 +141,7 @@ pub fn tick(frame: &mut FrameContext) {
                 // Below the toolbar normally; flips above near the viewport
                 // bottom so a tip on a low trigger stays on screen.
                 prefer: Placement::Auto,
+                align: HAlign::Start,
             }),
             bubble(),
             move |tree, root| {

@@ -37,27 +37,23 @@
 //! These are all `absolute`/`fixed` in React, so the slice is the deliberate
 //! **G5 verification** — can shroud's `Layer` + anchor reproduce them?
 //!
-//! Findings (logged in `docs/knot-ui-repro-gaps.md` under G5):
+//! Findings (logged in `docs/knot-ui-repro-gaps.md` under G5). Slice 3 surfaced
+//! three shortfalls; **all three are now resolved by FW-21** and the clone uses
+//! the real primitives:
 //!   - **Cursor-anchored popovers work cleanly.** The context menu
 //!     (`AnchorRect` at the right-click point) is a faithful 1:1 — this is
-//!     the win the slice was meant to confirm.
-//!   - **No way to read a trigger's rect on click.** A dropdown anchored to
-//!     its button (`right-0 top-full`) is universal UX, but only
-//!     `Container::on_hover_enter` hands back the trigger rect (the tooltip
-//!     path); click/press handlers give a *cursor point*, not the rect. So
-//!     the gear/⋮ menus anchor at the cursor instead (close, not exact), or
-//!     one must build a custom `Widget` like `Dropdown` does internally.
-//!   - **No right-align placement.** `AnchorRect` left-aligns the popover at
-//!     `rect.x`; React's `right-0` (right edge meets the trigger's) isn't a
-//!     placement option, so the menus open rightward of the gear, not leftward.
-//!   - **No fixed-edge / offset anchor.** The error banner is
-//!     `top-2 left-1/2 -translate-x-1/2` (top-center of the editor pane).
-//!     `LayerAnchor` offers only `ViewportCenter` (both axes) and `AnchorRect`
-//!     (relative to a rect); neither expresses "top-center" or any fixed
-//!     viewport offset. We push the banner `ViewportCenter` so its *styling*
-//!     is reviewable, but the position is wrong — the strongest argument for
-//!     the future absolute-anchor variant the `#[non_exhaustive]`
-//!     `LayerAnchor` already anticipates.
+//!     the win the slice was meant to confirm, and stays cursor-anchored.
+//!   - **Read a trigger's rect on click — RESOLVED.** `Container::on_press_rect`
+//!     hands back the trigger's own layout rect (the press-time counterpart to
+//!     `on_hover_enter`). The gear/⋮ menus anchor to their button, not the
+//!     cursor — no custom `Widget` needed.
+//!   - **Right-align placement — RESOLVED.** `LayerAnchor::AnchorRect` now
+//!     carries an `align: HAlign`; `HAlign::End` meets the trigger's right
+//!     edge (React's `right-0`), so the gear/⋮ menus open leftward.
+//!   - **Fixed-edge / offset anchor — RESOLVED.** `LayerAnchor::Viewport
+//!     { h, v, offset }` pins to a viewport corner/edge plus a pixel nudge.
+//!     The error banner is `Viewport { Center, Start, offset: (128, 8) }` —
+//!     top-center of the editor pane (half-sidebar x nudge), `top-2` down.
 //!
 //! Two **framework bugs** the slice flushed out (logged G14 / G15):
 //!   - **G14 — a `Dropdown` inside a layer mis-anchored** (now FIXED). A
@@ -82,7 +78,7 @@ use shroud::core::{Color, Point, Rect};
 use shroud::layout::Justify;
 use shroud::reactive::{Reactive, Signal};
 use shroud::text::FontWeight;
-use shroud::widgets::layer::{LayerAnchor, LayerOptions, Placement};
+use shroud::widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement, VAlign};
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{
     Button, Container, Dropdown, EventContext, Input, MenuItem, ScrollView, TextWidget,
@@ -648,17 +644,17 @@ fn popover_divider(tree: &mut WidgetTree, parent: usize) {
     );
 }
 
-/// A header icon that opens a popover on press. Unlike [`icon_button`] (a plain
-/// [`Button`]), this is a [`Container`] because its `on_press` hands back the
-/// click *point* — `Button::on_click` gives nothing, and no click/press handler
-/// hands back the trigger's own *rect* (only `on_hover_enter` does, for
-/// tooltips). So a dropdown anchored to its button can't read the button rect
-/// without a custom `Widget`; we anchor at the cursor instead (gap G5).
+/// A header icon that opens a popover anchored to *itself*. Unlike
+/// [`icon_button`] (a plain [`Button`]), this is a [`Container`] so it can use
+/// [`Container::on_press_rect`] (FW-21 / G5), which hands back the trigger's
+/// own layout rect. The menu then drops below the button and right-aligns to
+/// its right edge — React's `right-0 top-full`. (Before FW-21 no click/press
+/// handler exposed the rect, so these menus had to anchor at the cursor.)
 fn menu_icon_trigger(
     tree: &mut WidgetTree,
     parent: usize,
     glyph: &'static str,
-    open: fn(Point, &mut EventContext),
+    open: fn(Rect, &mut EventContext),
 ) {
     let btn = tree.add_child(
         parent,
@@ -669,14 +665,15 @@ fn menu_icon_trigger(
             .radius(6.0)
             .hoverable()
             .hover_background(border())
-            .on_press(open),
+            .on_press_rect(open),
     );
     tree.add_child(btn, TextWidget::new(glyph).font_size(16.0).color(icon_fg()));
 }
 
-/// Build an `AnchorRect` popover layer anchored just below a cursor point —
-/// the shared shape for the gear / ⋮ / context menus. The panel `root` is
-/// supplied by the caller (width + surface differ per menu).
+/// Build an `AnchorRect` popover anchored just below a cursor *point* —
+/// left-aligned at the cursor. The shape for the note-row right-click context
+/// menu (which is genuinely cursor-positioned). The panel `root` is supplied
+/// by the caller.
 fn open_popover_at(
     pos: Point,
     ctx: &mut EventContext,
@@ -687,6 +684,29 @@ fn open_popover_at(
         LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
             rect: Rect::new(pos.x, pos.y, 0.0, 0.0),
             prefer: Placement::Below,
+            align: HAlign::Start,
+        }),
+        root,
+        populate,
+    );
+}
+
+/// Build an `AnchorRect` popover anchored below a trigger *rect* and
+/// right-aligned to it — React's `right-0 top-full` header-menu drop. The
+/// shape for the gear / ⋮ menus, whose triggers hand back their rect via
+/// [`Container::on_press_rect`] (FW-21 / G5). `align: HAlign::End` puts the
+/// menu's right edge flush with the button's, so it opens leftward.
+fn open_popover_below_rect(
+    rect: Rect,
+    ctx: &mut EventContext,
+    root: Container,
+    populate: impl FnOnce(&mut WidgetTree, usize) + 'static,
+) {
+    ctx.push_layer(
+        LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
+            rect,
+            prefer: Placement::Below,
+            align: HAlign::End, // right-0
         }),
         root,
         populate,
@@ -697,13 +717,13 @@ fn open_popover_at(
 /// labelled selects (theme / auto-lock / language / font / sort) plus two text
 /// action rows. The `<select>`s are real [`Dropdown`]s nested inside this
 /// popover layer — the case that exercised the G14 fix (see [`select`]).
-fn open_settings_menu(pos: Point, ctx: &mut EventContext) {
+fn open_settings_menu(trigger: Rect, ctx: &mut EventContext) {
     let panel = Container::column()
         .width(192.0) // w-48
         .background(popover_surface())
         .radius(8.0) // rounded-lg
         .border(1.0, popover_border());
-    open_popover_at(pos, ctx, panel, |tree, root| {
+    open_popover_below_rect(trigger, ctx, panel, |tree, root| {
         settings_select_row(tree, root, "Theme", &["System", "Light", "Dark"]);
         popover_divider(tree, root);
         settings_select_row(
@@ -822,14 +842,14 @@ fn settings_text_row(
 /// `w-48`. Export-all is `disabled:opacity-40` when there are no notes, but
 /// [`MenuItem`] has no disabled state (minor gap), so it always renders enabled
 /// here. Labels are the React `sidebar.*` i18n strings verbatim.
-fn open_actions_menu(pos: Point, ctx: &mut EventContext) {
+fn open_actions_menu(trigger: Rect, ctx: &mut EventContext) {
     let panel = Container::column()
         .width(192.0) // w-48
         .padding(4.0) // py-1
         .background(popover_surface())
         .radius(8.0)
         .border(1.0, popover_border());
-    open_popover_at(pos, ctx, panel, |tree, root| {
+    open_popover_below_rect(trigger, ctx, panel, |tree, root| {
         tree.add_child(root, MenuItem::new("Import", |c| c.pop_top_layer()));
         tree.add_child(
             root,
@@ -872,11 +892,11 @@ fn open_note_context_menu(pos: Point, pinned: bool, ctx: &mut EventContext) {
 /// rounded, an error message + a `×` dismiss.
 ///
 /// React positions it `absolute top-2 left-1/2 -translate-x-1/2` (top-center of
-/// the editor pane). `LayerAnchor` has only `ViewportCenter` (both axes) and
-/// `AnchorRect` (relative to a rect) — neither expresses top-center or a fixed
-/// viewport offset — so this pushes `ViewportCenter`: the *styling* matches but
-/// the position is mid-screen, not top. The clearest argument for the
-/// absolute-anchor variant the `#[non_exhaustive]` `LayerAnchor` anticipates (G5).
+/// the editor pane). With the FW-21 `Viewport` anchor (G5) this is now exact:
+/// `h: Center` puts it at the viewport's horizontal center, and `offset.0 =
+/// 128` nudges it right by half the 256px sidebar so it centers over the
+/// *editor pane* (pane center = viewport center + sidebar/2), matching React's
+/// pane-relative `left-1/2`. `offset.1 = 8` is Tailwind `top-2`.
 fn show_error_banner(ctx: &mut EventContext) {
     let banner = Container::row()
         .align_center()
@@ -889,29 +909,39 @@ fn show_error_banner(ctx: &mut EventContext) {
             Color::from_rgba8(0x7f, 0x1d, 0x1d, 204),
         ))
         .border(1.0, tokens::pick(tokens::red_300(), tokens::red_700()));
-    // ViewportCenter is the default popover anchor; no scrim, dismiss on
-    // outside-click. See fn doc for why the position is wrong.
-    ctx.push_layer(LayerOptions::popover(), banner, |tree, root| {
-        tree.add_child(
-            root,
-            TextWidget::new("Couldn't delete note. Please try again.")
-                .font_size(14.0)
-                .color(tokens::pick(tokens::red_700(), tokens::red_200())),
-        );
-        tree.add_child(
-            root,
-            Button::new("\u{00D7}") // ×
-                .font_size(14.0)
-                .background(Color::TRANSPARENT)
-                // React's × is text-only (`text-red-500 hover:text-red-700`):
-                // transparent fills (Button otherwise defaults hover/press to
-                // primary blue) and the glyph darkens on hover via
-                // `hover_text_color`.
-                .hover_background(Color::TRANSPARENT)
-                .press_background(Color::TRANSPARENT)
-                .text_color(tokens::pick(tokens::red_500(), tokens::red_300()))
-                .hover_text_color(tokens::pick(tokens::red_700(), tokens::red_200()))
-                .on_click(|c| c.pop_top_layer()),
-        );
-    });
+    // Top-center of the editor pane (see fn doc): viewport h-center + a
+    // half-sidebar x nudge, 8px down (Tailwind `top-2`). No scrim, dismiss on
+    // outside-click.
+    let anchor = LayerAnchor::Viewport {
+        h: HAlign::Center,
+        v: VAlign::Start,
+        offset: (128.0, 8.0), // half of the 256px sidebar, top-2
+    };
+    ctx.push_layer(
+        LayerOptions::popover().anchor(anchor),
+        banner,
+        |tree, root| {
+            tree.add_child(
+                root,
+                TextWidget::new("Couldn't delete note. Please try again.")
+                    .font_size(14.0)
+                    .color(tokens::pick(tokens::red_700(), tokens::red_200())),
+            );
+            tree.add_child(
+                root,
+                Button::new("\u{00D7}") // ×
+                    .font_size(14.0)
+                    .background(Color::TRANSPARENT)
+                    // React's × is text-only (`text-red-500 hover:text-red-700`):
+                    // transparent fills (Button otherwise defaults hover/press to
+                    // primary blue) and the glyph darkens on hover via
+                    // `hover_text_color`.
+                    .hover_background(Color::TRANSPARENT)
+                    .press_background(Color::TRANSPARENT)
+                    .text_color(tokens::pick(tokens::red_500(), tokens::red_300()))
+                    .hover_text_color(tokens::pick(tokens::red_700(), tokens::red_200()))
+                    .on_click(|c| c.pop_top_layer()),
+            );
+        },
+    );
 }

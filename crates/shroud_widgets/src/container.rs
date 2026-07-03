@@ -24,6 +24,12 @@ type ContextMenuHandler = Box<dyn FnMut(Point, &mut EventContext)>;
 /// position in the subtree's local coordinate space.
 type PressHandler = Box<dyn FnMut(Point, &mut EventContext)>;
 
+/// Callback type for [`Container::on_press_rect`]. Like [`PressHandler`] but
+/// reports the container's own layout rect (for anchoring a popover to the
+/// trigger) instead of the click point — the press-time counterpart to
+/// [`HoverEnterHandler`].
+type PressRectHandler = Box<dyn FnMut(Rect, &mut EventContext)>;
+
 /// Callback type for [`Container::on_hover_enter`]. Receives the
 /// container's own layout rect (viewport coordinates) so the handler can
 /// feed it straight into [`LayerAnchor::AnchorRect`](crate::LayerAnchor)
@@ -141,6 +147,10 @@ pub struct Container {
     /// the same dispatch and survives the teardown. The container does not
     /// need to be focusable, so clicking it never steals keyboard focus.
     on_press: Option<PressHandler>,
+    /// Optional left-press handler fired on `MouseDown` with the container's
+    /// own layout rect (rather than the click point), for anchoring a popover
+    /// to the trigger itself. See [`Container::on_press_rect`].
+    on_press_rect: Option<PressRectHandler>,
     /// Optional hover-enter handler, fired on `MouseEnter` with the
     /// container's own layout rect. Setting it enrolls the container in
     /// hover-event routing *without* turning on the hover-background fade
@@ -177,6 +187,7 @@ impl Container {
             visible: Reactive::Static(true),
             on_context_menu: None,
             on_press: None,
+            on_press_rect: None,
             on_hover_enter: None,
             on_hover_exit: None,
         }
@@ -207,6 +218,7 @@ impl Container {
             visible: Reactive::Static(true),
             on_context_menu: None,
             on_press: None,
+            on_press_rect: None,
             on_hover_enter: None,
             on_hover_exit: None,
         }
@@ -591,6 +603,7 @@ impl Container {
     ///         LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
     ///             rect: anchor,
     ///             prefer: Placement::Below,
+    ///             align: HAlign::Start,
     ///         }),
     ///         ContextMenuRoot::new(),
     ///         |tree, root| {
@@ -631,6 +644,44 @@ impl Container {
         self
     }
 
+    /// Register a left-press handler that receives the container's own layout
+    /// rect (viewport coordinates, the same frame as `paint`'s `layout`)
+    /// instead of the click point — the press-time counterpart to
+    /// [`on_hover_enter`](Self::on_hover_enter).
+    ///
+    /// The rect feeds straight into
+    /// [`LayerAnchor::AnchorRect`](crate::LayerAnchor), so a menu button can
+    /// open a popover anchored to *itself*: dropped under the button and,
+    /// with [`HAlign::End`](crate::HAlign), flush to its right edge (CSS
+    /// `right-0 top-full`). [`on_press`](Self::on_press) only hands back the
+    /// cursor point, which can anchor a menu at the cursor but not to the
+    /// trigger's box.
+    ///
+    /// ```ignore
+    /// Container::row().hoverable().on_press_rect(|rect, ctx| {
+    ///     ctx.push_layer(
+    ///         LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
+    ///             rect,
+    ///             prefer: Placement::Below,
+    ///             align: HAlign::End, // right-0
+    ///         }),
+    ///         menu_panel(),
+    ///         |tree, root| { /* populate */ },
+    ///     );
+    /// })
+    /// ```
+    ///
+    /// Fires on `MouseDown` and consumes the event, like
+    /// [`on_press`](Self::on_press). May be combined with `on_press`; both
+    /// fire on the same press. The rect is layer-local inside a layer, and
+    /// [`push_layer`](crate::EventContext::push_layer) translates the anchor
+    /// to viewport space — so the button lands correctly even nested in a
+    /// modal or popover.
+    pub fn on_press_rect(mut self, handler: impl FnMut(Rect, &mut EventContext) + 'static) -> Self {
+        self.on_press_rect = Some(Box::new(handler));
+        self
+    }
+
     /// Register a hover-enter handler, firing on `MouseEnter`.
     ///
     /// The handler receives the container's own layout rect (viewport
@@ -645,6 +696,7 @@ impl Container {
     ///         LayerOptions::tooltip().anchor(LayerAnchor::AnchorRect {
     ///             rect,
     ///             prefer: Placement::Below,
+    ///             align: HAlign::Start,
     ///         }),
     ///         tooltip_bubble("Bold"),
     ///         |_tree, _root| {},
@@ -806,16 +858,27 @@ impl Widget for Container {
             }
         }
 
-        // Left press → on_press (independent of hoverable, like the
-        // right-click path above). Fires on the press so the commit is
-        // queued in the same dispatch that may move focus elsewhere.
+        // Left press → on_press / on_press_rect (independent of hoverable,
+        // like the right-click path above). Fires on the press so the commit
+        // is queued in the same dispatch that may move focus elsewhere.
+        // `on_press` gets the click point; `on_press_rect` gets the
+        // container's own layout rect (to anchor a popover to the trigger).
+        // Both fire when both are set.
         if let WidgetEvent::MouseDown {
             button: MouseButton::Left,
             position,
         } = event
         {
+            let mut handled = false;
             if let Some(handler) = &mut self.on_press {
                 handler(*position, ctx);
+                handled = true;
+            }
+            if let Some(handler) = &mut self.on_press_rect {
+                handler(layout, ctx);
+                handled = true;
+            }
+            if handled {
                 return EventResult::Consumed;
             }
         }

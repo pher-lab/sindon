@@ -83,7 +83,35 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   clone のエディタタイトル節は uniform `padding(16)`＋子の 8px inset の近似 →
   真の `padding_xy(24, 16)`（`px-6 py-4`）へ置換し、補正スペーサを撤去（右端 8px ズレも解消）。
 
-### G5. absolute / コーナー配置のプリミティブがない — **中（slice 3 で検証完了 = 部分的に Layer で代替可）**
+### G5. absolute / コーナー配置のプリミティブがない → **解消（FW-21、2026-07-04 landed）**
+- **3つの open 点をまとめて graduate**（下の検証で炙った3点すべて）:
+  - **① click 時に trigger の rect が取れない → 解消**: `Container::on_press_rect(FnMut(Rect, ctx))`
+    を追加（`on_hover_enter` の press 版）。`MouseDown` で widget 自身の `layout` rect を渡し consume。
+    `on_press`（点）と併用可・両方 fire。layer 内では rect は layer-local で、`push_layer` の既存
+    offset 変換（G14）でそのまま viewport 化される。
+  - **② 右寄せ placement が無い → 解消**: `LayerAnchor::AnchorRect` に `align: HAlign` を追加。
+    `HAlign::{Start,Center,End}` = popover 左辺を trigger 左辺 / 中央 / 右辺（CSS `right-0`、左に開く）に
+    合わせる。`place_layer` の x 計算を align 分岐に。
+  - **③ 固定エッジ / オフセット anchor が無い → 解消**: 新変種 `LayerAnchor::Viewport { h: HAlign,
+    v: VAlign, offset: (f32,f32) }`。viewport の角/辺 + ピクセル nudge で CSS `absolute` 相当。
+    バナー `top-2 left-1/2 -translate-x-1/2` = `Viewport { Center, Start, offset: (0,8) }`。viewport
+    絶対ゆえ `push_layer` は変換しない（`ViewportCenter` と同様）。`ViewportCenter` は
+    `Viewport{Center,Center,(0,0)}` の名前付きショートハンドとして温存。
+- **clone 配線**: gear/⋮ ヘッダメニューを `on_press_rect` + `AnchorRect{align: End}` にして React の
+  `right-0 top-full`（ボタンに anchor・右寄せ・下開き）を 1:1 に。context menu は cursor anchor のまま
+  （正しい）。エラーバナーを `Viewport{Center, Start, offset:(128,8)}` に（x=128 = サイドバー 256px の
+  半分 → エディタペイン中央、React の pane-relative `left-1/2` と一致。y=8 = `top-2`）。
+- **破壊的変更**: `AnchorRect` にフィールド追加のため全構築サイト（widgets/dropdown・tests・
+  knot sidebar/tooltip・knot_spike）に `align: HAlign::Start` を機械的追記（挙動不変）。knot は
+  この1点のみ変更（enum が育った正当な source break）。
+- テスト: layer +4（right/center/viewport top-center/viewport bottom-right）・event +2
+  （align が offset 変換を跨いで保持 / Viewport 非変換）・press_blur +1（on_press_rect が rect を返す）。
+  全 gate 緑（fmt/clippy 含 knot/rustdoc -D warnings/全 widget test）。
+- **実機**: 未確認（HDR ∴ スクショ不可信、[[feedback-screenshot-color-hdr]] — ユーザの目で light/dark 確認予定）。
+
+<details><summary>（旧記載：slice 3 での検証内容）</summary>
+
+**中（slice 3 で検証完了 = 部分的に Layer で代替可）**
 - Unlock 右上の言語 select は `absolute top-4 right-4`。通常フローの外に置く手段が
   Container 系にない（`Layer` + anchor で代替可能か要検証）。第一稿では言語 select を省略。
 - **slice 3 検証（2026-06-29）**: Main の overlay 4種（設定 dropdown / ⋮ actions / 右クリック
@@ -111,6 +139,8 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
     - `MenuItem` に disabled 状態が無い（actions の "Export All" は `disabled:opacity-40`)。
     - `Dropdown` に `grow` が無い（sort 行の select は `flex-1`）。
     - `Container` に `min_width` builder が無い（context menu `min-w-[140px]` は固定 `width` で代用)。
+
+</details>
 
 ### G6. Button の padding / 高さ / 固定幅 / disabled スタイルが非公開 → **解消（FW-19、2026-07-03 landed）**
 - 正解の submit は `w-full py-3` かつ `disabled:bg-blue-800 disabled:cursor-not-allowed`。
@@ -439,10 +469,10 @@ FW-18（drop-shadow G18 の shadow 半分）** として graduate 済み。
 
 **なお未解決で持ち越す gap**:
 - ~~**G16** Dropdown 寸法/角丸・MenuItem ラベル左寄せ（polish）~~ → **解消（FW-20、2026-07-04）**
+- ~~**G5** absolute/固定エッジ anchor・右寄せ placement・click 時の trigger rect 取得~~ →
+  **解消（FW-21、2026-07-04）** = `on_press_rect` + `AnchorRect{align}` + `Viewport{h,v,offset}`
 - **G18 の残り半分** viewport 相対サイズ vh/vw 無し（shadow/elevation は **FW-18 で解消済**）
 - **G3 系の残り** 固定ピクセル高の multiline viewport 無し（slice 6 で追記）
-- **G5** absolute/固定エッジ anchor（`LayerAnchor` の absolute 変種）、右寄せ placement、click 時の
-  trigger rect 取得 — Layer で部分代替可だが3点 open
 - **G7** focus が外側リング vs 正解は border 色変化（設計判断・open）
 - **G15** capturing layer の hover 固定（真因特定済・実害軽微で棚上げ）
 

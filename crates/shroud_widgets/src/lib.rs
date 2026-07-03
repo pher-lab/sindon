@@ -33,7 +33,7 @@ pub use event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey
 pub use focus::{FocusDirection, FocusManager, FocusReason};
 pub use image::{Image, ImageFit};
 pub use input::{Input, KeyEdit};
-pub use layer::{LayerAnchor, LayerOptions, Placement};
+pub use layer::{HAlign, LayerAnchor, LayerOptions, Placement, VAlign};
 pub use menu_item::MenuItem;
 pub use paint::PaintContext;
 pub use reactive_children::ReactiveChildren;

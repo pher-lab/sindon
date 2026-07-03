@@ -7,7 +7,7 @@ use crate::event::{
     EventContext, EventResult, Key, MouseButton, NamedKey, TreeCommand, WidgetEvent,
 };
 use crate::focus::{FocusDirection, FocusManager, FocusReason};
-use crate::layer::{LayerAnchor, LayerEntry, LayerOptions, Placement};
+use crate::layer::{HAlign, LayerAnchor, LayerEntry, LayerOptions, Placement, VAlign};
 use crate::paint::PaintContext;
 use crate::reactive_children::ReactiveChildren;
 use crate::scroll_view::ScrollView;
@@ -149,11 +149,15 @@ fn lowest_common_ancestor(old_chain: &[usize], new_chain: &[usize]) -> Option<us
 ///   `(0, 0)` if the layer is larger than the viewport (the overflow is
 ///   clipped on the right/bottom).
 /// - [`LayerAnchor::AnchorRect`]: places the layer immediately below the
-///   trigger rect (or above, per [`Placement`]). The x-coordinate aligns
-///   with `rect.x` and is clamped so the layer stays inside the viewport.
-///   [`Placement::Auto`] flips above when below would overflow the
-///   viewport bottom *and* above would fit; otherwise it falls back to
-///   below and the overflow is clipped.
+///   trigger rect (or above, per [`Placement`]). Horizontal placement
+///   follows [`HAlign`] — left edges by default, right edges for
+///   [`HAlign::End`] (CSS `right-0`), or centered — then clamps so the layer
+///   stays inside the viewport. [`Placement::Auto`] flips above when below
+///   would overflow the viewport bottom *and* above would fit; otherwise it
+///   falls back to below and the overflow is clipped.
+/// - [`LayerAnchor::Viewport`]: pins the layer to a fixed viewport
+///   corner/edge (per [`HAlign`]/[`VAlign`]) plus a pixel offset, clamped on
+///   both axes.
 fn place_layer(anchor: LayerAnchor, size: Size, viewport: (f32, f32)) -> (f32, f32) {
     let (vw, vh) = viewport;
     match anchor {
@@ -161,12 +165,22 @@ fn place_layer(anchor: LayerAnchor, size: Size, viewport: (f32, f32)) -> (f32, f
             ((vw - size.width) * 0.5).max(0.0),
             ((vh - size.height) * 0.5).max(0.0),
         ),
-        LayerAnchor::AnchorRect { rect, prefer } => {
-            // Horizontal: align left edge to the trigger, then clamp so the
-            // popover does not run off either side. `max(0)` after `min(...)`
-            // handles the degenerate case where the popover is wider than
-            // the viewport — pin to the left and let the right edge clip.
-            let x = rect.origin.x.min(vw - size.width).max(0.0);
+        LayerAnchor::AnchorRect {
+            rect,
+            prefer,
+            align,
+        } => {
+            // Horizontal: align the popover edge to the trigger per `align`,
+            // then clamp so it does not run off either side. `max(0)` after
+            // `min(...)` handles the degenerate case where the popover is
+            // wider than the viewport — pin to the left and let the right
+            // edge clip.
+            let x = match align {
+                HAlign::Start => rect.origin.x,
+                HAlign::Center => rect.origin.x + (rect.size.width - size.width) * 0.5,
+                HAlign::End => rect.right() - size.width,
+            };
+            let x = x.min(vw - size.width).max(0.0);
 
             let below_y = rect.origin.y + rect.size.height;
             let above_y = rect.origin.y - size.height;
@@ -190,6 +204,23 @@ fn place_layer(anchor: LayerAnchor, size: Size, viewport: (f32, f32)) -> (f32, f
             };
             // Vertical clamp so a too-tall popover stays on screen.
             let y = y.min(vh - size.height).max(0.0);
+            (x, y)
+        }
+        LayerAnchor::Viewport { h, v, offset } => {
+            // Resolve the fixed viewport corner/edge, apply the pixel nudge,
+            // then clamp on both axes so the layer stays on screen.
+            let x = match h {
+                HAlign::Start => 0.0,
+                HAlign::Center => (vw - size.width) * 0.5,
+                HAlign::End => vw - size.width,
+            };
+            let y = match v {
+                VAlign::Start => 0.0,
+                VAlign::Center => (vh - size.height) * 0.5,
+                VAlign::End => vh - size.height,
+            };
+            let x = (x + offset.0).min(vw - size.width).max(0.0);
+            let y = (y + offset.1).min(vh - size.height).max(0.0);
             (x, y)
         }
     }

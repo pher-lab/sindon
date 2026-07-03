@@ -15,7 +15,7 @@ use shroud_core::{Color, Point, Theme};
 use shroud_reactive::Signal;
 use shroud_text::TextEngine;
 use shroud_widgets::event::{EventContext, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
-use shroud_widgets::layer::{LayerAnchor, LayerOptions, Placement};
+use shroud_widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement, VAlign};
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::shortcut::Shortcut;
 use shroud_widgets::tree::WidgetTree;
@@ -322,6 +322,7 @@ fn anchor_rect_below_places_under_trigger() {
     let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
         rect: trigger,
         prefer: Placement::Below,
+        align: HAlign::Start,
     });
     tree.compute_layout(800.0, 600.0);
     let (x, y) = layer_paint_xy(&mut tree);
@@ -337,6 +338,7 @@ fn anchor_rect_above_places_over_trigger() {
     let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
         rect: trigger,
         prefer: Placement::Above,
+        align: HAlign::Start,
     });
     tree.compute_layout(800.0, 600.0);
     let (x, y) = layer_paint_xy(&mut tree);
@@ -353,6 +355,7 @@ fn anchor_rect_auto_flips_when_below_overflows() {
     let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
         rect: trigger,
         prefer: Placement::Auto,
+        align: HAlign::Start,
     });
     tree.compute_layout(800.0, 600.0);
     let (_x, y) = layer_paint_xy(&mut tree);
@@ -369,6 +372,7 @@ fn anchor_rect_auto_stays_below_when_room_is_there() {
     let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
         rect: trigger,
         prefer: Placement::Auto,
+        align: HAlign::Start,
     });
     tree.compute_layout(800.0, 600.0);
     let (_x, y) = layer_paint_xy(&mut tree);
@@ -383,6 +387,7 @@ fn anchor_rect_x_clamps_to_viewport_right() {
     let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
         rect: trigger,
         prefer: Placement::Below,
+        align: HAlign::Start,
     });
     tree.compute_layout(800.0, 600.0);
     let (x, _y) = layer_paint_xy(&mut tree);
@@ -396,10 +401,81 @@ fn anchor_rect_x_clamps_to_viewport_left() {
     let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
         rect: trigger,
         prefer: Placement::Below,
+        align: HAlign::Start,
     });
     tree.compute_layout(800.0, 600.0);
     let (x, _y) = layer_paint_xy(&mut tree);
     assert!((x - 0.0).abs() < 0.5, "x = {}, want 0 (clamped)", x);
+}
+
+#[test]
+fn anchor_rect_end_aligns_right_edges() {
+    // align=End: the popover's right edge meets the trigger's right edge
+    // (CSS `right-0`). Trigger right = 100+80 = 180; popover width 150 →
+    // x = 180 - 150 = 30. Vertical still drops below (y = 232).
+    let trigger = Rect::new(100.0, 200.0, 80.0, 32.0);
+    let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
+        rect: trigger,
+        prefer: Placement::Below,
+        align: HAlign::End,
+    });
+    tree.compute_layout(800.0, 600.0);
+    let (x, y) = layer_paint_xy(&mut tree);
+    assert!((x - 30.0).abs() < 0.5, "x = {}, want 30 (right-aligned)", x);
+    assert!((y - 232.0).abs() < 0.5, "y = {}, want 232", y);
+}
+
+#[test]
+fn anchor_rect_center_centers_over_trigger() {
+    // align=Center: popover centered over the trigger. Trigger center x =
+    // 140; popover width 150 → x = 140 - 75 = 65.
+    let trigger = Rect::new(100.0, 200.0, 80.0, 32.0);
+    let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::AnchorRect {
+        rect: trigger,
+        prefer: Placement::Below,
+        align: HAlign::Center,
+    });
+    tree.compute_layout(800.0, 600.0);
+    let (x, _y) = layer_paint_xy(&mut tree);
+    assert!((x - 65.0).abs() < 0.5, "x = {}, want 65 (centered)", x);
+}
+
+#[test]
+fn viewport_anchor_top_center_with_offset() {
+    // A top-center banner (`top-2 left-1/2 -translate-x-1/2`). Viewport
+    // 800x600, layer 150x80 → x = (800-150)/2 = 325, y = 0 + 8 offset.
+    let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::Viewport {
+        h: HAlign::Center,
+        v: VAlign::Start,
+        offset: (0.0, 8.0),
+    });
+    tree.compute_layout(800.0, 600.0);
+    let (x, y) = layer_paint_xy(&mut tree);
+    assert!((x - 325.0).abs() < 0.5, "x = {}, want 325 (h-center)", x);
+    assert!((y - 8.0).abs() < 0.5, "y = {}, want 8 (top + offset)", y);
+}
+
+#[test]
+fn viewport_anchor_bottom_right_with_negative_offset() {
+    // Bottom-right corner inset by 16px on each axis. x = 800-150-16 = 634,
+    // y = 600-80-16 = 504.
+    let (mut tree, _layer) = tree_with_anchored_layer(LayerAnchor::Viewport {
+        h: HAlign::End,
+        v: VAlign::End,
+        offset: (-16.0, -16.0),
+    });
+    tree.compute_layout(800.0, 600.0);
+    let (x, y) = layer_paint_xy(&mut tree);
+    assert!(
+        (x - 634.0).abs() < 0.5,
+        "x = {}, want 634 (right - inset)",
+        x
+    );
+    assert!(
+        (y - 504.0).abs() < 0.5,
+        "y = {}, want 504 (bottom - inset)",
+        y
+    );
 }
 
 #[test]

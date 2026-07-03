@@ -30,7 +30,7 @@ use shroud::reactive::{Reactive, Signal};
 use shroud::widgets::layer::LayerOptions;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{
-    Button, Container, EventContext, Input, LayerAnchor, MenuItem, Placement, ScrollView,
+    Button, Container, EventContext, HAlign, Input, LayerAnchor, MenuItem, Placement, ScrollView,
     TextWidget,
 };
 
@@ -993,6 +993,7 @@ fn show_note_context_menu(
         LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
             rect: anchor,
             prefer: Placement::Below,
+            align: HAlign::Start,
         }),
         menu_root,
         move |tree, root| {

@@ -19,7 +19,7 @@ use std::time::Duration;
 use shroud_core::{Color, Point, Rect, Theme};
 use shroud_text::TextEngine;
 use shroud_widgets::event::{EventContext, MouseButton, WidgetEvent};
-use shroud_widgets::layer::{LayerAnchor, LayerOptions, Placement};
+use shroud_widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement};
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::tree::WidgetTree;
 use shroud_widgets::{Button, Container, TextWidget};
@@ -286,6 +286,7 @@ fn tooltip_dismisses_on_hover_exit_end_to_end() {
                     LayerOptions::tooltip().anchor(LayerAnchor::AnchorRect {
                         rect,
                         prefer: Placement::Below,
+                        align: HAlign::Start,
                     }),
                     Container::column()
                         .padding(6.0)

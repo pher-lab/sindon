@@ -114,6 +114,54 @@ fn container_on_press_fires_on_left_mouse_down() {
 }
 
 #[test]
+fn container_on_press_rect_hands_back_the_trigger_rect() {
+    // FW-21 / G5: on_press_rect reports the container's own layout rect (not
+    // the cursor point) so a menu button can anchor a popover to itself.
+    let fired = Rc::new(Cell::new(0u32));
+    let got = Rc::new(Cell::new(shroud_core::Rect::ZERO));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(120.0).padding(10.0));
+    let f = Rc::clone(&fired);
+    let g = Rc::clone(&got);
+    let panel = tree.add_child(
+        root,
+        Container::row()
+            .width(100.0)
+            .height(40.0)
+            .background(Color::rgb(0.2, 0.2, 0.2))
+            .on_press_rect(move |rect, _ctx| {
+                f.set(f.get() + 1);
+                g.set(rect);
+            }),
+    );
+    measured_layout(&mut tree, 200.0, 120.0);
+
+    let expected = tree.layout_rect(panel);
+    // Click anywhere inside the panel — the handler should still get the box.
+    left_down(
+        &mut tree,
+        expected.origin.x + 20.0,
+        expected.origin.y + 10.0,
+    );
+
+    assert_eq!(fired.get(), 1, "on_press_rect fires once on the press");
+    let r = got.get();
+    assert!(
+        (r.origin.x - expected.origin.x).abs() < 0.5
+            && (r.origin.y - expected.origin.y).abs() < 0.5,
+        "origin: got {:?}, want {:?}",
+        r.origin,
+        expected.origin
+    );
+    assert!(
+        (r.size.width - 100.0).abs() < 0.5 && (r.size.height - 40.0).abs() < 0.5,
+        "size: got {:?}, want 100x40",
+        r.size
+    );
+}
+
+#[test]
 fn container_on_press_ignores_right_click() {
     let fired = Rc::new(Cell::new(0u32));
 

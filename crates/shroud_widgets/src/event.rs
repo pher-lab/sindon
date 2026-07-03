@@ -451,6 +451,11 @@ impl EventContext {
     /// popover — its `event` `layout` rect is layer-local, and this
     /// correction puts the child layer under the trigger rather than at
     /// the parent layer's origin. A no-op for the main tree (offset zero).
+    /// Only [`LayerAnchor::AnchorRect`] is translated; [`ViewportCenter`] and
+    /// [`Viewport`] are viewport-absolute and always left untouched.
+    ///
+    /// [`ViewportCenter`]: LayerAnchor::ViewportCenter
+    /// [`Viewport`]: LayerAnchor::Viewport
     pub fn push_layer<F>(
         &mut self,
         mut options: LayerOptions,
@@ -459,7 +464,12 @@ impl EventContext {
     ) where
         F: FnOnce(&mut WidgetTree, usize) + 'static,
     {
-        if let LayerAnchor::AnchorRect { rect, prefer } = options.anchor {
+        if let LayerAnchor::AnchorRect {
+            rect,
+            prefer,
+            align,
+        } = options.anchor
+        {
             let (ox, oy) = self.current_layer_offset;
             if ox != 0.0 || oy != 0.0 {
                 options.anchor = LayerAnchor::AnchorRect {
@@ -470,6 +480,7 @@ impl EventContext {
                         rect.size.height,
                     ),
                     prefer,
+                    align,
                 };
             }
         }
@@ -555,7 +566,7 @@ impl Default for EventContext {
 mod tests {
     use super::*;
     use crate::Container;
-    use crate::layer::Placement;
+    use crate::layer::{HAlign, Placement, VAlign};
 
     fn pushed_anchor(ctx: &EventContext) -> LayerAnchor {
         match ctx.commands.last().expect("a command was queued") {
@@ -576,12 +587,13 @@ mod tests {
             LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
                 rect: Rect::new(8.0, 40.0, 120.0, 24.0),
                 prefer: Placement::Below,
+                align: HAlign::Start,
             }),
             Container::column(),
             |_tree, _root| {},
         );
         match pushed_anchor(&ctx) {
-            LayerAnchor::AnchorRect { rect, prefer } => {
+            LayerAnchor::AnchorRect { rect, prefer, .. } => {
                 assert_eq!((rect.origin.x, rect.origin.y), (108.0, 90.0));
                 assert_eq!((rect.size.width, rect.size.height), (120.0, 24.0));
                 assert_eq!(prefer, Placement::Below);
@@ -599,6 +611,7 @@ mod tests {
             LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
                 rect: Rect::new(8.0, 40.0, 0.0, 0.0),
                 prefer: Placement::Below,
+                align: HAlign::Start,
             }),
             Container::column(),
             |_tree, _root| {},
@@ -607,6 +620,28 @@ mod tests {
             LayerAnchor::AnchorRect { rect, .. } => {
                 assert_eq!((rect.origin.x, rect.origin.y), (8.0, 40.0));
             }
+            other => panic!("expected AnchorRect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_layer_preserves_anchor_rect_alignment() {
+        // The horizontal alignment must survive the layer-offset translation
+        // so a right-aligned (CSS `right-0`) menu stays right-aligned when it
+        // is nested inside another layer.
+        let mut ctx = EventContext::new();
+        ctx.current_layer_offset = (100.0, 50.0);
+        ctx.push_layer(
+            LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
+                rect: Rect::new(8.0, 40.0, 120.0, 24.0),
+                prefer: Placement::Auto,
+                align: HAlign::End,
+            }),
+            Container::column(),
+            |_tree, _root| {},
+        );
+        match pushed_anchor(&ctx) {
+            LayerAnchor::AnchorRect { align, .. } => assert_eq!(align, HAlign::End),
             other => panic!("expected AnchorRect, got {other:?}"),
         }
     }
@@ -623,5 +658,30 @@ mod tests {
             |_tree, _root| {},
         );
         assert!(matches!(pushed_anchor(&ctx), LayerAnchor::ViewportCenter));
+    }
+
+    #[test]
+    fn push_layer_viewport_anchor_is_never_shifted() {
+        // A `Viewport` anchor is resolved against the viewport, not the
+        // pushing layer, so a stale layer offset must never nudge it.
+        let mut ctx = EventContext::new();
+        ctx.current_layer_offset = (100.0, 50.0);
+        ctx.push_layer(
+            LayerOptions::popover().anchor(LayerAnchor::Viewport {
+                h: HAlign::Center,
+                v: VAlign::Start,
+                offset: (0.0, 8.0),
+            }),
+            Container::column(),
+            |_tree, _root| {},
+        );
+        match pushed_anchor(&ctx) {
+            LayerAnchor::Viewport { h, v, offset } => {
+                assert_eq!(h, HAlign::Center);
+                assert_eq!(v, VAlign::Start);
+                assert_eq!(offset, (0.0, 8.0));
+            }
+            other => panic!("expected Viewport, got {other:?}"),
+        }
     }
 }
