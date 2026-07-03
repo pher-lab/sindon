@@ -950,6 +950,97 @@ fn container_side_border_paints_over_a_full_bleed_child() {
     assert_eq!(line.x, 119.0, "and still hugs the right edge (120 - 1)");
 }
 
+// ── Container drop shadow (G18) ──────────────────────────────────
+//
+// `paint_container` forces a 120×80 box at the origin. A shadow paints
+// *before* the fill (behind it) as a blurred rect: border_width == 0,
+// blur > 0, and the caster box folds in offset + spread.
+
+#[test]
+fn container_shadow_paints_behind_the_fill() {
+    let ctx = paint_container(Container::column().background(Color::WHITE).shadow(
+        0.0,
+        4.0,
+        12.0,
+        0.0,
+        Color::rgba(0.0, 0.0, 0.0, 0.2),
+    ));
+    assert_eq!(ctx.rects.len(), 2, "shadow + fill");
+    let shadow = &ctx.rects[0];
+    let fill = &ctx.rects[1];
+    assert!(shadow.blur > 0.0, "rect[0] is the blurred shadow");
+    assert_eq!(fill.blur, 0.0, "rect[1] is the crisp fill, drawn on top");
+    assert_eq!(shadow.border_width, 0.0, "a shadow is a fill, not a stroke");
+}
+
+#[test]
+fn container_default_casts_no_shadow() {
+    let ctx = paint_container(Container::column().background(Color::WHITE));
+    assert_eq!(ctx.rects.len(), 1, "just the fill");
+    assert_eq!(ctx.rects[0].blur, 0.0);
+}
+
+#[test]
+fn container_shadow_folds_offset_and_spread_into_the_box() {
+    // offset shifts the caster box; spread grows it on every side (so the box
+    // origin moves back by `spread` and the size grows by `2*spread`).
+    let ctx = paint_container(Container::column().shadow(
+        6.0,
+        10.0,
+        8.0,
+        3.0,
+        Color::rgba(0.0, 0.0, 0.0, 0.25),
+    ));
+    assert_eq!(ctx.rects.len(), 1, "no background → just the shadow");
+    let s = &ctx.rects[0];
+    // box origin = layout(0,0) + offset(6,10) - spread(3) = (3, 7)
+    assert_eq!((s.x, s.y), (3.0, 7.0));
+    // box size = 120×80 + 2*spread = 126×86
+    assert_eq!((s.width, s.height), (126.0, 86.0));
+    assert_eq!(s.blur, 8.0);
+}
+
+#[test]
+fn container_shadow_radius_grows_with_spread() {
+    // A rounded card's shadow stays concentric: radius += spread.
+    let ctx = paint_container(Container::column().radius(10.0).shadow(
+        0.0,
+        4.0,
+        8.0,
+        2.0,
+        Color::rgba(0.0, 0.0, 0.0, 0.2),
+    ));
+    assert_eq!(ctx.rects[0].radius, 12.0, "radius 10 + spread 2");
+}
+
+#[test]
+fn container_transparent_shadow_color_draws_nothing() {
+    // A fully transparent shadow color is a no-op — no wasted rect.
+    let ctx = paint_container(Container::column().background(Color::WHITE).shadow(
+        0.0,
+        4.0,
+        12.0,
+        0.0,
+        Color::rgba(0.0, 0.0, 0.0, 0.0),
+    ));
+    assert_eq!(ctx.rects.len(), 1, "only the fill; the shadow is invisible");
+    assert_eq!(ctx.rects[0].blur, 0.0);
+}
+
+#[test]
+fn container_elevation_preset_casts_a_shadow() {
+    let ctx = paint_container(Container::column().background(Color::WHITE).elevation(4));
+    assert_eq!(ctx.rects.len(), 2, "shadow + fill");
+    assert!(ctx.rects[0].blur > 0.0, "elevation emits a blurred shadow");
+}
+
+#[test]
+fn container_elevation_zero_casts_no_shadow() {
+    let ctx = paint_container(Container::column().background(Color::WHITE).elevation(0));
+    assert_eq!(ctx.rects.len(), 1, "level 0 is no elevation");
+    assert_eq!(ctx.rects[0].blur, 0.0);
+}
+
 // ── Container justify / align wiring (G11) ───────────────────────
 
 #[test]

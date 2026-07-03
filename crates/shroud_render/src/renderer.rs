@@ -32,6 +32,12 @@ struct Vertex {
     /// focus rings draw a single concentric outline. Same value at every
     /// vertex, interpolated `flat`.
     border_width: f32,
+    /// Blur radius in pixels for a soft drop shadow. `0.0` (the default)
+    /// short-circuits to the crisp fill / border path. `> 0.0` fades the
+    /// box's SDF from full opacity at the edge to zero `blur` px outside —
+    /// the quad is inflated by `blur` (see `build_rect_geometry`) so the
+    /// falloff has room. Same value at every vertex, interpolated `flat`.
+    blur: f32,
 }
 
 impl Vertex {
@@ -67,6 +73,11 @@ impl Vertex {
             wgpu::VertexAttribute {
                 offset: std::mem::size_of::<[f32; 11]>() as wgpu::BufferAddress,
                 shader_location: 5,
+                format: wgpu::VertexFormat::Float32,
+            },
+            wgpu::VertexAttribute {
+                offset: std::mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                shader_location: 6,
                 format: wgpu::VertexFormat::Float32,
             },
         ],
@@ -167,6 +178,14 @@ pub struct DrawRect {
     /// transparent — a single-rect outline used for focus rings. The
     /// width is clamped downstream to the rect's half-extent.
     pub border_width: f32,
+    /// Blur radius in pixels for a soft drop shadow. `0.0` (the default for
+    /// `fill_rect` / `fill_rect_rounded` / `stroke_rect_rounded` callers)
+    /// draws a crisp fill or border. `> 0.0` turns the rect into a blurred
+    /// silhouette of the box: full opacity inside the (optionally rounded)
+    /// edge, fading to zero `blur` px outside. `x`/`y`/`width`/`height`
+    /// describe the *casting box* (already offset / spread-adjusted by the
+    /// caller); the renderer inflates the drawn quad to contain the falloff.
+    pub blur: f32,
     /// Scissor region in screen pixels; `None` means no clipping.
     pub clip_rect: Option<Rect>,
 }
@@ -1047,11 +1066,6 @@ impl Renderer {
             let base = vertices.len() as u16;
             let index_start = indices.len() as u32;
 
-            let x0 = (rect.x / w) * 2.0 - 1.0;
-            let y0 = 1.0 - (rect.y / h) * 2.0;
-            let x1 = ((rect.x + rect.width) / w) * 2.0 - 1.0;
-            let y1 = 1.0 - ((rect.y + rect.height) / h) * 2.0;
-
             let c = rect.color.to_array();
             let hw = rect.width * 0.5;
             let hh = rect.height * 0.5;
@@ -1062,39 +1076,60 @@ impl Renderer {
             // Clamp the stroke to the half-extent; a wider request just
             // fills the rect (the inner edge collapses past center).
             let bw = rect.border_width.max(0.0).min(hw.min(hh));
+            let blur = rect.blur.max(0.0);
             let half = [hw, hh];
+
+            // Shadows inflate the drawn quad by `blur` on every side so the
+            // soft falloff (which reaches zero at `blur` px outside the box
+            // edge in the shader) isn't clipped by the geometry. For crisp
+            // rects `blur == 0`, so the quad and `local_pos` are unchanged —
+            // bit-exact with the pre-shadow path.
+            let m = blur;
+            let x0 = ((rect.x - m) / w) * 2.0 - 1.0;
+            let y0 = 1.0 - ((rect.y - m) / h) * 2.0;
+            let x1 = ((rect.x + rect.width + m) / w) * 2.0 - 1.0;
+            let y1 = 1.0 - ((rect.y + rect.height + m) / h) * 2.0;
+            // `local_pos` is measured from the box center, so the inflated
+            // corners extend past `half_size` by the same margin; the SDF
+            // still evaluates distance to the un-inflated box.
+            let lw = hw + m;
+            let lh = hh + m;
 
             vertices.push(Vertex {
                 position: [x0, y0],
                 color: c,
-                local_pos: [-hw, -hh],
+                local_pos: [-lw, -lh],
                 half_size: half,
                 radius: r,
                 border_width: bw,
+                blur,
             });
             vertices.push(Vertex {
                 position: [x1, y0],
                 color: c,
-                local_pos: [hw, -hh],
+                local_pos: [lw, -lh],
                 half_size: half,
                 radius: r,
                 border_width: bw,
+                blur,
             });
             vertices.push(Vertex {
                 position: [x1, y1],
                 color: c,
-                local_pos: [hw, hh],
+                local_pos: [lw, lh],
                 half_size: half,
                 radius: r,
                 border_width: bw,
+                blur,
             });
             vertices.push(Vertex {
                 position: [x0, y1],
                 color: c,
-                local_pos: [-hw, hh],
+                local_pos: [-lw, lh],
                 half_size: half,
                 radius: r,
                 border_width: bw,
+                blur,
             });
 
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -1332,6 +1367,7 @@ struct VertexInput {
     @location(3) half_size: vec2<f32>,
     @location(4) radius: f32,
     @location(5) border_width: f32,
+    @location(6) blur: f32,
 };
 
 struct VertexOutput {
@@ -1341,6 +1377,7 @@ struct VertexOutput {
     @location(2) @interpolate(flat) half_size: vec2<f32>,
     @location(3) @interpolate(flat) radius: f32,
     @location(4) @interpolate(flat) border_width: f32,
+    @location(5) @interpolate(flat) blur: f32,
 };
 
 @vertex
@@ -1352,6 +1389,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.half_size = in.half_size;
     out.radius = in.radius;
     out.border_width = in.border_width;
+    out.blur = in.blur;
     return out;
 }
 
@@ -1375,6 +1413,16 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Soft drop shadow: a blurred silhouette of the (optionally rounded)
+    // box. The quad was inflated by `blur` on the CPU so the falloff has
+    // room. Full opacity for fragments inside/on the box edge, fading to
+    // zero over `blur` px outside — the halo the card casts onto whatever
+    // sits behind it. Takes priority over the fill/border paths.
+    if (in.blur > 0.0) {
+        let sd = sdf_rounded_rect(in.local_pos, in.half_size, in.radius);
+        let a = 1.0 - smoothstep(0.0, in.blur, sd);
+        return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a * a);
+    }
     // Fast path: an axis-aligned solid fill needs neither the SDF nor a
     // stroke band. A sharp-cornered *border* (radius 0, border > 0) still
     // takes the SDF path below so its outline gets antialiased edges.

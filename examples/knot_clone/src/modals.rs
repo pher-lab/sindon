@@ -12,11 +12,12 @@
 //! probe.
 //!
 //! Gaps this slice surfaces (logged in `docs/knot-ui-repro-gaps.md`):
-//!   - **G18 (new)** no drop-shadow / elevation primitive. Every modal is
-//!     `shadow-xl`, which is what lifts the card off the scrim; shroud has no
-//!     shadow at all, so the cards sit flat. There is also no viewport-relative
-//!     sizing (`max-h-[80vh]`): the Restore card hardcodes `max_height(576)`
-//!     (80% of the 720px window) instead.
+//!   - **G18 (shadow half graduated → FW-18)** the `shadow-xl` on every modal
+//!     is now [`Container::elevation`]`(4)` (see [`card_column`]) — the cards
+//!     lift off the scrim instead of sitting flat. The *viewport-relative*
+//!     half remains open: there is still no `vh`/`vw` sizing, so the Restore
+//!     card hardcodes `max_height(576)` (80% of the 720px window) for
+//!     `max-h-[80vh]`.
 //!   - **G4** asymmetric padding — modal sections are `px-6 py-4`, fields
 //!     `px-3 py-2` / `px-2 py-1`; `Container::padding` is uniform, so these are
 //!     approximated (the inputs themselves do get `padding_x/y` from FW-17).
@@ -51,8 +52,8 @@ use crate::tokens;
 /// sub-state (a centered green check) is a state the static clone can't reach.
 pub fn open_change_password(ctx: &mut EventContext) {
     // `bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-sm mx-4` with
-    // an inner `p-6`; the `shadow-xl` has no counterpart (G18). `space-y-4`
-    // between the title and the fields is a uniform `gap(16)`.
+    // an inner `p-6`; the `shadow-xl` is `card_column`'s `elevation(4)` (G18).
+    // `space-y-4` between the title and the fields is a uniform `gap(16)`.
     let card = card_column(384.0).padding(24.0).gap(16.0);
     ctx.push_layer(LayerOptions::modal(), card, |tree, root| {
         title(tree, root, "Change Master Password");
@@ -193,9 +194,9 @@ pub fn open_backup_settings(ctx: &mut EventContext) {
 /// `grow` [`ScrollView`] in the middle actually clip and scroll while the
 /// header/footer stay pinned? Enough dummy rows are emitted to overflow.
 pub fn open_restore_backup(ctx: &mut EventContext) {
-    // `max-h-[80vh]` → no viewport-relative sizing (G18); hardcode 80% of the
-    // known 720px window. No inner padding on the card: each section owns its
-    // own `px-6`.
+    // `max-h-[80vh]` → still no viewport-relative sizing (G18 vh/vw half);
+    // hardcode 80% of the known 720px window. No inner padding on the card:
+    // each section owns its own `px-6`.
     let card = card_column(448.0).max_height(576.0);
     ctx.push_layer(LayerOptions::modal(), card, |tree, root| {
         // Sticky header (`px-6 py-4 border-b`).
@@ -439,14 +440,17 @@ fn strength_meter(tree: &mut WidgetTree, parent: usize) {
 
 // --- Shared chrome -----------------------------------------------------------
 
-/// The modal card shell: `bg-white dark:bg-gray-800 rounded-lg` at a fixed
-/// width (the `w-full max-w-*` never hits `w-full` at the clone's window size,
-/// so the max-width *is* the width). The `shadow-xl` has no primitive (G18).
+/// The modal card shell: `bg-white dark:bg-gray-800 rounded-lg shadow-xl` at a
+/// fixed width (the `w-full max-w-*` never hits `w-full` at the clone's window
+/// size, so the max-width *is* the width). `shadow-xl` graduated to
+/// [`Container::elevation`] (FW-18 / G18) — level 4 is the modal tier, which
+/// lifts the card off the flat scrim.
 fn card_column(width: f32) -> Container {
     Container::column()
         .width(width)
         .background(card_bg())
         .radius(8.0)
+        .elevation(4)
 }
 
 /// A modal title: `text-lg font-semibold` (`mb-4` folded into the card gap).

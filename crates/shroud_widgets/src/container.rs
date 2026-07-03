@@ -52,6 +52,21 @@ fn side_border(width: f32, color: impl Into<Reactive<Color>>) -> Option<SideBord
     }
 }
 
+/// A drop shadow cast behind a container's box (CSS `box-shadow`).
+///
+/// Set via [`Container::shadow`]. The offset shifts the shadow relative to the
+/// box, `blur` softens its edge, and `spread` grows (positive) or shrinks
+/// (negative) the silhouette before blurring — the same four numbers as a CSS
+/// `box-shadow`. The color is [`Reactive`] so a shadow can deepen on a dark
+/// theme, though the common case is a static translucent black.
+struct BoxShadow {
+    offset_x: f32,
+    offset_y: f32,
+    blur: f32,
+    spread: f32,
+    color: Reactive<Color>,
+}
+
 /// A flexbox container widget.
 ///
 /// Containers can have a background color and arrange their children
@@ -100,6 +115,10 @@ pub struct Container {
     border_right: Option<SideBorder>,
     border_bottom: Option<SideBorder>,
     border_left: Option<SideBorder>,
+    /// Optional drop shadow, painted behind the background fill. `None` (the
+    /// default) casts no shadow. Set via [`Container::shadow`] — the modal /
+    /// card `shadow-xl` elevation the flat scrim couldn't convey.
+    shadow: Option<BoxShadow>,
     visible: Reactive<bool>,
     /// Optional right-click handler. When set, `MouseDown { button: Right }`
     /// inside the container's layout rect invokes the handler with the
@@ -154,6 +173,7 @@ impl Container {
             border_right: None,
             border_bottom: None,
             border_left: None,
+            shadow: None,
             visible: Reactive::Static(true),
             on_context_menu: None,
             on_press: None,
@@ -183,6 +203,7 @@ impl Container {
             border_right: None,
             border_bottom: None,
             border_left: None,
+            shadow: None,
             visible: Reactive::Static(true),
             on_context_menu: None,
             on_press: None,
@@ -311,6 +332,66 @@ impl Container {
     pub fn border_left(mut self, width: f32, color: impl Into<Reactive<Color>>) -> Self {
         self.border_left = side_border(width, color);
         self
+    }
+
+    /// Cast a drop shadow behind the container (CSS `box-shadow`).
+    ///
+    /// The four numbers mirror CSS: `offset_x` / `offset_y` shift the shadow
+    /// (positive `offset_y` drops it below the box), `blur` softens the edge
+    /// over that many pixels, and `spread` grows (positive) or shrinks
+    /// (negative) the silhouette before blurring. The shadow rounds with the
+    /// container's [`radius`](Self::radius) and is painted **behind** the fill
+    /// and children, so an opaque background covers the interior and only the
+    /// blurred halo peeking past the box shows.
+    ///
+    /// This is the elevation cue a flat scrim can't give a modal or menu. A
+    /// Tailwind `shadow-xl` reads well as a single soft shadow, e.g.
+    /// `shadow(0.0, 12.0, 24.0, -4.0, Color::rgba(0.0, 0.0, 0.0, 0.18))`;
+    /// prefer [`elevation`](Self::elevation) for the tuned presets. The color
+    /// is [`Reactive`], re-read every paint like [`background`](Self::background).
+    pub fn shadow(
+        mut self,
+        offset_x: f32,
+        offset_y: f32,
+        blur: f32,
+        spread: f32,
+        color: impl Into<Reactive<Color>>,
+    ) -> Self {
+        self.shadow = Some(BoxShadow {
+            offset_x,
+            offset_y,
+            blur,
+            spread,
+            color: color.into(),
+        });
+        self
+    }
+
+    /// Cast a preset drop shadow for a `level` of elevation (1–4), the
+    /// ergonomic form of [`shadow`](Self::shadow) for the common Material /
+    /// Tailwind card tiers. Higher levels sit "further" off the surface with a
+    /// larger, softer, more offset shadow:
+    ///
+    /// - `1` — resting card (`shadow-sm`/`shadow`): subtle.
+    /// - `2` — raised card / dropdown (`shadow-md`).
+    /// - `3` — popover / menu (`shadow-lg`).
+    /// - `4` — modal dialog (`shadow-xl`): the deepest.
+    ///
+    /// Levels clamp to `1..=4`; `0` or less casts no shadow. All presets use a
+    /// translucent black tuned to read on both light and dark surfaces.
+    pub fn elevation(self, level: u8) -> Self {
+        // (offset_y, blur, spread, alpha) per tier — offset_x stays 0 (shadows
+        // fall straight down, as in Material / Tailwind). Blur/offset grow with
+        // the tier; the slight negative spread keeps the halo from splaying too
+        // wide at the sides, matching Tailwind's `shadow-lg`/`xl`.
+        let (dy, blur, spread, alpha) = match level {
+            0 => return self,
+            1 => (1.0, 3.0, 0.0, 0.12),
+            2 => (4.0, 8.0, -1.0, 0.14),
+            3 => (8.0, 16.0, -2.0, 0.16),
+            _ => (12.0, 24.0, -4.0, 0.18),
+        };
+        self.shadow(0.0, dy, blur, spread, Color::rgba(0.0, 0.0, 0.0, alpha))
     }
 
     /// Set padding on all sides.
@@ -589,6 +670,30 @@ impl Widget for Container {
     }
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
+        // Drop shadow first, so it sits behind the fill and children. The
+        // caster box is the layout rect offset by (offset_x, offset_y) and
+        // inflated by `spread`; its radius grows with the spread so a rounded
+        // card keeps a concentric rounded halo.
+        if let Some(sh) = &self.shadow {
+            let color = sh.color.get();
+            if color.a > 0.0 && sh.blur > 0.0 {
+                let x = layout.origin.x + sh.offset_x - sh.spread;
+                let y = layout.origin.y + sh.offset_y - sh.spread;
+                let w = layout.size.width + 2.0 * sh.spread;
+                let h = layout.size.height + 2.0 * sh.spread;
+                // A large negative spread can shrink the box away entirely —
+                // nothing to cast then.
+                if w > 0.0 && h > 0.0 {
+                    let radius = if self.radius > 0.0 {
+                        (self.radius + sh.spread).max(0.0)
+                    } else {
+                        0.0
+                    };
+                    ctx.fill_shadow(Rect::new(x, y, w, h), color, radius, sh.blur);
+                }
+            }
+        }
+
         if self.hoverable {
             let hover = self
                 .hover_bg

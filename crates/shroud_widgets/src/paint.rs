@@ -224,7 +224,7 @@ impl PaintContext {
     /// downstream to half of the smaller side, so callers don't need to
     /// validate against the rect's dimensions.
     pub fn fill_rect_rounded(&mut self, rect: Rect, color: Color, radius: f32) {
-        self.push_rect(rect, color, radius, 0.0);
+        self.push_rect(rect, color, radius, 0.0, 0.0);
     }
 
     /// Draw a `border_width`-thick outline along the inside of `rect`'s
@@ -242,10 +242,33 @@ impl PaintContext {
         radius: f32,
         border_width: f32,
     ) {
-        self.push_rect(rect, color, radius, border_width);
+        self.push_rect(rect, color, radius, border_width, 0.0);
     }
 
-    fn push_rect(&mut self, rect: Rect, color: Color, radius: f32, border_width: f32) {
+    /// Draw a soft drop shadow: a blurred silhouette of `rect` (with corner
+    /// `radius`) that fades from full opacity at the box edge to zero `blur`
+    /// px outside.
+    ///
+    /// `rect` is the **casting box** — the caller has already applied any
+    /// shadow offset and spread (see [`Container::shadow`](crate::Container::shadow),
+    /// which folds `offset_x/offset_y` and `spread` into the rect before
+    /// calling this). The interior paints at full `color` alpha, so a widget
+    /// drawing an opaque background on top covers it and only the blurred
+    /// halo peeking past the box shows — exactly a CSS `box-shadow`.
+    ///
+    /// `blur <= 0.0` is a no-op: a shadow with no blur is just a rect, and
+    /// silently emitting a solid fill here would surprise callers. The active
+    /// offset and clip stacks are applied like every other draw call, so a
+    /// shadow inside a translated layer or a `ScrollView` lands and clips with
+    /// its owner.
+    pub fn fill_shadow(&mut self, rect: Rect, color: Color, radius: f32, blur: f32) {
+        if blur <= 0.0 {
+            return;
+        }
+        self.push_rect(rect, color, radius, 0.0, blur);
+    }
+
+    fn push_rect(&mut self, rect: Rect, color: Color, radius: f32, border_width: f32, blur: f32) {
         let (ox, oy) = self.current_offset();
         self.rects.push(DrawRect {
             x: rect.origin.x + ox,
@@ -255,6 +278,7 @@ impl PaintContext {
             color,
             radius,
             border_width,
+            blur,
             clip_rect: self.current_clip(),
         });
     }
@@ -621,6 +645,41 @@ mod tests {
         ctx.push_rotation(1.0, Point::new(5.0, 5.0));
         ctx.clear();
         assert_eq!(ctx.current_rotation(), None);
+    }
+
+    #[test]
+    fn fill_shadow_records_blur_and_folds_offset() {
+        // A shadow emitted inside a translated context (a centered modal
+        // layer) must land in the same absolute space as the card it backs —
+        // the active offset is folded in just like fill_rect. blur is carried
+        // through so the renderer inflates + softens the quad.
+        let mut ctx = PaintContext::default();
+        ctx.push_offset(100.0, 50.0);
+        ctx.fill_shadow(Rect::new(10.0, 20.0, 200.0, 80.0), Color::BLACK, 12.0, 24.0);
+        ctx.pop_offset();
+        let r = ctx.rects.last().expect("shadow rect emitted");
+        assert_eq!((r.x, r.y), (110.0, 70.0));
+        assert_eq!(r.blur, 24.0);
+        assert_eq!(r.radius, 12.0);
+        assert_eq!(r.border_width, 0.0);
+    }
+
+    #[test]
+    fn fill_shadow_is_a_noop_without_blur() {
+        // A "shadow" with no blur is just a rect; emitting a solid fill from
+        // fill_shadow would surprise callers, so it draws nothing.
+        let mut ctx = PaintContext::default();
+        ctx.fill_shadow(Rect::new(0.0, 0.0, 10.0, 10.0), Color::BLACK, 4.0, 0.0);
+        assert!(ctx.rects.is_empty(), "blur <= 0 must not emit a rect");
+    }
+
+    #[test]
+    fn fill_rect_leaves_blur_zero() {
+        // The crisp fill path must keep blur at 0 so the renderer's fast path
+        // (and the pre-shadow geometry) is bit-for-bit unchanged.
+        let mut ctx = PaintContext::default();
+        ctx.fill_rect(Rect::new(0.0, 0.0, 10.0, 10.0), Color::WHITE);
+        assert_eq!(ctx.rects.last().unwrap().blur, 0.0);
     }
 
     #[test]

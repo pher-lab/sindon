@@ -80,7 +80,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - **Input/SecureInput**: `padding_x`/`padding_y`（FW-17）で軸別に指定可になった（`px-4 py-3` 等）。
 - **Container**: `Container::padding(px)` は依然一律のみ。内部には `FlexStyle::padding_trbl` が
   あるが公開 builder 無し。clone は各セクション（`px-6 py-4` 等）を uniform `padding` で近似のまま。
-  候補=`Container::padding_xy(x, y)` / 各辺 padding の公開（FW-18 系）。
+  候補=`Container::padding_xy(x, y)` / 各辺 padding の公開（FW-19 系。FW-18 は G18 shadow で消化済）。
 
 ### G5. absolute / コーナー配置のプリミティブがない — **中（slice 3 で検証完了 = 部分的に Layer で代替可）**
 - Unlock 右上の言語 select は `absolute top-4 right-4`。通常フローの外に置く手段が
@@ -283,18 +283,21 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   回帰テスト2本（4辺 border / 片側 border が full-bleed 子の rect の**後**に emit される）。
 - **G13 二重ガンマ・G14 layer anchor に続く「repro でしか炙れない framework 実バグ」第3号**。
 
-### G18. drop-shadow / elevation プリミティブが無い（+ viewport 相対サイズ無し）→ **新規（slice 4 で発見・要判断）**
+### G18. drop-shadow / elevation プリミティブが無い（+ viewport 相対サイズ無し）→ **shadow 半分は FW-18 で解消（2026-07-03, 実機 OK）／ vh/vw 半分は残置**
 - 正解のモーダルは全て `shadow-xl`。scrim（`bg-black/50`）の上にカードを**浮かせる**のはこの影で、
   影が無いとカードが scrim に**べた張り**して立体感が消える（特にダーク背景で境界が溶ける）。
 - shroud には shadow/elevation プリミティブが**一切無い**（`DrawRect` は fill + radius + border のみ、
-  render にも box-shadow 相当なし）。∴ 4モーダルとも影なしのフラットなカードで再現。
-- 併発: **viewport 相対サイズ（`vh`/`vw`）も無い**。Restore モーダルは `max-h-[80vh]`。shroud の
-  `max_height` は px 固定なので、既知の 720px ウィンドウ前提で `max_height(576)`（=80%）をハードコード。
-  ウィンドウリサイズに追従しない。
-- 候補対応: (a) `Container::shadow(offset, blur, color)` ないし `Theme::Elevation` レベル + SDF 影シェーダ
-  （rect の外周にぼかしを足す。radius 対応の SDF 基盤は FW-14/15 で既にある）。(b) `max_height_vh` /
-  viewport 相対長さの導入（layout に viewport サイズを渡す口が要る）。いずれも中規模。**影は「モーダルが
-  本物に見えるか」の質感差として最大。** FW-18 系の寸法公開とは別軸の新規 framework 機能。
+  render にも box-shadow 相当なし）だった。∴ 発見時は 4モーダルとも影なしのフラットなカードで再現。
+- **→ 解消（FW-18 shadow）**: 既存の角丸 SDF rect パイプラインに `DrawRect.blur` を1本足し、`blur>0` で
+  クアッドを blur 分膨らませて `1 - smoothstep(0, blur, sdf)` でフェード（新パイプライン不要・`blur==0` は
+  従来ビット等価）。`PaintContext::fill_shadow` → `Container::shadow(dx, dy, blur, spread, color)`（CSS
+  `box-shadow` 準拠。背景の**背後**に描画＝はみ出た halo だけ見える）+ `Container::elevation(1..=4)` preset。
+  clone は `card_column` の `elevation(4)`（=shadow-xl）で全モーダルに配線。**light/dark 両方でカードが
+  scrim から浮くのを実機確認（2026-07-03）**。
+- **残置: viewport 相対サイズ（`vh`/`vw`）** — G18 のもう半分は layout 側の別作業なので今回スコープ外。
+  Restore モーダルは `max-h-[80vh]` → shroud の `max_height` は px 固定なので、既知の 720px ウィンドウ前提で
+  `max_height(576)`（=80%）をハードコードのまま。ウィンドウリサイズに追従しない（`max_height_vh` /
+  viewport 相対長さの導入 = layout に viewport サイズを渡す口が要る、中規模）は将来候補。
 
 ### G19. layer 内の clip がオフセット未適用 → **framework 実バグ第4号 → 解消（2026-07-03 landed）**
 - 症状（実機、slice 4）: Restore モーダル（唯一 ScrollView を持つモーダル）で、**バックアップ行の中身が
@@ -332,7 +335,7 @@ overlay の slice 3（`popover` プリセット）に対し、これは **`modal
   overflow-y-auto`）が、`max_height` 付き column + 中央の `grow` ScrollView + 上下 `border` セクションで
   成立。スクロール自体（固定ヘッダ/フッタ + 中央だけスクロール + バー）は実機一発 OK。
   **但し中身が壊れた → G19（framework 実バグ第4号）を発見・修正**（下記）。
-- **✗ shadow が無い → G18**（上記、最大の質感差）。
+- **✗→✓ shadow が無い → G18**（最大の質感差）→ **FW-18 で解消**（`Container::elevation(4)`、上記）。
 - **踏んだ既知 gap**: G4（`px-6 py-4` 等の非対称 padding は uniform 近似）、G6（footer の `py-2` 高さ・
   `disabled:` スタイル不可、幅は `grow` で代替）、G12（`Input`/`SecureInput`/`Checkbox` の色が静的
   `Color` で theme 非追従 → 既定 chrome に委ね white/gray-800 の微差を許容）、**grid**（`grid-cols-2` は
@@ -417,15 +420,15 @@ Unlock / Setup / Recovery / Loading / Main（Sidebar・Editor・Overlays・Modal
 それぞれ実機 OK。この演習（密な実画面 + ユーザの目）でしか炙れなかった **framework 実バグ4件**を発見・
 修正した（**G13 二重ガンマ** [[fix-srgb-double-encode]] / **G14 layer 内 AnchorRect ズレ** / **G17
 full-bleed 子が border を上書き** / **G19 push_clip の layer offset 未畳み込み** [[fix-push-clip-layer-offset]]）。
-表現力 gap は **FW-15（border 系 G1/G2/G9）/ FW-16（整列 G11 + 片側 border G10）/ FW-17（入力寸法 G3）**
-として graduate 済み。
+表現力 gap は **FW-15（border 系 G1/G2/G9）/ FW-16（整列 G11 + 片側 border G10）/ FW-17（入力寸法 G3）/
+FW-18（drop-shadow G18 の shadow 半分）** として graduate 済み。
 
-**未解決で FW-18 系に持ち越す gap**（画面写経で出揃った）:
+**未解決で FW-19 系に持ち越す gap**（画面写経で出揃った・演習後に FW-18 で G18 shadow を消化）:
 - **G6** Button の padding/高さ/固定幅(min_width)/disabled スタイル非公開
 - **G12** Input/SecureInput の font-weight 無し（+ chrome setter が非 Reactive）
 - **G16** Dropdown 寸法/角丸・MenuItem ラベル左寄せ
 - **G4（Container 側）** 非対称 padding（`padding_xy`/各辺）の公開 builder 無し
-- **G18** drop-shadow / elevation プリミティブ無し（+ viewport 相対サイズ vh/vw 無し）← モーダルの質感に最大
+- **G18 の残り半分** viewport 相対サイズ vh/vw 無し（shadow/elevation は **FW-18 で解消済**）
 - **G3 系の残り** 固定ピクセル高の multiline viewport 無し（slice 6 で追記）
 - **G5** absolute/固定エッジ anchor（`LayerAnchor` の absolute 変種）、右寄せ placement、click 時の
   trigger rect 取得 — Layer で部分代替可だが3点 open
