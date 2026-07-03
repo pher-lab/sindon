@@ -184,3 +184,94 @@ fn space_on_focused_trigger_opens_popover() {
     dispatch(&mut tree, WidgetEvent::CharInput { ch: ' ' });
     assert_eq!(tree.layer_count(), 1, "Space opens popover");
 }
+
+// ── G16: trigger box metrics (padding_x / padding_y / min_height) ──────────
+
+/// Lay out a single configured dropdown and return its border-box height plus
+/// the default body font size.
+fn trigger_height(build: impl FnOnce(Signal<usize>) -> Dropdown) -> (f32, f32) {
+    let selected = Signal::new(0_usize);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0).padding(20.0));
+    let dd = tree.add_child(root, build(selected));
+    measured_layout(&mut tree, 400.0, 300.0);
+    let font = Theme::default().typography.body.font_size;
+    (tree.layout_rect(dd).size.height, font)
+}
+
+#[test]
+fn default_trigger_height_is_one_line_plus_padding_not_doubled() {
+    // Border box = ceil(line_height) + 2 * padding_y(8). Crucially NOT the old
+    // doubled `font + 32`: `measure` used to bake the padding into the content
+    // height so Taffy added it a second time (the "Dropdown too big" gap).
+    let (h, font) = trigger_height(|sig| Dropdown::new(vec!["A".into(), "B".into()], sig));
+    let expected = (font * 1.2).ceil() + 16.0;
+    assert!(
+        (h - expected).abs() < 1.0,
+        "default trigger height {h}, expected ~{expected}"
+    );
+    assert!(
+        h < font + 32.0,
+        "height {h} should be below the old doubled font+32 ({})",
+        font + 32.0
+    );
+}
+
+#[test]
+fn padding_y_controls_trigger_height() {
+    let (tall, _) = trigger_height(|sig| Dropdown::new(vec!["A".into()], sig).padding_y(12.0));
+    let (short, font) = trigger_height(|sig| Dropdown::new(vec!["A".into()], sig).padding_y(2.0));
+    assert!(
+        tall > short,
+        "more vertical padding → taller trigger ({tall} vs {short})"
+    );
+    let expected_short = (font * 1.2).ceil() + 4.0; // + 2 * padding_y(2)
+    assert!(
+        (short - expected_short).abs() < 1.0,
+        "short trigger height {short}, expected ~{expected_short}"
+    );
+}
+
+#[test]
+fn min_height_floors_the_trigger_border_box() {
+    // `min_height` is a border-box floor: even with tiny padding the trigger is
+    // at least 60px tall.
+    let (h, _) = trigger_height(|sig| {
+        Dropdown::new(vec!["A".into()], sig)
+            .padding_y(2.0)
+            .min_height(60.0)
+    });
+    assert!(
+        (h - 60.0).abs() < 1.0,
+        "min_height(60) should floor the border box to 60, got {h}"
+    );
+}
+
+#[test]
+fn trigger_border_is_a_single_rounded_stroke() {
+    // The trigger border is one rounded SDF stroke (border_width > 0 at the
+    // trigger radius), not four sharp hairline fills that square off corners.
+    let selected = Signal::new(0_usize);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0).padding(20.0));
+    let _dd = tree.add_child(
+        root,
+        Dropdown::new(vec!["A".into(), "B".into()], selected).radius(6.0),
+    );
+    measured_layout(&mut tree, 400.0, 300.0);
+
+    let mut ctx = shroud_widgets::paint::PaintContext::default();
+    tree.paint(&mut ctx);
+    let strokes: Vec<_> = ctx.rects.iter().filter(|r| r.border_width > 0.0).collect();
+    assert_eq!(
+        strokes.len(),
+        1,
+        "trigger should emit exactly one stroked border rect, got {}",
+        strokes.len()
+    );
+    assert!(
+        (strokes[0].radius - 6.0).abs() < 0.01,
+        "border stroke should follow the trigger radius (6.0), got {}",
+        strokes[0].radius
+    );
+}

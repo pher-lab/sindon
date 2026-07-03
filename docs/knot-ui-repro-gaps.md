@@ -255,22 +255,26 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   設計（`layer.rs:96-104`、非 interactive は `MouseLeave` を食わない）の「interactive 版の取りこぼし」に
   当たる。影響範囲は「クリックで開く menu/dropdown」trigger 全般。
 
-### G16. 設定パネルの仕上がり差（Dropdown 寸法/角・MenuItem ラベル左寄せ）— **小（polish・要判断）**
+### G16. 設定パネルの仕上がり差（Dropdown 寸法/角・MenuItem ラベル左寄せ）→ **解消（FW-20、2026-07-04 landed）**
 - slice 3 で設定 dropdown を実機確認したユーザ指摘の「惜しい」点。いずれも忠実再現を妨げないが質感差。
-  - **Dropdown が React の `<select>` より大きい**: `Dropdown` は `style` で `padding_trbl(8,12,8,12)` +
-    `measure` で高さ `font+16` を持つ（`dropdown.rs:220/258`）→ ≈46px。React は `px-2 py-1 text-sm`
-    ≈28px。padding/高さの builder が無く詰められない（G3/G6 の「寸法非公開」が **Dropdown にも及ぶ**）。
-  - **Dropdown の角が四角い**: トリガ枠を `stroke_rect_rounded` ではなく 4 本の sharp な `fill_rect`
-    で描く（`dropdown.rs:294-309`、コメントも "sharp corners are fine"）。fill は `radius` 角丸でも
-    枠は直角 → FW-15 で角丸化した `Input`/`SecureInput` と非対称。`Dropdown` 枠も radius 追従にしたい。
-  - **MenuItem のラベルがボックス左端に張り付く**: `menu_item.rs:129` がテキストを `layout.origin.x`
-    （= ボックス左端）に描く。宣言した `padding_trbl(_,12,_,12)` は箱を広げるだけで**ラベルを inset
-    しない**ので、行は左端に寄る。設定パネルの「Backup Settings / Change Master Password」が、上の
-    select 行ラベル（コンテナ padding 8px ぶん inset）より左に出て不揃いに見えるのはこれ。React は
-    全行 `px-3` で揃う。修正案: MenuItem paint で left-padding ぶん inset、または clone 側でパネルに
-    水平 padding を与え行を揃える。
-- いずれも FW-17 系（寸法公開）の候補に合流可（FW-16 は整列+片側 border のみに絞った）。
-  clone は当面そのまま（動作は正しい）。
+  - **Dropdown が React の `<select>` より大きい** → **解消**: 真因は寸法非公開に加え、`measure` が
+    content 高を `font+16` で返し **taffy がさらに vertical padding（2×8）を足す二重計上**で border box
+    が `font+32`（≈48px）に膨れていたこと（React `px-2 py-1 text-sm` は ≈28px）。`Dropdown` に
+    `padding_x`/`padding_y`/`min_height` builder を Input/Button と対称に公開し、measure の高さを
+    **content = 1 行（`line_height`）／ 箱高 = `line_height + 2*padding_y`** に是正（doubling 解消）。
+    `min_height` は border-box floor（padding を引いて content floor に変換）。既定 `padding_x=12`/
+    `padding_y=8` で default も ≈`font+16` に締まる（旧 `font+32` から縮小。消費者は clone のみ）。
+  - **Dropdown の角が四角い** → **解消**: トリガ枠を 4 本の sharp な `fill_rect` →
+    `stroke_rect_rounded` 1 本に置換し `radius` 追従（FW-15 で角丸化した `Input`/`SecureInput` と対称）。
+    `DropdownPopover` の枠も同様に丸めた。
+  - **MenuItem のラベルがボックス左端に張り付く** → **解消**: `paint` が `text_x = layout.origin.x`
+    で描き、宣言済み `padding_trbl(_,12,_,12)` の左 inset を無視していた。padding を `H_PADDING`/
+    `V_PADDING` 定数に切り出して `style` と `paint` で共有し、`text_x = origin.x + H_PADDING`・shape 幅も
+    `width - 2*H_PADDING` に。context menu / actions / 設定パネルのラベルが `px-3` 相当で inset される。
+- **clone 配線**: `select()` に `padding_x(8).padding_y(4)`（`px-2 py-1`）で ≈25px に締め、設定行
+  （`settings_select_row`/`settings_sort_row`）を `padding_xy(12, 8)` にして MenuItem の 12px inset と
+  横位置を揃えた。テスト: dropdown_tests +4 / context_menu_tests +1。gate 全緑。**実機は
+  knot_clone.exe が前セッションのインスタンスにロックされ再ビルド不可 → ユーザが閉じてから確認予定。**
 
 ### G17. Container の border が full-bleed な子背景に上書きされる → **framework 実バグ → 解消（FW-16、2026-07-02 landed）**
 - 症状（実機、ユーザ指摘）: サイドバーに `border_right`（G10）を付けたのに**右端の線が見えない**。
@@ -434,7 +438,7 @@ FW-18（drop-shadow G18 の shadow 半分）** として graduate 済み。
 - **G4（Container 側）** 非対称 padding（`padding_xy`/`padding_trbl`）→ **解消（FW-19）**
 
 **なお未解決で持ち越す gap**:
-- **G16** Dropdown 寸法/角丸・MenuItem ラベル左寄せ（polish）
+- ~~**G16** Dropdown 寸法/角丸・MenuItem ラベル左寄せ（polish）~~ → **解消（FW-20、2026-07-04）**
 - **G18 の残り半分** viewport 相対サイズ vh/vw 無し（shadow/elevation は **FW-18 で解消済**）
 - **G3 系の残り** 固定ピクセル高の multiline viewport 無し（slice 6 で追記）
 - **G5** absolute/固定エッジ anchor（`LayerAnchor` の absolute 変種）、右寄せ placement、click 時の

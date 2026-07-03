@@ -64,6 +64,12 @@ pub struct Dropdown {
     border_color: Option<Reactive<Color>>,
     focus_ring_color: Option<Reactive<Color>>,
     font_size: Option<f32>,
+    // Trigger box metrics. `padding_*` are the inner insets on each axis
+    // (Tailwind `px-*`/`py-*`); `min_height` is an explicit border-box floor
+    // that overrides the one-line default. See `measure`.
+    padding_x: f32,
+    padding_y: f32,
+    min_height: Option<f32>,
     visible: Reactive<bool>,
 }
 
@@ -86,6 +92,9 @@ impl Dropdown {
             border_color: None,
             focus_ring_color: None,
             font_size: None,
+            padding_x: 12.0,
+            padding_y: 8.0,
+            min_height: None,
             visible: Reactive::Static(true),
         }
     }
@@ -130,6 +139,29 @@ impl Dropdown {
     /// Round the trigger's corners. Negative values clamp to `0.0`.
     pub fn radius(mut self, px: f32) -> Self {
         self.radius = px.max(0.0);
+        self
+    }
+
+    /// Horizontal inset (Tailwind `px-*`) between the trigger edge and its
+    /// label / chevron. Defaults to `12.0`. Negative values clamp to `0.0`.
+    pub fn padding_x(mut self, px: f32) -> Self {
+        self.padding_x = px.max(0.0);
+        self
+    }
+
+    /// Vertical inset (Tailwind `py-*`) added above and below the label.
+    /// Defaults to `8.0`; drives the trigger's border-box height together with
+    /// the line height. Negative values clamp to `0.0`.
+    pub fn padding_y(mut self, px: f32) -> Self {
+        self.padding_y = px.max(0.0);
+        self
+    }
+
+    /// Explicit border-box height floor for the trigger, overriding the
+    /// one-line default (`line_height + 2 * padding_y`). Negative values clamp
+    /// to `0.0`.
+    pub fn min_height(mut self, px: f32) -> Self {
+        self.min_height = Some(px.max(0.0));
         self
     }
 
@@ -217,7 +249,12 @@ impl Widget for Dropdown {
         // than its laid-out children and leaves dead space below the last one).
         // The trigger's minimum height lives in `measure` instead — see the
         // height floor there.
-        FlexStyle::new().padding_trbl(8.0, 12.0, 8.0, 12.0)
+        FlexStyle::new().padding_trbl(
+            self.padding_y,
+            self.padding_x,
+            self.padding_y,
+            self.padding_x,
+        )
     }
 
     fn measure(&self, available_width: Option<f32>, ctx: &mut MeasureContext) -> Option<Size> {
@@ -238,24 +275,25 @@ impl Widget for Dropdown {
                     .width
             })
             .fold(0.0_f32, f32::max);
-        // 24 = 12px left padding + 12px right gutter for the chevron; the
-        // chevron itself is ~font_size wide.
+        // Content width = widest label + gap + chevron (~font_size wide). Taffy
+        // adds the horizontal padding (`2 * padding_x`) on top to form the box.
         let needed_width = max_label_width + font_size + 8.0;
         let width = match available_width {
             Some(aw) if needed_width > aw => aw,
             _ => needed_width,
         };
-        // Trigger height. This used to be enforced by `style().min_height`, but
-        // a measured leaf must not carry a style `min_size` (Taffy then
-        // over-counts a content-hugging ancestor — the centered-card dead-space
-        // bug; see `Dropdown::style`). The old `min_height(font_size + 16)` was
-        // a border-box floor, and Taffy adds the 16px vertical padding on top of
-        // whatever `measure` returns, so this `font_size + 16` content height
-        // reproduces the same `font_size + 32` border box. It already exceeds the
-        // old border-box minimum's content equivalent (`font_size`), so the
-        // single-line minimum is preserved without an extra `.max`.
-        let min_content_height = font_size; // = old min_height (font+16) − 16 padding
-        let height = (font_size + 16.0).max(min_content_height).ceil();
+        // Trigger height. A measured leaf must not carry a style `min_size`
+        // (Taffy over-counts a content-hugging ancestor otherwise — the
+        // centered-card dead-space bug; see `Dropdown::style`), so the height
+        // floor lives here. One text line is the natural content height; Taffy
+        // adds the vertical padding (`2 * padding_y`) on top to form the border
+        // box. An explicit `min_height` is a border-box floor, so subtract the
+        // padding to compare it against this content height.
+        let content_floor = self
+            .min_height
+            .map(|h| (h - 2.0 * self.padding_y).max(0.0))
+            .unwrap_or(0.0);
+        let height = line_height.max(content_floor).ceil();
         Some(Size::new(width.ceil(), height))
     }
 
@@ -287,41 +325,26 @@ impl Widget for Dropdown {
 
         ctx.fill_rect_rounded(layout, bg, self.radius);
 
-        // 1px border on each side. Same shape as `Input::paint` — sharp
-        // corners are fine; the underlying fill carries the radius and the
-        // hairline edges over rounded corners read as a subtle stroke.
-        let b = 1.0;
-        ctx.fill_rect(
-            Rect::new(layout.origin.x, layout.origin.y, layout.size.width, b),
-            border,
-        );
-        ctx.fill_rect(
-            Rect::new(layout.origin.x, layout.bottom() - b, layout.size.width, b),
-            border,
-        );
-        ctx.fill_rect(
-            Rect::new(layout.origin.x, layout.origin.y, b, layout.size.height),
-            border,
-        );
-        ctx.fill_rect(
-            Rect::new(layout.right() - b, layout.origin.y, b, layout.size.height),
-            border,
-        );
+        // 1px border following the same rounded corners as the fill — one SDF
+        // stroke, matching `Input`/`SecureInput` (rather than four sharp
+        // hairlines that square off the corners).
+        ctx.stroke_rect_rounded(layout, border, self.radius, 1.0);
 
-        // Left-aligned label.
+        // Left-aligned label, inset by the horizontal padding; the chevron sits
+        // padding-inset on the right, with an 8px gutter before the label.
         let label = self.current_label();
         let chevron = "\u{25BE}"; // ▾
         let chevron_shaped = ctx
             .text_engine
             .shape_text(chevron, font_size, font_size * 1.2, None);
         let chevron_w = chevron_shaped.width;
-        let right_gutter = chevron_w + 16.0;
+        let text_x = layout.origin.x + self.padding_x;
+        let chev_x = layout.right() - self.padding_x - chevron_w;
         if !label.is_empty() {
-            let max_label_w = (layout.size.width - 12.0 - right_gutter).max(0.0);
+            let max_label_w = (chev_x - 8.0 - text_x).max(0.0);
             let shaped =
                 ctx.text_engine
                     .shape_text(&label, font_size, font_size * 1.2, Some(max_label_w));
-            let text_x = layout.origin.x + 12.0;
             let text_y = layout.origin.y + (layout.size.height - shaped.height) / 2.0;
             for glyph in &shaped.glyphs {
                 if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
@@ -338,7 +361,6 @@ impl Widget for Dropdown {
 
         // Chevron on the right. Color matches the label; muted variants can
         // be wired in once Theme has a chevron token.
-        let chev_x = layout.origin.x + layout.size.width - 12.0 - chevron_w;
         let chev_y = layout.origin.y + (layout.size.height - chevron_shaped.height) / 2.0;
         for glyph in &chevron_shaped.glyphs {
             if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
@@ -440,26 +462,10 @@ impl Widget for DropdownPopover {
             self.background
         };
         ctx.fill_rect_rounded(layout, bg, self.radius);
-        // Subtle 1px border so the popover separates from the surface
-        // it overlaps.
+        // Subtle 1px border so the popover separates from the surface it
+        // overlaps — one rounded SDF stroke, matching the trigger.
         let border = ctx.theme.colors.input_border;
-        let b = 1.0;
-        ctx.fill_rect(
-            Rect::new(layout.origin.x, layout.origin.y, layout.size.width, b),
-            border,
-        );
-        ctx.fill_rect(
-            Rect::new(layout.origin.x, layout.bottom() - b, layout.size.width, b),
-            border,
-        );
-        ctx.fill_rect(
-            Rect::new(layout.origin.x, layout.origin.y, b, layout.size.height),
-            border,
-        );
-        ctx.fill_rect(
-            Rect::new(layout.right() - b, layout.origin.y, b, layout.size.height),
-            border,
-        );
+        ctx.stroke_rect_rounded(layout, border, self.radius, 1.0);
     }
 }
 

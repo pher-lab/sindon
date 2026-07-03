@@ -5,11 +5,10 @@
 //! [`LayerOptions::modal`] layer (scrim + `ViewportCenter` + dismiss on
 //! outside-click / Escape), which maps 1:1 onto the outer div.
 //!
-//! Entry points are the two text rows in the settings dropdown ("Backup
-//! Settings" / "Change Master Password"). The nesting mirrors React: Backup
-//! Settings opens Restore *on top* (two stacked scrims), and a Restore row
-//! opens a Confirm dialog on top of that — a genuine three-deep layer-stack
-//! probe.
+//! Entry points are the two text rows in the settings dropdown ("Auto-backup"
+//! / "Change Password"). The nesting mirrors React: Auto-backup opens Restore
+//! *on top* (two stacked scrims), and a Restore row opens a Confirm dialog on
+//! top of that — a genuine three-deep layer-stack probe.
 //!
 //! Gaps this slice surfaces (logged in `docs/knot-ui-repro-gaps.md`):
 //!   - **G18 (shadow half graduated → FW-18)** the `shadow-xl` on every modal
@@ -46,8 +45,8 @@ use crate::tokens;
 
 // --- Entry points (wired from the settings dropdown) -------------------------
 
-/// The Change-Master-Password dialog (`ChangePasswordModal.tsx`): `max-w-sm`,
-/// three password fields, a strength meter under the new-password field, and a
+/// The Change-Password dialog (`ChangePasswordModal.tsx`): `max-w-sm`, three
+/// password fields, a strength meter under the new-password field, and a
 /// Cancel / Change footer. Shown in its default (form) state — the success
 /// sub-state (a centered green check) is a state the static clone can't reach.
 pub fn open_change_password(ctx: &mut EventContext) {
@@ -56,7 +55,8 @@ pub fn open_change_password(ctx: &mut EventContext) {
     // `space-y-4` between the title and the fields is a uniform `gap(16)`.
     let card = card_column(384.0).padding(24.0).gap(16.0);
     ctx.push_layer(LayerOptions::modal(), card, |tree, root| {
-        title(tree, root, "Change Master Password");
+        // `t("changePassword.title")` — the React modal header, verbatim.
+        title(tree, root, "Change Password");
 
         field(tree, root, "Current Password", "Enter current password");
 
@@ -83,15 +83,16 @@ pub fn open_change_password(ctx: &mut EventContext) {
     });
 }
 
-/// The Backup-Settings dialog (`BackupSettingsModal.tsx`): `max-w-md`, an
-/// enable checkbox, a directory row, a two-column interval/retention grid, a
-/// last-backup line + explanatory note, and a wrapping footer whose Cancel is
-/// pushed right by an `ml-auto` spacer. "Restore" opens the Restore dialog on
-/// top (this modal stays mounted underneath).
+/// The Auto-backup dialog (`BackupSettingsModal.tsx`, header `t("backup.title")`
+/// = "Auto-backup"): `max-w-md`, an enable checkbox, a directory row, a
+/// two-column interval/retention grid, a last-backup line + explanatory note,
+/// and a wrapping footer whose Cancel is pushed right by an `ml-auto` spacer.
+/// "Restore" opens the Restore dialog on top (this modal stays mounted
+/// underneath).
 pub fn open_backup_settings(ctx: &mut EventContext) {
     let card = card_column(448.0).padding(24.0).gap(16.0);
     ctx.push_layer(LayerOptions::modal(), card, |tree, root| {
-        title(tree, root, "Backup Settings");
+        title(tree, root, "Auto-backup");
 
         // `<label><input type=checkbox className="rounded"/> …</label>`.
         // Checkbox keeps its default (theme-tracking) chrome — `label_color`

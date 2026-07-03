@@ -71,7 +71,7 @@
 //!     The capturing layer swallows the `MouseLeave`, so the gear/⋮ keep their
 //!     hover fill until hovered again.
 //!
-//! Minor: `MenuItem` has no disabled state (the "Export All" row is
+//! Minor: `MenuItem` has no disabled state (the "Export all notes" row is
 //! `disabled:opacity-40` when there are no notes); `Container` exposes no
 //! `min_width` (`min-w-[140px]` faked with a fixed `width`); `Button` defaults
 //! its hover/press fill to *primary* when only `background` is set (the
@@ -722,14 +722,14 @@ fn open_settings_menu(pos: Point, ctx: &mut EventContext) {
         settings_text_row(
             tree,
             root,
-            "Backup Settings",
+            "Auto-backup",
             crate::modals::open_backup_settings,
         );
         popover_divider(tree, root);
         settings_text_row(
             tree,
             root,
-            "Change Master Password",
+            "Change Password",
             crate::modals::open_change_password,
         );
     });
@@ -738,7 +738,9 @@ fn open_settings_menu(pos: Point, ctx: &mut EventContext) {
 /// One `px-3 py-2` settings row: an `text-xs` label over a full-width select.
 /// `px-3 py-2` is asymmetric (G4) → uniform `padding(8)`.
 fn settings_select_row(tree: &mut WidgetTree, parent: usize, label: &str, options: &[&str]) {
-    let row = tree.add_child(parent, Container::column().padding(8.0).gap(4.0));
+    // px-3 py-2 so the row label and select line up with the `MenuItem` action
+    // rows below (which inset their labels by 12px).
+    let row = tree.add_child(parent, Container::column().padding_xy(12.0, 8.0).gap(4.0));
     tree.add_child(
         row,
         TextWidget::new(label)
@@ -750,7 +752,7 @@ fn settings_select_row(tree: &mut WidgetTree, parent: usize, label: &str, option
 
 /// The sort row: a select + a direction-toggle button (`↓`).
 fn settings_sort_row(tree: &mut WidgetTree, parent: usize) {
-    let row = tree.add_child(parent, Container::column().padding(8.0).gap(4.0));
+    let row = tree.add_child(parent, Container::column().padding_xy(12.0, 8.0).gap(4.0));
     tree.add_child(
         row,
         TextWidget::new("Sort")
@@ -786,7 +788,9 @@ fn select(options: &[&str]) -> Dropdown {
         options.iter().map(|s| s.to_string()).collect(),
         Signal::new(0_usize),
     )
-    .font_size(14.0)
+    .font_size(14.0) // text-sm
+    .padding_x(8.0) // px-2
+    .padding_y(4.0) // py-1
     .radius(4.0)
     .background(tokens::pick(tokens::gray_100(), tokens::gray_600()))
     .border_color(tokens::pick(tokens::gray_300(), tokens::gray_500()))
@@ -814,9 +818,10 @@ fn settings_text_row(
     );
 }
 
-/// The ⋮ actions dropdown: Import / Export All / Restore Welcome. `w-48`.
-/// Export-All is `disabled:opacity-40` when there are no notes, but [`MenuItem`]
-/// has no disabled state (minor gap), so it always renders enabled here.
+/// The ⋮ actions dropdown: Import / Export all notes / Restore welcome note.
+/// `w-48`. Export-all is `disabled:opacity-40` when there are no notes, but
+/// [`MenuItem`] has no disabled state (minor gap), so it always renders enabled
+/// here. Labels are the React `sidebar.*` i18n strings verbatim.
 fn open_actions_menu(pos: Point, ctx: &mut EventContext) {
     let panel = Container::column()
         .width(192.0) // w-48
@@ -825,12 +830,15 @@ fn open_actions_menu(pos: Point, ctx: &mut EventContext) {
         .radius(8.0)
         .border(1.0, popover_border());
     open_popover_at(pos, ctx, panel, |tree, root| {
-        tree.add_child(root, MenuItem::new("Import...", |c| c.pop_top_layer()));
-        tree.add_child(root, MenuItem::new("Export All", |c| c.pop_top_layer()));
+        tree.add_child(root, MenuItem::new("Import", |c| c.pop_top_layer()));
+        tree.add_child(
+            root,
+            MenuItem::new("Export all notes", |c| c.pop_top_layer()),
+        );
         popover_divider(tree, root);
         tree.add_child(
             root,
-            MenuItem::new("Restore Welcome Note", |c| c.pop_top_layer()),
+            MenuItem::new("Restore welcome note", |c| c.pop_top_layer()),
         );
     });
 }
@@ -850,7 +858,7 @@ fn open_note_context_menu(pos: Point, pinned: bool, ctx: &mut EventContext) {
         let pin_label = if pinned { "Unpin" } else { "Pin" };
         tree.add_child(root, MenuItem::new(pin_label, |c| c.pop_top_layer()));
         tree.add_child(root, MenuItem::new("Duplicate", |c| c.pop_top_layer()));
-        tree.add_child(root, MenuItem::new("Export...", |c| c.pop_top_layer()));
+        tree.add_child(root, MenuItem::new("Export", |c| c.pop_top_layer()));
         popover_divider(tree, root);
         tree.add_child(
             root,

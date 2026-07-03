@@ -17,6 +17,13 @@ use shroud_reactive::Reactive;
 /// `clippy::type_complexity`.
 type MenuClickHandler = Box<dyn FnMut(&mut EventContext)>;
 
+/// Horizontal padding (Tailwind `px-3`) — declared in `style` so it grows the
+/// box, and re-used in `paint` to inset the label so it does not hug the left
+/// edge. The two must stay in sync.
+const H_PADDING: f32 = 12.0;
+/// Vertical padding (Tailwind `py-1.5`).
+const V_PADDING: f32 = 6.0;
+
 /// A single row in a menu-style layer (dropdown popover, context menu).
 ///
 /// Left-aligned label, theme-driven hover highlight, click fires the
@@ -70,7 +77,7 @@ impl Widget for MenuItem {
         // over-counts the content height of a content-hugging ancestor (the
         // centered-card dead-space bug). The 28px minimum row height lives in
         // `measure` instead — see the height floor there.
-        FlexStyle::new().padding_trbl(6.0, 12.0, 6.0, 12.0)
+        FlexStyle::new().padding_trbl(V_PADDING, H_PADDING, V_PADDING, H_PADDING)
     }
 
     fn measure(&self, available_width: Option<f32>, ctx: &mut MeasureContext) -> Option<Size> {
@@ -122,11 +129,14 @@ impl Widget for MenuItem {
         }
 
         let line_height = font_size * 1.2;
-        let max_w = layout.size.width.max(0.0);
+        // Inset the label by the horizontal padding declared in `style` — the
+        // laid-out `layout` is the border box, so painting at `origin.x` would
+        // let the label hug the left edge and ignore the `px-3` gutter.
+        let max_w = (layout.size.width - 2.0 * H_PADDING).max(0.0);
         let shaped = ctx
             .text_engine
             .shape_text(&self.label, font_size, line_height, Some(max_w));
-        let text_x = layout.origin.x;
+        let text_x = layout.origin.x + H_PADDING;
         let text_y = layout.origin.y + (layout.size.height - shaped.height) / 2.0;
         for glyph in &shaped.glyphs {
             if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {

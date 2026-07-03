@@ -214,6 +214,27 @@ fn menu_item_fires_on_left_click_release() {
 }
 
 #[test]
+fn menu_item_label_is_inset_by_horizontal_padding() {
+    // G16: the label must honour the `px-3` padding declared in `style`, not
+    // hug the box's left edge. The leftmost glyph should sit ~12px in from the
+    // row origin (small tolerance for the glyph's left bearing).
+    let mut tree = WidgetTree::new();
+    let item = tree.set_root(MenuItem::new("Delete", |_ctx| {}));
+    measured_layout(&mut tree, 200.0, 60.0);
+
+    let r = tree.layout_rect(item);
+    let mut ctx = shroud_widgets::paint::PaintContext::default();
+    tree.paint(&mut ctx);
+    assert!(!ctx.glyphs.is_empty(), "label should paint glyphs");
+    let min_x = ctx.glyphs.iter().map(|g| g.x).min().unwrap() as f32;
+    let inset = min_x - r.origin.x;
+    assert!(
+        inset >= 9.0,
+        "label should be inset by ~12px, got {inset}px from the row's left edge"
+    );
+}
+
+#[test]
 fn menu_item_drag_off_cancels_click() {
     let fired = Rc::new(Cell::new(0u32));
 
