@@ -23,7 +23,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 | Main — Editor pane | 完了（slice 2: タイトル欄/操作ボタン/タグ/ツールバー/本文/ステータスバー） |
 | Main — Overlays (設定 dropdown / エラーバナー / context menu) | 完了（slice 3: 設定/⋮ dropdown・右クリック context menu・エラーバナー。**G5 検証台** — 下記） |
 | 各種 Modal (Backup/ChangePw/Restore + 共通 ConfirmDialog) | 完了（slice 4: scrim+centered card を `LayerOptions::modal` で。3段スタック(Backup→Restore→Confirm)・sticky header/scroll/footer・checkbox・strength meter・grid 近似。**G18(shadow 無) 発見 + G19(layer clip オフセット未適用) 実バグ発見・修正** — 下記） |
-| Loading | 未 |
+| Loading | 完了（slice 7: 中央 "Knot" + "Loading..." のみ。スピナー無し・新規 gap なし） |
 
 ---
 
@@ -402,4 +402,34 @@ slice 4 の語彙で組めた。**実機 OK**（2026-07-03 ユーザ確認、lig
   setup.rs で既出、新 primitive 不要）。
 - **dev ナビ**: Ctrl+4=Recovery を追加（Ctrl+1=Loading は残 slice で）。
 
-<!-- 以降、画面を進めながら追記 -->
+### slice 7 所見（Loading、2026-07-03）
+`App.tsx` のインライン `LoadingScreen` を `examples/knot_clone/src/loading.rs` で写経。アプリ最小の画面
+＝ **framework 変更ゼロ・新規 gap ゼロ**。**実機 OK**（2026-07-03 ユーザ確認、light/dark とも綺麗）。
+- **✓ 構成 1:1**: 両軸中央の text-center ブロックに "Knot" `text-4xl font-bold mb-4` + "Loading..."
+  `text-gray-500`（`text-base`）。`background()` + 中央寄せ column の2 `TextWidget` だけで組めた。
+- **注記**: 他画面と違い `p-4` **無し**、**スピナーも無し**（React 版がそもそも持たない）。∴ 新語彙・
+  新 primitive ゼロ。dev ナビ Ctrl+1=Loading を追加（これで Ctrl+1〜4 が全画面に対応）。
+
+---
+
+## 全画面写経クローズ（2026-07-03）
+Unlock / Setup / Recovery / Loading / Main（Sidebar・Editor・Overlays・Modals）の**全画面**を写経し切り、
+それぞれ実機 OK。この演習（密な実画面 + ユーザの目）でしか炙れなかった **framework 実バグ4件**を発見・
+修正した（**G13 二重ガンマ** [[fix-srgb-double-encode]] / **G14 layer 内 AnchorRect ズレ** / **G17
+full-bleed 子が border を上書き** / **G19 push_clip の layer offset 未畳み込み** [[fix-push-clip-layer-offset]]）。
+表現力 gap は **FW-15（border 系 G1/G2/G9）/ FW-16（整列 G11 + 片側 border G10）/ FW-17（入力寸法 G3）**
+として graduate 済み。
+
+**未解決で FW-18 系に持ち越す gap**（画面写経で出揃った）:
+- **G6** Button の padding/高さ/固定幅(min_width)/disabled スタイル非公開
+- **G12** Input/SecureInput の font-weight 無し（+ chrome setter が非 Reactive）
+- **G16** Dropdown 寸法/角丸・MenuItem ラベル左寄せ
+- **G4（Container 側）** 非対称 padding（`padding_xy`/各辺）の公開 builder 無し
+- **G18** drop-shadow / elevation プリミティブ無し（+ viewport 相対サイズ vh/vw 無し）← モーダルの質感に最大
+- **G3 系の残り** 固定ピクセル高の multiline viewport 無し（slice 6 で追記）
+- **G5** absolute/固定エッジ anchor（`LayerAnchor` の absolute 変種）、右寄せ placement、click 時の
+  trigger rect 取得 — Layer で部分代替可だが3点 open
+- **G7** focus が外側リング vs 正解は border 色変化（設計判断・open）
+- **G15** capturing layer の hover 固定（真因特定済・実害軽微で棚上げ）
+
+<!-- 以降、追加演習があれば追記 -->

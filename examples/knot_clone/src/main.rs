@@ -5,6 +5,7 @@
 //! screens use dummy data and navigate by `replace_screen`. Ctrl+D toggles
 //! dark mode so both palettes can be captured from one binary.
 
+mod loading;
 mod main_screen;
 mod modals;
 mod recovery;
@@ -29,11 +30,14 @@ fn main() {
                 |_ctx| tokens::toggle_dark(),
             );
 
-            // Dev-only nav to jump between the sibling auth screens for
-            // side-by-side review — the real app picks one from vault state
-            // (loading → setup or unlock), so these links don't exist there.
-            // Ctrl+2 = Setup, Ctrl+3 = Unlock, Ctrl+4 = Recovery (Ctrl+1 lands
-            // with Loading in a later slice).
+            // Dev-only nav to jump between the sibling screens for side-by-side
+            // review — the real app picks one from vault state (loading → setup
+            // or unlock), so these links don't exist there.
+            // Ctrl+1 = Loading, Ctrl+2 = Setup, Ctrl+3 = Unlock, Ctrl+4 = Recovery.
+            scope.on_shortcut(
+                Shortcut::global(Modifiers::CTRL, Key::Character('1')),
+                |ctx| ctx.event_ctx.replace_screen(loading::build),
+            );
             scope.on_shortcut(
                 Shortcut::global(Modifiers::CTRL, Key::Character('2')),
                 |ctx| ctx.event_ctx.replace_screen(setup::build),
