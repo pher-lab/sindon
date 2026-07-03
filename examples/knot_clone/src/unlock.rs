@@ -122,6 +122,9 @@ pub fn build(tree: &mut WidgetTree) {
             .text_color(tokens::muted())
             .hover_text_color(tokens::pick(tokens::gray_700(), tokens::gray_300()))
             .font_size(14.0)
-            .on_click(|_ctx| { /* would open recovery */ }),
+            // Real UnlockScreen: "Forgot password?" → showRecoveryScreen().
+            .on_click(|ctx| {
+                ctx.replace_screen(crate::recovery::build);
+            }),
     );
 }

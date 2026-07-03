@@ -18,7 +18,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 |------|------|
 | Unlock | 完了（gap 由来の差を除き React 版と一致） |
 | Setup | 完了（slice 5: ヘッダ/見出し/マスターPW欄+強度メーター/確認欄/リカバリーKey チェック/送信。**新規 gap なし** — 既存 G5/G3/G6/G12 のみ） |
-| Recovery | 未 |
+| Recovery | 完了（slice 6: ヘッダ/見出し/リカバリーキー textarea/新PW/確認PW/送信/Back リンク。**新規 gap なし** — 既存 G3/G6/G12 のみ、textarea の固定高だけ G3 系に軽く追記） |
 | Main — Sidebar shell | 完了（slice 1: パネル/ヘッダ/New Note/検索/ノート行） |
 | Main — Editor pane | 完了（slice 2: タイトル欄/操作ボタン/タグ/ツールバー/本文/ステータスバー） |
 | Main — Overlays (設定 dropdown / エラーバナー / context menu) | 完了（slice 3: 設定/⋮ dropdown・右クリック context menu・エラーバナー。**G5 検証台** — 下記） |
@@ -376,5 +376,30 @@ overlay の slice 3（`popover` プリセット）に対し、これは **`modal
   などは単一グリフ（⚙ ⋮ 🗑 🔒 🔍 📌）で近似した。アイコン描画の正式手段は FW-12（`App::font`
   + `family(Named)`）で既に解決済みであり、本 UI-only clone の対象外。レイアウト/枠/余白の
   gap 判定に影響しないため近似で進める。
+
+### slice 6 所見（Recovery / Recover Vault、2026-07-03）
+`Auth/RecoveryScreen.tsx` を `examples/knot_clone/src/recovery.rs` で写経。canonical は
+**空の初期状態**（strength meter は `newPassword.length > 0`・error banner は `validationError ||
+error` の条件付き ＝ 着地時は両方出ない）。**framework 変更ゼロ・新規 gap ゼロ** — Unlock/Setup +
+slice 4 の語彙で組めた。**実機 OK**（2026-07-03 ユーザ確認、light/dark とも綺麗）。
+- **✓ 構成は 1:1**: ヘッダ（"Knot" text-4xl + サブタイトル）/ 見出し（"Recover Vault" text-xl +
+  説明 text-sm）/ `space-y-4` フィールド群（リカバリーキー textarea + 新PW + 確認PW）/ 青フル幅
+  "Recover Vault" / 中央 "Back" テキストリンク。max-w-md 中央寄せ・space-y-6 は unlock/setup と同型。
+- **★ このスライスの新語彙 = mnemonic の `<textarea>`（clone 初の複数行入力）**: `resize-none h-24`
+  → `Input::multiline().padding_x(16).padding_y(12).min_height(96)`。React ソースは**素の
+  `<textarea>`（パスワード欄ではない・12単語は可視）**なので `SecureInput` でなく `Input`。border/
+  radius は unlock 系と同じ既定 chrome。
+- **小 gap 発見（G3 系に追記）= 固定ピクセル高の multiline が無い**: `h-24` は**固定96px でスクロール**
+  だが shroud の `min_height` は**下限（floor）**。空欄では 96px でピクセル一致するが、5行以上打つと
+  本物は内部スクロール・shroud は箱が伸びる。固定ビューポート multiline は `height_full()`（＝*親*を
+  埋める）しかなく、正確な固定箱には wrapper が要る。静止スナップショットには無影響ゆえ min_height で近似。
+- **Back リンク**は unlock の "Forgot password?" と同一 idiom（transparent fills + `hover_text_color`
+  で文字色ダーク化）。**おまけ**: unlock の "Forgot password?" をダミーから実 Recovery 遷移に接続
+  （本物の UnlockScreen と一致）。
+- **踏んだ既知 gap（すべて既出・再確認のみ）**: G3/G6（入力・ボタンの寸法。入力側は FW-17 で解消、
+  Button `py-3` は radius+align-stretch で近似）/ G12（`Input`/`SecureInput` の色が静的 Color →
+  既定 chrome に委ねる）。strength meter・error banner は canonical で非表示ゆえ省略（chrome は
+  setup.rs で既出、新 primitive 不要）。
+- **dev ナビ**: Ctrl+4=Recovery を追加（Ctrl+1=Loading は残 slice で）。
 
 <!-- 以降、画面を進めながら追記 -->
