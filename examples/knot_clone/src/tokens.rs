@@ -126,6 +126,9 @@ pub fn green_500() -> Color {
 pub fn green_600() -> Color {
     c(0x16, 0xa3, 0x4a)
 }
+pub fn emerald_500() -> Color {
+    c(0x10, 0xb9, 0x81)
+}
 
 // --- Theme assembly --------------------------------------------------------
 // Map Tailwind tokens onto shroud's `Colors`. Anything the `Theme` model

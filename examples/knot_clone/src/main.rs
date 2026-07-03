@@ -7,6 +7,7 @@
 
 mod main_screen;
 mod modals;
+mod setup;
 mod tokens;
 mod unlock;
 
@@ -25,6 +26,20 @@ fn main() {
             scope.on_shortcut(
                 Shortcut::global(Modifiers::CTRL, Key::Character('d')),
                 |_ctx| tokens::toggle_dark(),
+            );
+
+            // Dev-only nav to jump between the sibling auth screens for
+            // side-by-side review — the real app picks one from vault state
+            // (loading → setup or unlock), so these links don't exist there.
+            // Ctrl+2 = Setup, Ctrl+3 = Unlock (Ctrl+1/4 land with Loading /
+            // Recovery in later slices).
+            scope.on_shortcut(
+                Shortcut::global(Modifiers::CTRL, Key::Character('2')),
+                |ctx| ctx.event_ctx.replace_screen(setup::build),
+            );
+            scope.on_shortcut(
+                Shortcut::global(Modifiers::CTRL, Key::Character('3')),
+                |ctx| ctx.event_ctx.replace_screen(unlock::build),
             );
 
             let mut tree = WidgetTree::new();

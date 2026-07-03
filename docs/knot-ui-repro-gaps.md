@@ -17,7 +17,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 | 画面 | 状態 |
 |------|------|
 | Unlock | 完了（gap 由来の差を除き React 版と一致） |
-| Setup | 未 |
+| Setup | 完了（slice 5: ヘッダ/見出し/マスターPW欄+強度メーター/確認欄/リカバリーKey チェック/送信。**新規 gap なし** — 既存 G5/G3/G6/G12 のみ） |
 | Recovery | 未 |
 | Main — Sidebar shell | 完了（slice 1: パネル/ヘッダ/New Note/検索/ノート行） |
 | Main — Editor pane | 完了（slice 2: タイトル欄/操作ボタン/タグ/ツールバー/本文/ステータスバー） |
@@ -345,6 +345,31 @@ overlay の slice 3（`popover` プリセット）に対し、これは **`modal
   **既定の primary（青）にフェード**する（`button.rs:310-319`）。slice 3 でエラーバナーの透明 `×`
   が青い四角に化けたのはこれ（clone 側で両者を transparent 指定して解消）。バグではないが、
   「透明ボタン」を作る時に踏みやすい footgun。`hover_text_color` も無い（React の `hover:text-*` 不可）。
+
+### slice 5 所見（Setup / Create Vault、2026-07-03）
+`Auth/SetupScreen.tsx` を `examples/knot_clone/src/setup.rs` で写経。canonical 状態は
+`docs/screenshots/setup.png`（有効な "Very strong" パスワード）。**framework 変更ゼロ・新規 gap
+ゼロ** — Unlock（slice 1 以前）+ slice 4 で開けた語彙（`padding_x/min_height`・`border`・
+`Checkbox`・強度メーター）だけで組めた。**実機 OK**（2026-07-03 ユーザ確認、light）。
+- **✓ 構成は 1:1**: ヘッダ（text-4xl "Knot" + サブタイトル）/ 見出しブロック（"Create Vault"
+  text-xl + 説明文 text-sm）/ `space-y-4` フィールド群（マスターPW欄 `px-4 py-3` + 強度メーター /
+  確認欄 / リカバリーKey チェックボックス）/ 青フル幅 "Create Vault"。max-w-md 中央寄せも unlock と同じ
+  `max_width(448).margin_x_auto()`。
+- **強度メーターを静的再現**: React は入力から算出し空欄時は非表示だが、canonical に合わせ level 4
+  （4 バー `bg-emerald-500` + ラベル "Very strong" `text-green-600/500`）を静的に描画。`emerald-500`
+  を tokens に追加。メーター自体は「h-1 flex-1 rounded-full ×4 + text-xs ラベル」で slice 4 の
+  `strength_meter` と同型（バーは grow+height(4)+radius(2)）。
+- **エラーバナー非再現**: `validationError || error` は canonical が有効入力ゆえ出ない → 省略。chrome
+  （`p-3 rounded-lg` 赤箱 + 1px border + text-sm）は既存 `border`/reactive bg で組める＝新 gap 無し。
+  ソースにコメントで build 方法を明記。
+- **踏んだ既知 gap（すべて既出・再確認のみ）**: G5（言語 select `absolute top-4 right-4` は
+  absolute プリミティブ無しで省略、unlock 同様）/ G3・G6（入力・ボタンの寸法。FW-17 で入力側は解消済、
+  Button `py-3` 高さは `radius`+align-stretch で近似）/ G12（`Checkbox` のチェック色が静的 Color →
+  既定のテーマ primary に委ね、青チェックを得る）。
+- **dev ナビ（clone ハーネス）**: 実アプリは vault 状態で分岐（loading → setup or unlock）し画面間
+  リンクが無いので、レビュー用に `main.rs` へ dev shortcut を追加（**Ctrl+2=Setup / Ctrl+3=Unlock**、
+  Loading/Recovery slice で Ctrl+1/4 を足す）。`ShortcutContext::event_ctx` 経由で `replace_screen`。
+  Ctrl+D（light/dark）は従来どおり。
 
 ### アイコンについて（gap ではない・記録のみ）
 - 正解は inline SVG アイコン。clone はアイコンフォント未同梱なので、ヘッダ操作・検索・ピン留め
