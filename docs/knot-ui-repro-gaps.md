@@ -107,7 +107,8 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - テスト: layer +4（right/center/viewport top-center/viewport bottom-right）・event +2
   （align が offset 変換を跨いで保持 / Viewport 非変換）・press_blur +1（on_press_rect が rect を返す）。
   全 gate 緑（fmt/clippy 含 knot/rustdoc -D warnings/全 widget test）。
-- **実機**: 未確認（HDR ∴ スクショ不可信、[[feedback-screenshot-color-hdr]] — ユーザの目で light/dark 確認予定）。
+- **実機 OK**（light、2026-07-04 ユーザ確認 — 設定メニューが gear に anchor・エラーバナーがエディタペイン上端中央。
+  HDR ∴ 色はユーザの目が正、[[feedback-screenshot-color-hdr]]）。
 
 <details><summary>（旧記載：slice 3 での検証内容）</summary>
 

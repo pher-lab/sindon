@@ -138,7 +138,7 @@
   - **★ 実機レビューで判明したクローン fidelity バグ(framework ではない)**: MenuItem 修正後、設定メニューの「Change Master Password」が2行に折り返すのをユーザが指摘。当初「React も折り返す=忠実」と誤答したが、**React 実物のラベルは `t()` i18n で "Change Password" / "Auto-backup" / "Import" / "Export all notes" / "Restore welcome note"** であり、クローンが**勝手に長い・大文字寄りの文言("Change Master Password"/"Backup Settings"/"Import..."/"Export All"/"Restore Welcome Note")を置いていた**のが真因。[translations.ts](../knot-notes-app-v0.7.0-2026-04-27/src/i18n/translations.ts) の EN 値で照合し、設定/アクション両メニュー + モーダル見出し + context menu の "Export…"→"Export" まで実文字列に修正。短い実文字列なら w-48(168px 相当)に一行で収まり、MenuItem の wrap+grow 自体は正しい挙動(=framework 無罪)。**教訓: 「折り返しが React と一致」を主張する前に、クローンのラベルが実 i18n 文字列と一致しているか先に確認する。**
   **gate 全緑(clone は check/clippy/fmt クリーン)。実機は knot_clone.exe が起動中でロック → ユーザが閉じて再ビルドで確認予定。**
   - 残置(FW-20 後の続き候補): G5 absolute・固定エッジ anchor・右寄せ placement・click 時 trigger rect / G18 の vh-vw / G3 残(固定高 multiline viewport)/ G7 focus 方式 / G15 hover 固定。
-- **✅ FW-21 [fw] P3 🧷 — absolute/固定エッジ anchor + 右寄せ placement + click 時 trigger rect(G5 の3点)= 完了 (2026-07-04, gate 全緑・実機確認待ち)**
+- **✅ FW-21 [fw] P3 🧷 — absolute/固定エッジ anchor + 右寄せ placement + click 時 trigger rect(G5 の3点)= 完了 (2026-07-04, commit `0aba208`, 実機 OK light)**
   出所: FW-15〜20 と同じ **Knot UI 完全再現演習**。slice 3(overlays)で「Layer で absolute をどこまで代替できるか」を検証した際に炙り出た **G5 の3つの open 点**(バナー top-center / メニュー右寄せ / ボタン rect 取得)を、演習クローズ後にまとめて graduate。ユーザ選択(FW-20 後に「G5 を終わらせる」)。
   対応(framework):
   - **① click 時に trigger の rect が取れない** — `Container::on_press_rect(FnMut(Rect, &mut EventContext))` を追加(`on_hover_enter` の press 版)。`MouseDown` で widget 自身の `layout` rect を渡し consume。`on_press`(点)と別フィールドで併用可・両方 fire。layer 内では rect は layer-local だが、`push_layer` の既存 offset 変換(G14)で `AnchorRect` がそのまま viewport 化されるので nested でも正しく落ちる。
@@ -147,7 +147,7 @@
   - **破壊的変更(小)**: `AnchorRect` にフィールド追加のため全構築サイト(dropdown・event/layer/tooltip tests・**knot sidebar/tooltip**・knot_spike)に `align: HAlign::Start` を機械的追記(挙動不変)。knot はこの1点のみ変更 = enum が育った正当な source break([[feedback-roadmap-hygiene]]・過去の on_frame 変更と同格)。
   テスト: layer_tests +4(End=右寄せ / Center / Viewport top-center+offset / Viewport bottom-right 負 offset)・event(lib) +2(align が offset 変換を跨いで保持 / Viewport 非変換)・press_blur_tests +1(on_press_rect が cursor 点でなく box rect を返す)。**shroud_widgets 全 test 緑**(layer 36 / lib 63 / press_blur 6 / widget 277 …)、`fmt --all` / `clippy(--workspace --exclude knot -D warnings + knot -D warnings)` / `doc(-D warnings)` クリーン([[feedback-prepush-fmt-check]])。
   対応(repro・実使用): [knot_clone main_screen.rs](../examples/knot_clone/src/main_screen.rs) — gear/⋮ ヘッダメニューを `menu_icon_trigger` の `on_press` → `on_press_rect` + 新ヘルパ `open_popover_below_rect`(`AnchorRect{prefer:Below, align:End}`)にして React の `right-0 top-full`(ボタンに anchor・右寄せ・下開き)を 1:1 に。context menu は cursor anchor のまま(正しい)。エラーバナーを `Viewport{Center, Start, offset:(128,8)}` に(x=128 = サイドバー 256px の半分 → エディタペイン中央 = React の pane-relative `left-1/2` と一致、y=8 = `top-2`)。
-  **gate 全緑。実機は HDR ∴ スクショ不可信([[feedback-screenshot-color-hdr]]) → ユーザの目で light/dark 確認予定(gear/⋮ が左に開く・バナーがペイン上端中央)。**
+  **gate 全緑。実機 OK(light、2026-07-04 ユーザ確認 — 設定メニューが gear に anchor・エラーバナーがエディタペイン上端中央)。HDR ∴ 色はユーザの目が正([[feedback-screenshot-color-hdr]])。**
   - 残置(FW-21 後の続き候補): G18 の vh-vw / G3 残(固定高 multiline viewport)/ G7 focus 方式 / G15 hover 固定。**演習で炙った表現力 gap は G7/G15(共に設計判断・棚上げ)を除き graduate 完了。**
 
 #### Knot app — UX 磨き
