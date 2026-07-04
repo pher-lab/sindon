@@ -164,32 +164,22 @@ impl Widget for Checkbox {
             border_color,
         );
 
-        // Checkmark (two diagonal lines made of small rects)
+        // Checkmark — a round-capped stroke over three points:
+        //   p0 (upper-left)  →  p1 (vertex, lower)  →  p2 (upper-right).
+        // The two legs share the vertex exactly, so the join is clean
+        // instead of the two-independent-staircases look the old
+        // small-square stamping produced. Each stamp is an AA disc (a
+        // rounded rect at radius = half its side), so a dense run reads as
+        // one smooth stroke with round caps/join — no rotated-rect
+        // primitive needed (rects stay axis-aligned).
         if self.checked {
-            let inset = box_size * 0.25;
-            let inner_x = box_x + inset;
-            let inner_y = box_y + inset;
-            let inner_size = box_size - inset * 2.0;
-
-            let leg_w = 2.0;
-            let mid_x = inner_x + inner_size * 0.33;
-            let mid_y = inner_y + inner_size * 0.7;
-
-            // Short leg (going down to midpoint)
-            for i in 0..((inner_size * 0.4) as i32) {
-                let fi = i as f32;
-                let x = inner_x + fi * 0.6;
-                let y = inner_y + inner_size * 0.35 + fi * 0.8;
-                ctx.fill_rect(Rect::new(x, y, leg_w, leg_w), mark_color);
-            }
-
-            // Long leg (going up from midpoint)
-            for i in 0..((inner_size * 0.6) as i32) {
-                let fi = i as f32;
-                let x = mid_x + fi;
-                let y = mid_y - fi * 0.9;
-                ctx.fill_rect(Rect::new(x, y, leg_w, leg_w), mark_color);
-            }
+            let thickness = (box_size * 0.13).max(1.6);
+            let p = |fx: f32, fy: f32| (box_x + box_size * fx, box_y + box_size * fy);
+            let p0 = p(0.24, 0.50);
+            let p1 = p(0.44, 0.70);
+            let p2 = p(0.76, 0.30);
+            stroke_round(ctx, p0, p1, thickness, mark_color);
+            stroke_round(ctx, p1, p2, thickness, mark_color);
         }
 
         // Label text
@@ -269,5 +259,35 @@ impl Widget for Checkbox {
             }
             _ => EventResult::Ignored,
         }
+    }
+}
+
+/// Stamp a round-capped stroke of diameter `thickness` from `a` to `b` by
+/// drawing overlapping antialiased discs along the segment.
+///
+/// `fill_rect_rounded` with `radius = size / 2` degenerates to a disc whose
+/// edge the rect shader's SDF antialiases; laying a dense run of them down
+/// the line yields one smooth stroke with round end caps. The interior stays
+/// fully opaque (consecutive discs overlap by at least half a radius), so
+/// only the outer silhouette shows AA — no seam artifacts between stamps.
+fn stroke_round(
+    ctx: &mut PaintContext,
+    a: (f32, f32),
+    b: (f32, f32),
+    thickness: f32,
+    color: Color,
+) {
+    let r = thickness / 2.0;
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    // Overlap discs so the interior never gaps; clamp so a zero-length
+    // segment still stamps a single cap.
+    let step = (r * 0.5).max(0.35);
+    let n = (len / step).ceil().max(1.0) as i32;
+    for i in 0..=n {
+        let f = i as f32 / n as f32;
+        let cx = a.0 + dx * f;
+        let cy = a.1 + dy * f;
+        ctx.fill_rect_rounded(Rect::new(cx - r, cy - r, thickness, thickness), color, r);
     }
 }
