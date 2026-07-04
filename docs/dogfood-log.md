@@ -67,6 +67,11 @@
   対応([input.rs](../crates/shroud_widgets/src/input.rs)): ①`last_click` を `(Instant, Point, u8)` 化してクリック回数を保持し、近接連打を `1→2→3→1…` と循環カウント(double 後の reset を撤去)。②`pending_word_select: Cell<bool>` を `pending_select: Cell<SelectUnit>`(`Caret`/`Word`/`Line`)へ一般化。③純関数 `line_bounds`(`\n` 区切りの**論理行**、末尾改行を除外 ∴ 選択置換で次行と繋がらない)を追加し、paint の deferred-hit 解決で count=2→`word_bounds` / count=3→`line_bounds` に分岐。④`FocusLost` reset も `pending_select` へ。
   設計判断: triple = **論理行(段落)**選択(視覚行ではなく `\n` 区切り)。ブラウザ/一般エディタの mental model に一致し、`line_bounds` を engine 非依存の純関数にできてテスト容易。**FW-11(日本語 word-select)の現実的 fallback も兼ねる**(行まるごと選択の安定ジェスチャ)。
   テスト: `line_bounds` 純関数テスト5件(中間行/先頭末尾/空行/単一行/multibyte 境界)+ 既存 `word_bounds` 9件 回帰なし。fmt/clippy(新規警告ゼロ)/全テスト緑。**実機 OK**(2026-06-27 ユーザー確認: 行選択 OK・double-click 単語選択退行なし・日本語行 OK)。
+- **✅ FW-11 [fw] P3 — 日本語等の単語選択(double-click)を script-run 区切りに = 完了 (2026-07-04)**
+  真因: [input.rs](../crates/shroud_widgets/src/input.rs) `classify` が `is_alphanumeric()` を使うため CJK(漢字/ひらがな/カタカナ)を全部 `Word` 扱い → double-click が **CJK の連続全体**(実質その文/行まるごと)を掴んでいた。正しい分かち書きは辞書(MeCab 級)必須で、zeroize-first の最小 framework には重い。
+  対応(**方針 ① 辞書なし script-run** — 方向案②の triple-click 行 fallback は FW-10 で既に landed 済 ∴ 残っていた「①も足すか」の判断を①採用で消化): `CharClass` に `Han`/`Hiragana`/`Katakana` を追加し、`classify` を CJK スクリプト範囲(コードポイント判定 `is_hiragana`/`is_katakana`/`is_han` を `is_alphanumeric` の**前**に評価。CJK も alphanumeric なので順序が要)で分類。`word_bounds` は「同 class の連続を掴む」既存ロジックのまま ∴ double-click が**スクリプトの切れ目で止まる**(日本語 の漢字部だけ / 続くかなだけを掴む)。カタカナ長音 `ー`(U+30FC)や 佐々木 の `々`(U+3005)は各 script に含めて run を割らない。空白区切りの Latin/Hangul 等は従来どおり `Word` で space 境界まで(挙動不変)。
+  設計判断: 真の word segmentation ではなく「多少マシ」な近似(辞書ゼロ・純関数・framework 追加最小)。ユーザー文言「使えないなら使えないで何かできないか」に対し、①(script-run)+②(triple-click 行、FW-10)の二段 fallback で応答。
+  テスト: `word_bounds` に CJK 区切り3件追加(漢字↔かな境界 / カタカナ長音 `ー` を割らない / ひらがな↔カタカナ境界)+ 既存9件・`line_bounds` 5件 回帰なし。fmt / clippy(workspace 含 knot・knot_clone、新規警告ゼロ)/ 全 widget test(277)/ lib unit(word_bounds 12)/ rustdoc -D warnings すべて緑。**実機確認は次回起動時にユーザ**(選択ロジックのみで描画非干渉 ∴ 純関数 unit test で担保)。
 - **✅ FW-12 [fw] P2 💡 — アイコン描画手段が無い(アイコンフォント / SVG)= 完了 (2026-06-27, 実機 OK)**
   調査で確定した現状: レンダラのプリミティブは `DrawRect`・`DrawGlyph`・`DrawImage`(RGBA8) の3種のみでベクター/SVG 経路が無く、アプリ同梱フォントをロードする一級 API も無かった(`font_system().db_mut().load_font_data()` の escape hatch のみ)。3案(① mono PNG を DrawImage / ② アイコンフォント同梱 API / ③ SVG ラスタ)から、既存 glyph atlas/tint/shape 経路を再利用できる **② を採用**(framework 追加が小さく zeroize 非干渉)。設計判断: フォント本体は **app が OSS フォントを同梱**(framework は load API のみ)、アイコンの **名前→コードポイント対応は app 側 helper**。
   対応(framework・小):
@@ -166,7 +171,6 @@
 
 ### → 様子見 / 仕様(まだ動かさない)
 
-- **FW-11 [fw] P3 — 日本語等の単語選択(double-click)が機能しない** — **要設計判断**。真因確定: [input.rs](../crates/shroud_widgets/src/input.rs) `classify`(237)が `is_alphanumeric()` を使うため CJK(漢字/ひらがな/カタカナ)を全部 `Word` 扱い → double-click が **CJK の連続全体**(実質その文/行まるごと)を掴む。正しい分かち書きには辞書(MeCab 級)が必須で、zeroize-first の最小 framework に積むには重い。方向案を決めてから昇格: ①辞書なしで script-run(Han/Hiragana/Katakana/Latin の切れ目)区切りにして「多少マシ」にする ②そもそも word-select は諦め、**triple-click 行選択(FW-10)を実用的 fallback とする → FW-10 完了済(2026-06-27)∴ ② は既に成立** ③現状維持(連続全選択)で割り切る。ユーザー文言「使えないなら使えないで何かできないか」= ①か②を期待。**fallback(②)が landed した今、残る判断は「① script-run も足すか / ② で割り切るか」**。
 - **元 #23 パスワード強度メーター** — [[roadmap]] で「強度ポリシーは*意図的に非移植*」と記録済。今回は据え置き。E(リリース)前に復活させるか改めて判断。
 - **元 #35 live split preview が使いにくい** — **要設計判断**。実装ではなく方向決めが先: ①split の比率/プレビュー見やすさを改善 ②toggle 方式(編集⇄プレビュー)に戻す ③可変ペイン幅。決めてから昇格。
 - **元 #31 フォントに差があって見づらい** — **要再現**。どの画面のどのフォント差か曖昧。次の dogfood で具体化してから。

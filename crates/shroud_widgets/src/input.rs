@@ -240,10 +240,27 @@ struct Snapshot {
 /// the maximal run of same-class characters under the caret, so a click in a
 /// word grabs the word, a click in whitespace grabs the gap, and a click in a
 /// punctuation run grabs that run.
+///
+/// The CJK scripts get their own classes (Han / Hiragana / Katakana) instead of
+/// folding into `Word`. Japanese has no spaces between words, so treating every
+/// ideograph and kana as one `Word` run made a double-click grab the whole
+/// sentence (FW-11). True segmentation needs a dictionary (MeCab-class), which
+/// is too heavy for a zeroize-first framework; splitting on *script* runs is the
+/// dictionary-free approximation — a double-click in 日本語 grabs the kanji run
+/// and stops at an adjacent kana. It is "less wrong", and pairs with the
+/// triple-click line select (FW-10) as the practical fallback.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum CharClass {
-    /// Alphanumeric or `_` — the "word" characters.
+    /// Alphanumeric or `_` that isn't one of the segmented CJK scripts below
+    /// (Latin, digits, Cyrillic, Hangul, …). These scripts are space-delimited,
+    /// so a run still stops at the next space as before.
     Word,
+    /// CJK ideographs (Han), incl. the ideographic iteration mark `々`.
+    Han,
+    /// Hiragana.
+    Hiragana,
+    /// Katakana, incl. the prolonged sound mark `ー` and halfwidth katakana.
+    Katakana,
     /// Whitespace (including `\n`, so word runs never cross a hard line break).
     Space,
     /// Everything else (punctuation, symbols).
@@ -251,13 +268,47 @@ enum CharClass {
 }
 
 fn classify(c: char) -> CharClass {
-    if c.is_alphanumeric() || c == '_' {
-        CharClass::Word
-    } else if c.is_whitespace() {
+    // CJK scripts are checked before the generic `is_alphanumeric` bucket: CJK
+    // characters *are* alphanumeric, so the specific ranges must win to keep
+    // each script its own run (FW-11).
+    if c.is_whitespace() {
         CharClass::Space
+    } else if is_hiragana(c) {
+        CharClass::Hiragana
+    } else if is_katakana(c) {
+        CharClass::Katakana
+    } else if is_han(c) {
+        CharClass::Han
+    } else if c.is_alphanumeric() || c == '_' {
+        CharClass::Word
     } else {
         CharClass::Other
     }
+}
+
+/// Hiragana block (letters, small kana, iteration marks, combining sound marks).
+fn is_hiragana(c: char) -> bool {
+    matches!(u32::from(c), 0x3040..=0x309F)
+}
+
+/// Katakana: the main block (incl. the prolonged sound mark `ー`, U+30FC),
+/// phonetic extensions, and the halfwidth katakana used by legacy input.
+fn is_katakana(c: char) -> bool {
+    matches!(u32::from(c), 0x30A0..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F)
+}
+
+/// CJK ideographs: the Unified block plus Extension A, compatibility ideographs,
+/// the supplementary-plane extensions, and the ideographic iteration / number
+/// marks (`々 〆 〇`) that read as part of a kanji run.
+fn is_han(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x3005..=0x3007        // 々 〆 〇
+        | 0x3400..=0x4DBF      // Extension A
+        | 0x4E00..=0x9FFF      // Unified Ideographs
+        | 0xF900..=0xFAFF      // Compatibility Ideographs
+        | 0x2_0000..=0x2_FA1F  // Supplementary (Ext B–F + compat supplement)
+    )
 }
 
 /// Granularity a pending pointer selection expands to, resolved against the
@@ -2621,9 +2672,35 @@ mod tests {
 
     #[test]
     fn word_bounds_respects_char_boundaries() {
-        // Each kana is 3 UTF-8 bytes; the run is alphanumeric so all three are
-        // selected, and the boundaries land on char starts (0 and 9).
+        // Each kana is 3 UTF-8 bytes; the run is all one script (hiragana) so
+        // all three are selected, and the bounds land on char starts (0 and 9).
         assert_eq!(word_bounds("あいう", 3), (0, 9));
+    }
+
+    #[test]
+    fn word_bounds_segments_by_script() {
+        // Japanese has no inter-word spaces, so folding every CJK char into one
+        // `Word` run made a double-click grab the whole sentence. Splitting on
+        // script runs (FW-11) stops at a script change: a click in the kanji
+        // grabs only the kanji, a click in the trailing kana grabs the kana.
+        // "日本語です" = 日本語 (3 kanji) + です (2 hiragana), 3 bytes each.
+        let s = "日本語です";
+        assert_eq!(word_bounds(s, 3), (0, 9)); // inside the kanji run
+        assert_eq!(word_bounds(s, 12), (9, 15)); // inside the trailing hiragana
+    }
+
+    #[test]
+    fn word_bounds_keeps_katakana_run_with_choonpu() {
+        // The prolonged sound mark `ー` (U+30FC) is katakana, not a generic
+        // word char, so "ラーメン" selects as one run instead of splitting at ー.
+        assert_eq!(word_bounds("ラーメン", 6), (0, 12));
+    }
+
+    #[test]
+    fn word_bounds_splits_hiragana_from_katakana() {
+        // Distinct kana scripts are distinct runs: a click in the katakana
+        // grabs only the katakana. "あアい" → あ(0..3) ア(3..6) い(6..9).
+        assert_eq!(word_bounds("あアい", 3), (3, 6));
     }
 
     #[test]
