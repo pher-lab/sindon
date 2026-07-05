@@ -5011,6 +5011,186 @@ fn button_space_triggers_click_when_focused() {
     );
 }
 
+// ── Button::on_click_rect (FW-22 / G5-a11y) ───────────────────────
+
+#[test]
+fn button_on_click_rect_mouse_hands_back_button_rect_and_both_fire() {
+    // FW-22 / G5-a11y: `on_click_rect` is the rect-returning counterpart to
+    // `on_click`. A left-mouse release hands back the button's own layout box
+    // (to anchor a popover to the trigger), at the same moment as `on_click` —
+    // and both fire when both are set.
+    let clicked = Rc::new(Cell::new(0u32));
+    let rect_fired = Rc::new(Cell::new(0u32));
+    let got = Rc::new(Cell::new(shroud_core::Rect::ZERO));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(100.0).padding(10.0));
+    let c = clicked.clone();
+    let rf = rect_fired.clone();
+    let g = got.clone();
+    let btn = tree.add_child(
+        root,
+        Button::new("Menu")
+            .on_click(move |_ctx| c.set(c.get() + 1))
+            .on_click_rect(move |rect, _ctx| {
+                rf.set(rf.get() + 1);
+                g.set(rect);
+            }),
+    );
+    tree.compute_layout(200.0, 100.0);
+
+    let expected = tree.layout_rect(btn);
+    let cx = expected.origin.x + expected.size.width / 2.0;
+    let cy = expected.origin.y + expected.size.height / 2.0;
+    let mut ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(cx, cy),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+    tree.dispatch_event(
+        &WidgetEvent::MouseUp {
+            position: Point::new(cx, cy),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(clicked.get(), 1, "on_click still fires on release");
+    assert_eq!(rect_fired.get(), 1, "on_click_rect fires once alongside it");
+    let r = got.get();
+    assert!(
+        (r.origin.x - expected.origin.x).abs() < 0.5
+            && (r.origin.y - expected.origin.y).abs() < 0.5
+            && (r.size.width - expected.size.width).abs() < 0.5
+            && (r.size.height - expected.size.height).abs() < 0.5,
+        "handler got {:?}, want the button's own rect {:?}",
+        r,
+        expected
+    );
+}
+
+#[test]
+fn button_on_click_rect_enter_delivers_real_rect_not_zero() {
+    // The a11y crux of the graduate: a keyboard activation (Enter) carries no
+    // cursor point, yet the handler must still receive the button's *real*
+    // layout box — so a menu opened by keyboard anchors to the button, not the
+    // origin. `dispatch_to_node` hands each node its own `absolute_rect`, so the
+    // focused button sees its true rect even though the KeyDown has no position.
+    let got = Rc::new(Cell::new(shroud_core::Rect::ZERO));
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(100.0).padding(10.0));
+    let g = got.clone();
+    let btn = tree.add_child(
+        root,
+        Button::new("Menu").on_click_rect(move |rect, _ctx| g.set(rect)),
+    );
+    tree.compute_layout(200.0, 100.0);
+
+    let expected = tree.layout_rect(btn);
+    let mut ctx = EventContext::new();
+    tree.focus(Some(btn), &mut ctx);
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Enter),
+        },
+        &mut ctx,
+    );
+
+    let r = got.get();
+    assert!(
+        r.size.width > 0.0 && r.size.height > 0.0,
+        "Enter must deliver a real (non-zero) rect, got {:?}",
+        r
+    );
+    assert!(
+        (r.origin.x - expected.origin.x).abs() < 0.5
+            && (r.origin.y - expected.origin.y).abs() < 0.5,
+        "Enter rect origin {:?} must match the button's layout {:?}",
+        r.origin,
+        expected.origin
+    );
+}
+
+#[test]
+fn button_on_click_rect_space_delivers_real_rect() {
+    // Space is the third activation route (CharInput, a separate code path from
+    // Enter) — it must fire `on_click_rect` with the same real rect.
+    let fired = Rc::new(Cell::new(0u32));
+    let got = Rc::new(Cell::new(shroud_core::Rect::ZERO));
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(100.0));
+    let f = fired.clone();
+    let g = got.clone();
+    let btn = tree.add_child(
+        root,
+        Button::new("Menu").on_click_rect(move |rect, _ctx| {
+            f.set(f.get() + 1);
+            g.set(rect);
+        }),
+    );
+    tree.compute_layout(200.0, 100.0);
+
+    let expected = tree.layout_rect(btn);
+    let mut ctx = EventContext::new();
+    tree.focus(Some(btn), &mut ctx);
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: ' ' }, &mut ctx);
+
+    assert_eq!(fired.get(), 1, "Space fires on_click_rect once");
+    let r = got.get();
+    assert!(
+        (r.origin.x - expected.origin.x).abs() < 0.5
+            && (r.size.width - expected.size.width).abs() < 0.5,
+        "Space rect {:?} must match the button's layout {:?}",
+        r,
+        expected
+    );
+}
+
+#[test]
+fn button_on_click_rect_disabled_does_not_fire() {
+    // A disabled button is inert: it drops out of the Tab order and its
+    // activation handlers — including `on_click_rect` — must not fire.
+    let fired = Rc::new(Cell::new(0u32));
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(100.0));
+    let f = fired.clone();
+    let btn = tree.add_child(
+        root,
+        Button::new("Menu")
+            .disabled(true)
+            .on_click_rect(move |_rect, _ctx| f.set(f.get() + 1)),
+    );
+    tree.compute_layout(200.0, 100.0);
+
+    let expected = tree.layout_rect(btn);
+    let cx = expected.origin.x + expected.size.width / 2.0;
+    let cy = expected.origin.y + expected.size.height / 2.0;
+    let mut ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(cx, cy),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+    tree.dispatch_event(
+        &WidgetEvent::MouseUp {
+            position: Point::new(cx, cy),
+            button: MouseButton::Left,
+        },
+        &mut ctx,
+    );
+
+    assert_eq!(
+        fired.get(),
+        0,
+        "disabled button must not fire on_click_rect"
+    );
+}
+
 #[test]
 fn button_enter_does_nothing_when_not_focused() {
     // Without focus, Enter must not stray into a Button's handler — every

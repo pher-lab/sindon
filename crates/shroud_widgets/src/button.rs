@@ -26,6 +26,11 @@ const DEFAULT_HOVER_TRANSITION: Duration = Duration::from_millis(120);
 /// Handler type for `Button::on_click` — takes the dispatch context so
 /// handlers can queue tree mutations (`ctx.remove`, `ctx.replace_screen`).
 type ClickHandler = Box<dyn FnMut(&mut EventContext)>;
+/// Handler type for [`Button::on_click_rect`] — like [`ClickHandler`] but also
+/// gets the button's own layout rect, for anchoring a popover to the trigger
+/// itself. The rect-returning, a11y-complete counterpart to
+/// [`Container::on_press_rect`](crate::Container::on_press_rect).
+type ClickRectHandler = Box<dyn FnMut(Rect, &mut EventContext)>;
 
 pub struct Button {
     label: Reactive<String>,
@@ -36,6 +41,11 @@ pub struct Button {
     /// bundled icon font (the label is then a single icon codepoint).
     attrs: TextAttrs,
     on_click: Option<ClickHandler>,
+    /// Optional activation handler that also receives the button's own layout
+    /// rect (rather than nothing), for anchoring a popover to the trigger
+    /// itself. Fires at the same moments as `on_click`. See
+    /// [`Button::on_click_rect`].
+    on_click_rect: Option<ClickRectHandler>,
     // Visual state
     /// Progress of the normal→hover background fade, lazily created on the
     /// first MouseEnter/Leave (`None` until then = resting). The pressed
@@ -94,6 +104,7 @@ impl Button {
             font_size: None,
             attrs: TextAttrs::default(),
             on_click: None,
+            on_click_rect: None,
             hover_anim: None,
             hover_transition: DEFAULT_HOVER_TRANSITION,
             pressed: false,
@@ -126,6 +137,7 @@ impl Button {
             font_size: None,
             attrs: TextAttrs::default(),
             on_click: None,
+            on_click_rect: None,
             hover_anim: None,
             hover_transition: DEFAULT_HOVER_TRANSITION,
             pressed: false,
@@ -155,6 +167,29 @@ impl Button {
     /// to touch the tree can ignore the parameter with `|_ctx| { ... }`.
     pub fn on_click(mut self, f: impl FnMut(&mut EventContext) + 'static) -> Self {
         self.on_click = Some(Box::new(f));
+        self
+    }
+
+    /// Set an activation handler that also receives the button's own laid-out
+    /// rect — the rect-returning counterpart to [`on_click`](Self::on_click).
+    ///
+    /// It fires at the same three moments as `on_click` (mouse release, Enter,
+    /// Space) but hands back the button's box instead of nothing: everything a
+    /// click handler needs plus the geometry to anchor a popover *to the
+    /// button*. Because the rect is the button's own layout box — not a cursor
+    /// point — the anchor is well-defined for keyboard activation too, so a
+    /// header menu opened this way is fully Tab/Enter-operable. That is the one
+    /// thing [`Container::on_press_rect`](crate::Container::on_press_rect) can't
+    /// give you: it also reports the trigger's rect, but fires on the raw press
+    /// and leaves its `Container` trigger unfocusable, so keyboard users can't
+    /// reach it. Reach for this on any menu button that must be accessible; keep
+    /// `on_press_rect` for a pure pointer affordance.
+    ///
+    /// `push_layer` translates an `AnchorRect` built from this rect into
+    /// viewport space, so the popover lands correctly even nested in a modal.
+    /// Both `on_click` and `on_click_rect` fire when both are set.
+    pub fn on_click_rect(mut self, f: impl FnMut(Rect, &mut EventContext) + 'static) -> Self {
+        self.on_click_rect = Some(Box::new(f));
         self
     }
 
@@ -321,6 +356,20 @@ impl Button {
     /// Whether this button currently has keyboard focus.
     pub fn is_focused(&self) -> bool {
         self.focused
+    }
+
+    /// Fire the activation handlers. The shared path for the three activation
+    /// routes — a left-mouse release, Enter, and Space — so they behave
+    /// identically. `on_click` gets no argument; `on_click_rect` gets the
+    /// button's own layout rect (to anchor a popover to the trigger). Both
+    /// fire when both are set; a no-op when neither is.
+    fn activate(&mut self, layout: Rect, ctx: &mut EventContext) {
+        if let Some(handler) = &mut self.on_click {
+            handler(ctx);
+        }
+        if let Some(handler) = &mut self.on_click_rect {
+            handler(layout, ctx);
+        }
     }
 }
 
@@ -514,7 +563,7 @@ impl Widget for Button {
         }
     }
 
-    fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
+    fn event(&mut self, event: &WidgetEvent, layout: Rect, ctx: &mut EventContext) -> EventResult {
         // A disabled button is inert: swallow no state, fire no click. Left
         // fully transparent to events so nothing latches a stale press/hover.
         if self.disabled.get() {
@@ -543,9 +592,7 @@ impl Widget for Button {
             } => {
                 if self.pressed {
                     self.pressed = false;
-                    if let Some(handler) = &mut self.on_click {
-                        handler(ctx);
-                    }
+                    self.activate(layout, ctx);
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -566,15 +613,11 @@ impl Widget for Button {
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Enter),
             } if self.focused => {
-                if let Some(handler) = &mut self.on_click {
-                    handler(ctx);
-                }
+                self.activate(layout, ctx);
                 EventResult::Consumed
             }
             WidgetEvent::CharInput { ch: ' ' } if self.focused => {
-                if let Some(handler) = &mut self.on_click {
-                    handler(ctx);
-                }
+                self.activate(layout, ctx);
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,

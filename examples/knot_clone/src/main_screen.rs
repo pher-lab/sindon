@@ -644,30 +644,33 @@ fn popover_divider(tree: &mut WidgetTree, parent: usize) {
     );
 }
 
-/// A header icon that opens a popover anchored to *itself*. Unlike
-/// [`icon_button`] (a plain [`Button`]), this is a [`Container`] so it can use
-/// [`Container::on_press_rect`] (FW-21 / G5), which hands back the trigger's
-/// own layout rect. The menu then drops below the button and right-aligns to
-/// its right edge — React's `right-0 top-full`. (Before FW-21 no click/press
-/// handler exposed the rect, so these menus had to anchor at the cursor.)
+/// A header icon that opens a popover anchored to *itself* and is fully
+/// keyboard-operable. Like [`icon_button`] this is a plain [`Button`]; it uses
+/// [`Button::on_click_rect`] (FW-22 / G5-a11y) — the rect-returning counterpart
+/// to `on_click` — which hands back the trigger's own layout rect. The menu
+/// then drops below the button and right-aligns to its right edge — React's
+/// `right-0 top-full`. (This used to be a `Container` with `on_press_rect`, the
+/// only rect-anchoring API at the time, which cost the trigger its Tab/Enter
+/// focusability; `on_click_rect` restores it while keeping the same anchor.)
 fn menu_icon_trigger(
     tree: &mut WidgetTree,
     parent: usize,
     glyph: &'static str,
     open: fn(Rect, &mut EventContext),
 ) {
-    let btn = tree.add_child(
+    tree.add_child(
         parent,
-        Container::row()
-            .align_center()
-            .justify_center()
-            .padding(6.0) // p-1.5
+        Button::new(glyph)
+            .font_size(16.0)
             .radius(6.0)
-            .hoverable()
+            .padding_x(6.0) // p-1.5
+            .padding_y(6.0)
+            .background(Color::TRANSPARENT)
+            .text_color(icon_fg())
             .hover_background(border())
-            .on_press_rect(open),
+            .press_background(border())
+            .on_click_rect(open),
     );
-    tree.add_child(btn, TextWidget::new(glyph).font_size(16.0).color(icon_fg()));
 }
 
 /// Build an `AnchorRect` popover anchored just below a cursor *point* —
