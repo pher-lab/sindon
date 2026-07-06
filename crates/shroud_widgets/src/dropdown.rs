@@ -17,6 +17,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
+use crate::interaction::{InteractionState, Release};
 use crate::layer::{HAlign, LayerAnchor, LayerOptions, Placement};
 use crate::menu_item::MenuItem;
 use crate::paint::PaintContext;
@@ -45,9 +46,8 @@ pub struct Dropdown {
     selected: Signal<usize>,
     placeholder: Option<String>,
 
-    hovered: bool,
-    pressed: bool,
-    focused: bool,
+    /// Pointer / keyboard interaction flags — see [`InteractionState`].
+    state: InteractionState,
 
     /// Shared with the popover root via `Rc`. Set to `true` while the layer
     /// is on the stack; flipped back to `false` by [`DropdownPopover`]'s
@@ -82,9 +82,7 @@ impl Dropdown {
             options,
             selected,
             placeholder: None,
-            hovered: false,
-            pressed: false,
-            focused: false,
+            state: InteractionState::default(),
             open: Rc::new(Cell::new(false)),
             radius: 4.0,
             background: None,
@@ -178,7 +176,7 @@ impl Dropdown {
 
     /// Whether the trigger currently has keyboard focus.
     pub fn is_focused(&self) -> bool {
-        self.focused
+        self.state.focused
     }
 
     fn current_label(&self) -> String {
@@ -310,7 +308,11 @@ impl Widget for Dropdown {
         // Hover overrides the resting bg; the popover stays open while
         // hovered, so the trigger keeps the highlight as long as the
         // cursor sits over it — matches OS-native combobox feel.
-        let bg = if self.hovered { hover_bg } else { base_bg };
+        let bg = if self.state.hovered {
+            hover_bg
+        } else {
+            base_bg
+        };
         let text_color = self
             .text_color
             .as_ref()
@@ -376,58 +378,59 @@ impl Widget for Dropdown {
             }
         }
 
-        if self.focused && ctx.focus_visible() {
+        if self.state.focused && ctx.focus_visible() {
             let override_color = self.focus_ring_color.as_ref().map(|c| c.get());
             ctx.paint_focus_ring(layout, override_color, self.radius);
         }
     }
 
     fn event(&mut self, event: &WidgetEvent, layout: Rect, ctx: &mut EventContext) -> EventResult {
+        // The trigger has no disabled state, so it never latches inertly —
+        // pass `false` throughout. Flag bookkeeping and the clear-vs-latch
+        // discipline live in [`InteractionState`].
         match event {
             WidgetEvent::MouseEnter => {
-                self.hovered = true;
+                self.state.enter(false);
                 EventResult::Consumed
             }
             WidgetEvent::MouseLeave => {
-                self.hovered = false;
-                self.pressed = false;
+                self.state.leave();
                 EventResult::Consumed
             }
             WidgetEvent::MouseDown {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.pressed = true;
+                self.state.press(false);
                 EventResult::Consumed
             }
             WidgetEvent::MouseUp {
                 button: MouseButton::Left,
                 ..
-            } => {
-                if self.pressed {
-                    self.pressed = false;
+            } => match self.state.release(false) {
+                Release::Fire => {
                     self.toggle(layout, ctx);
                     EventResult::Consumed
-                } else {
-                    EventResult::Ignored
                 }
-            }
+                Release::Cancelled => EventResult::Consumed,
+                Release::Idle => EventResult::Ignored,
+            },
             WidgetEvent::FocusGained => {
-                self.focused = true;
+                self.state.focus_gained(false);
                 EventResult::Ignored
             }
             WidgetEvent::FocusLost => {
-                self.focused = false;
+                self.state.focus_lost();
                 EventResult::Ignored
             }
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Enter),
-            } if self.focused => {
+            } if self.state.focused => {
                 self.toggle(layout, ctx);
                 EventResult::Consumed
             }
             // Space arrives as a character (matches Button activation path).
-            WidgetEvent::CharInput { ch: ' ' } if self.focused => {
+            WidgetEvent::CharInput { ch: ' ' } if self.state.focused => {
                 self.toggle(layout, ctx);
                 EventResult::Consumed
             }

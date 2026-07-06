@@ -6,6 +6,7 @@
 //! "Delete" row etc.) can override via [`MenuItem::text_color`].
 
 use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
+use crate::interaction::{InteractionState, Release};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Rect, Size};
@@ -41,8 +42,9 @@ pub struct MenuItem {
     label: String,
     on_click: Option<MenuClickHandler>,
     text_color: Option<Reactive<Color>>,
-    hovered: bool,
-    pressed: bool,
+    /// Hover / press flags — a menu row is not individually focusable, so the
+    /// `focused` flag of [`InteractionState`] goes unused here.
+    state: InteractionState,
 }
 
 impl MenuItem {
@@ -57,8 +59,7 @@ impl MenuItem {
             label: label.into(),
             on_click: Some(Box::new(on_click)),
             text_color: None,
-            hovered: false,
-            pressed: false,
+            state: InteractionState::default(),
         }
     }
 
@@ -119,7 +120,7 @@ impl Widget for MenuItem {
             .map(|c| c.get())
             .unwrap_or(default_text);
 
-        let bg = if self.hovered {
+        let bg = if self.state.hovered {
             hover_bg
         } else {
             Color::TRANSPARENT
@@ -152,37 +153,37 @@ impl Widget for MenuItem {
     }
 
     fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
+        // A menu row has no disabled state, so pass `false` throughout; the
+        // flag discipline lives in [`InteractionState`].
         match event {
             WidgetEvent::MouseEnter => {
-                self.hovered = true;
+                self.state.enter(false);
                 EventResult::Consumed
             }
             WidgetEvent::MouseLeave => {
-                self.hovered = false;
-                self.pressed = false;
+                self.state.leave();
                 EventResult::Consumed
             }
             WidgetEvent::MouseDown {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.pressed = true;
+                self.state.press(false);
                 EventResult::Consumed
             }
             WidgetEvent::MouseUp {
                 button: MouseButton::Left,
                 ..
-            } => {
-                if self.pressed {
-                    self.pressed = false;
+            } => match self.state.release(false) {
+                Release::Fire => {
                     if let Some(handler) = &mut self.on_click {
                         handler(ctx);
                     }
                     EventResult::Consumed
-                } else {
-                    EventResult::Ignored
                 }
-            }
+                Release::Cancelled => EventResult::Consumed,
+                Release::Idle => EventResult::Ignored,
+            },
             _ => EventResult::Ignored,
         }
     }

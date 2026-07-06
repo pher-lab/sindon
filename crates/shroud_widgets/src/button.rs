@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
+use crate::interaction::{InteractionState, Release};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Lerp, Rect, Size};
@@ -53,8 +54,10 @@ pub struct Button {
     hover_anim: Option<Animated<f32>>,
     /// How long the hover fade takes; `Duration::ZERO` makes it instant.
     hover_transition: Duration,
-    pressed: bool,
-    focused: bool,
+    /// Pointer / keyboard interaction flags (pressed, focused, and a logical
+    /// hovered kept in step with `hover_anim`). Centralizes the
+    /// disabled-clears-but-does-not-latch invariant — see [`InteractionState`].
+    state: InteractionState,
     // Colors (None = read from theme)
     normal_bg: Option<Reactive<Color>>,
     hover_bg: Option<Reactive<Color>>,
@@ -107,8 +110,7 @@ impl Button {
             on_click_rect: None,
             hover_anim: None,
             hover_transition: DEFAULT_HOVER_TRANSITION,
-            pressed: false,
-            focused: false,
+            state: InteractionState::default(),
             normal_bg: None,
             hover_bg: None,
             press_bg: None,
@@ -140,8 +142,7 @@ impl Button {
             on_click_rect: None,
             hover_anim: None,
             hover_transition: DEFAULT_HOVER_TRANSITION,
-            pressed: false,
-            focused: false,
+            state: InteractionState::default(),
             normal_bg: None,
             hover_bg: None,
             press_bg: None,
@@ -355,7 +356,7 @@ impl Button {
 
     /// Whether this button currently has keyboard focus.
     pub fn is_focused(&self) -> bool {
-        self.focused
+        self.state.focused
     }
 
     /// Fire the activation handlers. The shared path for the three activation
@@ -485,7 +486,7 @@ impl Widget for Button {
         // while the fade is in flight; pressed pins it to 0 (the press color
         // is used directly, reading as instant). A disabled button ignores
         // both — it must read inert regardless of a stale hover animation.
-        let hover_t = if self.pressed || disabled {
+        let hover_t = if self.state.pressed || disabled {
             0.0
         } else {
             self.hover_anim.as_ref().map_or(0.0, |a| a.get())
@@ -500,7 +501,7 @@ impl Widget for Button {
                 a: normal.a * 0.5,
                 ..normal
             })
-        } else if self.pressed {
+        } else if self.state.pressed {
             press
         } else if hover_t >= 1.0 {
             hover
@@ -557,7 +558,7 @@ impl Widget for Button {
             }
         }
 
-        if self.focused && !disabled && ctx.focus_visible() {
+        if self.state.focused && !disabled && ctx.focus_visible() {
             let override_color = self.focus_ring_color.as_ref().map(|c| c.get());
             ctx.paint_focus_ring(layout, override_color, self.radius);
         }
@@ -566,45 +567,34 @@ impl Widget for Button {
     fn event(&mut self, event: &WidgetEvent, layout: Rect, ctx: &mut EventContext) -> EventResult {
         let disabled = self.disabled.get();
         match event {
-            // De-activation is processed *even while disabled*. `disabled` gates
-            // entering an active state, never leaving one. The tree still routes
-            // MouseLeave / FocusLost to a disabled-but-visible widget — hit-test
-            // filters on `visible()` and focus dispatch blurs the outgoing
-            // widget regardless of `focusable()` — so a button that flips to
-            // disabled mid-interaction (its `disabled` is a `Reactive<bool>`,
-            // e.g. a form submit) would otherwise strand a stale hover / focus
-            // that resurfaces the instant it is re-enabled. These arms always
-            // clear.
+            // Clearing transitions run *even while disabled* — see
+            // [`InteractionState`] for the invariant. Button drives its hover
+            // animation alongside the logical flag.
             WidgetEvent::MouseLeave => {
+                self.state.leave();
                 self.drive_hover(0.0);
-                self.pressed = false;
                 EventResult::Consumed
             }
             WidgetEvent::FocusLost => {
-                self.focused = false;
+                self.state.focus_lost();
                 EventResult::Ignored
             }
-            // Releasing the press latch is also de-activation: clear it even
-            // while disabled (so a press begun before the disable can't stick),
-            // but only fire the click when still enabled.
             WidgetEvent::MouseUp {
                 button: MouseButton::Left,
                 ..
-            } => {
-                if self.pressed {
-                    self.pressed = false;
-                    if !disabled {
-                        self.activate(layout, ctx);
-                    }
+            } => match self.state.release(disabled) {
+                Release::Fire => {
+                    self.activate(layout, ctx);
                     EventResult::Consumed
-                } else {
-                    EventResult::Ignored
                 }
-            }
+                Release::Cancelled => EventResult::Consumed,
+                Release::Idle => EventResult::Ignored,
+            },
             // Everything below newly *enters* an active state or activates the
             // button — all inert while disabled, so nothing latches.
             _ if disabled => EventResult::Ignored,
             WidgetEvent::MouseEnter => {
+                self.state.enter(disabled);
                 self.drive_hover(1.0);
                 EventResult::Consumed
             }
@@ -612,11 +602,11 @@ impl Widget for Button {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.pressed = true;
+                self.state.press(disabled);
                 EventResult::Consumed
             }
             WidgetEvent::FocusGained => {
-                self.focused = true;
+                self.state.focus_gained(disabled);
                 EventResult::Ignored
             }
             // Keyboard activation: Enter triggers click while focused.
@@ -625,11 +615,11 @@ impl Widget for Button {
             // through the character pipeline alongside other printable keys).
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Enter),
-            } if self.focused => {
+            } if self.state.focused => {
                 self.activate(layout, ctx);
                 EventResult::Consumed
             }
-            WidgetEvent::CharInput { ch: ' ' } if self.focused => {
+            WidgetEvent::CharInput { ch: ' ' } if self.state.focused => {
                 self.activate(layout, ctx);
                 EventResult::Consumed
             }
@@ -716,12 +706,12 @@ mod tests {
         let mut ctx = EventContext::new();
 
         b.event(&left(true), rect(), &mut ctx);
-        assert!(b.pressed, "left press latches while enabled");
+        assert!(b.state.pressed, "left press latches while enabled");
 
         disabled.set(true);
         b.event(&left(false), rect(), &mut ctx);
         assert!(
-            !b.pressed,
+            !b.state.pressed,
             "release must clear the press latch even while disabled"
         );
     }
@@ -738,7 +728,7 @@ mod tests {
         let mut ctx = EventContext::new();
 
         b.event(&left(true), rect(), &mut ctx);
-        assert!(!b.pressed, "disabled button does not latch a press");
+        assert!(!b.state.pressed, "disabled button does not latch a press");
 
         b.event(&left(false), rect(), &mut ctx);
         assert_eq!(clicks.get(), 0, "disabled button never fires on_click");

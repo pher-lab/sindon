@@ -12,6 +12,7 @@ pub mod event;
 pub mod focus;
 mod image;
 mod input;
+mod interaction;
 pub mod layer;
 mod menu_item;
 pub mod paint;

@@ -1,6 +1,7 @@
 //! Checkbox widget — toggle with optional label.
 
 use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
+use crate::interaction::InteractionState;
 use crate::paint::PaintContext;
 use crate::widget::Widget;
 use shroud_core::{Color, Rect};
@@ -22,8 +23,9 @@ pub struct Checkbox {
     label: String,
     font_size: Option<f32>,
     on_change: Option<ChangeHandler>,
-    hovered: bool,
-    focused: bool,
+    /// Hover / focus flags — a checkbox toggles on press rather than release,
+    /// so the `pressed` flag of [`InteractionState`] goes unused here.
+    state: InteractionState,
     // Colors (None = read from theme)
     check_color: Option<Color>,
     box_bg: Option<Color>,
@@ -40,8 +42,7 @@ impl Checkbox {
             label: label.into(),
             font_size: None,
             on_change: None,
-            hovered: false,
-            focused: false,
+            state: InteractionState::default(),
             check_color: None,
             box_bg: None,
             box_border: None,
@@ -97,7 +98,7 @@ impl Checkbox {
 
     /// Whether this checkbox currently has keyboard focus.
     pub fn is_focused(&self) -> bool {
-        self.focused
+        self.state.focused
     }
 
     /// Box size based on font size.
@@ -126,7 +127,7 @@ impl Widget for Checkbox {
             .unwrap_or(ctx.theme.typography.body.font_size);
         let check_color = self.check_color.unwrap_or(ctx.theme.colors.primary);
         let box_bg = self.box_bg.unwrap_or(ctx.theme.colors.input_background);
-        let box_border = self.box_border.unwrap_or(if self.hovered {
+        let box_border = self.box_border.unwrap_or(if self.state.hovered {
             ctx.theme.colors.input_border_focused
         } else {
             ctx.theme.colors.input_border
@@ -213,19 +214,22 @@ impl Widget for Checkbox {
         // Ring follows the full layout rect (the entire row is the click
         // target, so the focus affordance matches what the user can hit).
         // The row has no corner radius, so the ring stays square.
-        if self.focused && ctx.focus_visible() {
+        if self.state.focused && ctx.focus_visible() {
             ctx.paint_focus_ring(layout, self.focus_ring_color, 0.0);
         }
     }
 
     fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
+        // A checkbox has no disabled state and toggles on press rather than
+        // release, so it never uses the press latch; the hover / focus flags
+        // and their clearing discipline live in [`InteractionState`].
         match event {
             WidgetEvent::MouseEnter => {
-                self.hovered = true;
+                self.state.enter(false);
                 EventResult::Consumed
             }
             WidgetEvent::MouseLeave => {
-                self.hovered = false;
+                self.state.leave();
                 EventResult::Consumed
             }
             WidgetEvent::MouseDown {
@@ -239,18 +243,18 @@ impl Widget for Checkbox {
                 EventResult::Consumed
             }
             WidgetEvent::FocusGained => {
-                self.focused = true;
+                self.state.focus_gained(false);
                 EventResult::Ignored
             }
             WidgetEvent::FocusLost => {
-                self.focused = false;
+                self.state.focus_lost();
                 EventResult::Ignored
             }
             // Space toggles when focused — browser parity. Enter is
             // intentionally a no-op (browsers reserve it for form-submit,
             // not checkbox toggle), so leave it for the surrounding screen
             // to interpret.
-            WidgetEvent::CharInput { ch: ' ' } if self.focused => {
+            WidgetEvent::CharInput { ch: ' ' } if self.state.focused => {
                 self.checked = !self.checked;
                 if let Some(handler) = &mut self.on_change {
                     handler(self.checked, ctx);
