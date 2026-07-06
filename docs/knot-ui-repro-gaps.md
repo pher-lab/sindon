@@ -287,7 +287,14 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   （消すと次 move で spurious re-enter → tip 再オープン）。
 - **テスト**: `layer_tests.rs` に2本 — interactive push で trigger が leave を受け `hover_anim` reset
   （`exited==1`/`hovered==None`）/ 非 interactive（tooltip）push は hover 維持（`hovered==Some(trigger)`/
-  `exited==0`）。shroud_widgets 全 test 緑・fmt/clippy クリーン。**実機確認待ち。**
+  `exited==0`）。shroud_widgets 全 test 緑・fmt/clippy クリーン。**実機 OK（2026-07-06 ユーザ確認 —
+  メニュー開閉で trigger のホバー灰が固定しないこと確認）。**
+- **副次の既知挙動（実害極小・未修正）**: 「pop 側の非対称」。①メニューを開いている間は layer が入力を
+  独占するので**メニュー外の hover は出ない**（＝正・input priority）。②メニューを**別ボタンのクリックで
+  閉じた**とき、カーソル下の widget は**次にマウスを動かすまで hover 表示されない**（pop 後に hover を
+  カーソル位置から再評価していないため）。次 move で自己修復し、Web/多くの native と同じ慣習挙動 ∴
+  「バグ」でなく acceptable として記録（fix するなら pop 各経路で last-cursor から `update_hover_in` 再評価。
+  push と違い pop 時 main tree の layout は有効なので実装は容易、ただし ROI 低）。
 - 演習で炙った framework 実バグの**第5号**（G13/G14/G17/G19 に続く）。影響範囲は「クリックで開く
   menu/dropdown」trigger 全般。
 
