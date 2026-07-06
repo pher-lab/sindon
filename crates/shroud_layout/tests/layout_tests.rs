@@ -412,3 +412,75 @@ fn row_align_center_keeps_children_at_natural_height() {
     assert_eq!(title_rect.origin.y, 10.0);
     assert_eq!(button_rect.origin.y, 20.0);
 }
+
+#[test]
+fn viewport_dims_resolve_against_viewport_not_parent() {
+    // `max_height_vh(80)` should clamp to 80% of the *viewport* height,
+    // independent of the parent's size — the CSS `max-h-[80vh]` behavior a
+    // modal card relies on. A tall content child would otherwise let the card
+    // grow to its full content height.
+    let mut engine = LayoutEngine::new();
+    let tall_child = engine.add_leaf(FlexStyle::new().width(200.0).height(2000.0));
+    // Viewport is 1000 px tall → cap should land at 800.
+    let card = engine.add_container(
+        FlexStyle::new()
+            .column()
+            .max_height_vh(80.0)
+            .resolve_viewport(1200.0, 1000.0),
+        &[tall_child],
+    );
+    engine.compute(card, 1200.0, 1000.0);
+
+    assert_eq!(
+        engine.layout(card).size.height,
+        800.0,
+        "card height should be clamped to 80vh = 800, not the child's 2000",
+    );
+}
+
+#[test]
+fn viewport_dims_width_and_min_resolve() {
+    // `width_vw(50)` and `min_height_vh(100)` bake to pixels against the
+    // viewport (CSS `w-[50vw]` / `min-h-screen`).
+    let mut engine = LayoutEngine::new();
+    let node = engine.add_leaf(
+        FlexStyle::new()
+            .width_vw(50.0)
+            .min_height_vh(100.0)
+            .resolve_viewport(800.0, 600.0),
+    );
+    engine.compute(node, 800.0, 600.0);
+
+    let rect = engine.layout(node);
+    assert_eq!(rect.size.width, 400.0, "50vw of 800 = 400");
+    assert_eq!(rect.size.height, 600.0, "min-height 100vh of 600 = 600");
+}
+
+#[test]
+fn has_viewport_dims_reflects_setters() {
+    assert!(!FlexStyle::new().width(100.0).has_viewport_dims());
+    assert!(FlexStyle::new().max_height_vh(80.0).has_viewport_dims());
+    assert!(FlexStyle::new().width_vw(100.0).has_viewport_dims());
+    // resolve_viewport does not clear the intent flag (idempotent re-resolve
+    // on the next resize must still see it as viewport-relative).
+    assert!(
+        FlexStyle::new()
+            .height_vh(50.0)
+            .resolve_viewport(800.0, 600.0)
+            .has_viewport_dims()
+    );
+}
+
+#[test]
+fn viewport_vw_wins_over_earlier_pixel_on_same_axis() {
+    // A later `*_vw` overrides an earlier pixel width once resolved.
+    let mut engine = LayoutEngine::new();
+    let node = engine.add_leaf(
+        FlexStyle::new()
+            .width(123.0)
+            .width_vw(25.0)
+            .resolve_viewport(800.0, 600.0),
+    );
+    engine.compute(node, 800.0, 600.0);
+    assert_eq!(engine.layout(node).size.width, 200.0, "25vw of 800 = 200");
+}

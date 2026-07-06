@@ -11,12 +11,12 @@
 //! top of that — a genuine three-deep layer-stack probe.
 //!
 //! Gaps this slice surfaces (logged in `docs/knot-ui-repro-gaps.md`):
-//!   - **G18 (shadow half graduated → FW-18)** the `shadow-xl` on every modal
-//!     is now [`Container::elevation`]`(4)` (see [`card_column`]) — the cards
-//!     lift off the scrim instead of sitting flat. The *viewport-relative*
-//!     half remains open: there is still no `vh`/`vw` sizing, so the Restore
-//!     card hardcodes `max_height(576)` (80% of the 720px window) for
-//!     `max-h-[80vh]`.
+//!   - **G18 (both halves graduated → FW-18 shadow, FW-24 vh/vw)** the
+//!     `shadow-xl` on every modal is now [`Container::elevation`]`(4)` (see
+//!     [`card_column`]) — the cards lift off the scrim instead of sitting
+//!     flat — and the Restore card's `max-h-[80vh]` is now real
+//!     viewport-relative sizing via [`Container::max_height_vh`]`(80.0)`,
+//!     tracking window resize instead of a hardcoded 576px.
 //!   - **G4** asymmetric padding — modal sections are `px-6 py-4`, fields
 //!     `px-3 py-2` / `px-2 py-1`; `Container::padding` is uniform, so these are
 //!     approximated (the inputs themselves do get `padding_x/y` from FW-17).
@@ -191,14 +191,15 @@ pub fn open_backup_settings(ctx: &mut EventContext) {
 /// The Restore-from-Backup dialog (`RestoreBackupModal.tsx`): `max-w-md
 /// max-h-[80vh] flex flex-col` — a sticky `border-b` header, a `flex-1
 /// overflow-y-auto` list of backups, and a sticky `border-t` footer. This is
-/// the slice's headline layout probe: does a `max_height`-capped column with a
-/// `grow` [`ScrollView`] in the middle actually clip and scroll while the
-/// header/footer stay pinned? Enough dummy rows are emitted to overflow.
+/// the slice's headline layout probe: does a `max_height_vh`-capped column
+/// with a `grow` [`ScrollView`] in the middle actually clip and scroll while
+/// the header/footer stay pinned? Enough dummy rows are emitted to overflow.
 pub fn open_restore_backup(ctx: &mut EventContext) {
-    // `max-h-[80vh]` → still no viewport-relative sizing (G18 vh/vw half);
-    // hardcode 80% of the known 720px window. No inner padding on the card:
-    // each section owns its own `px-6`.
-    let card = card_column(448.0).max_height(576.0);
+    // `max-h-[80vh]` → real viewport-relative sizing (G18 vh/vw half, FW-24):
+    // the card caps at 80% of the *current* window height and scrolls its body,
+    // tracking window resize. No inner padding on the card: each section owns
+    // its own `px-6`.
+    let card = card_column(448.0).max_height_vh(80.0);
     ctx.push_layer(LayerOptions::modal(), card, |tree, root| {
         // Sticky header (`px-6 py-4 border-b`).
         let header = tree.add_child(

@@ -544,6 +544,45 @@ impl Container {
         self
     }
 
+    /// Width as a percentage of the **viewport** width (CSS `vw`). See
+    /// [`FlexStyle::width_vw`] — resolves against the window, not the parent.
+    pub fn width_vw(mut self, pct: f32) -> Self {
+        self.style = self.style.width_vw(pct);
+        self
+    }
+
+    /// Height as a percentage of the **viewport** height (CSS `vh`). See
+    /// [`FlexStyle::height_vh`].
+    pub fn height_vh(mut self, pct: f32) -> Self {
+        self.style = self.style.height_vh(pct);
+        self
+    }
+
+    /// Minimum height as a percentage of the **viewport** height — the idiom
+    /// behind Tailwind `min-h-screen` (`min_height_vh(100.0)`). See
+    /// [`FlexStyle::min_height_vh`].
+    pub fn min_height_vh(mut self, pct: f32) -> Self {
+        self.style = self.style.min_height_vh(pct);
+        self
+    }
+
+    /// Clamp the container's width to a percentage of the **viewport** width
+    /// (CSS `max-w-[..vw]`). See [`FlexStyle::max_width_vw`].
+    pub fn max_width_vw(mut self, pct: f32) -> Self {
+        self.style = self.style.max_width_vw(pct);
+        self
+    }
+
+    /// Clamp the container's height to a percentage of the **viewport** height
+    /// — the idiom behind Tailwind `max-h-[80vh]` for a modal card that never
+    /// exceeds 80% of the window and scrolls its body instead. Resolves
+    /// against the viewport, not the parent, so it holds even for a centered
+    /// layer whose parent is shrink-to-fit. See [`FlexStyle::max_height_vh`].
+    pub fn max_height_vh(mut self, pct: f32) -> Self {
+        self.style = self.style.max_height_vh(pct);
+        self
+    }
+
     /// Horizontally center this container in its parent via auto left/right
     /// margins (CSS `margin-inline: auto`). Pair with [`Self::max_width`] for
     /// a centered, responsive card: the parent stretches it up to `max_width`

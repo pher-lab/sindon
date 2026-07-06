@@ -335,7 +335,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   回帰テスト2本（4辺 border / 片側 border が full-bleed 子の rect の**後**に emit される）。
 - **G13 二重ガンマ・G14 layer anchor に続く「repro でしか炙れない framework 実バグ」第3号**。
 
-### G18. drop-shadow / elevation プリミティブが無い（+ viewport 相対サイズ無し）→ **shadow 半分は FW-18 で解消（2026-07-03, 実機 OK）／ vh/vw 半分は残置**
+### G18. drop-shadow / elevation プリミティブが無い（+ viewport 相対サイズ無し）→ **shadow 半分は FW-18 で解消（2026-07-03, 実機 OK）／ vh/vw 半分は FW-24 で解消（2026-07-07 landed）**
 - 正解のモーダルは全て `shadow-xl`。scrim（`bg-black/50`）の上にカードを**浮かせる**のはこの影で、
   影が無いとカードが scrim に**べた張り**して立体感が消える（特にダーク背景で境界が溶ける）。
 - shroud には shadow/elevation プリミティブが**一切無い**（`DrawRect` は fill + radius + border のみ、
@@ -346,10 +346,15 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   `box-shadow` 準拠。背景の**背後**に描画＝はみ出た halo だけ見える）+ `Container::elevation(1..=4)` preset。
   clone は `card_column` の `elevation(4)`（=shadow-xl）で全モーダルに配線。**light/dark 両方でカードが
   scrim から浮くのを実機確認（2026-07-03）**。
-- **残置: viewport 相対サイズ（`vh`/`vw`）** — G18 のもう半分は layout 側の別作業なので今回スコープ外。
-  Restore モーダルは `max-h-[80vh]` → shroud の `max_height` は px 固定なので、既知の 720px ウィンドウ前提で
-  `max_height(576)`（=80%）をハードコードのまま。ウィンドウリサイズに追従しない（`max_height_vh` /
-  viewport 相対長さの導入 = layout に viewport サイズを渡す口が要る、中規模）は将来候補。
+- **→ 解消（FW-24 vh/vw、2026-07-07 landed）**: `FlexStyle` に viewport 相対長さの意図を別フィールドで
+  保持し（`width_vw`/`height_vh`/`min_*_vw|vh`/`max_*_vw|vh` = 同軸のみ）、`resolve_viewport(vw, vh)` で
+  Taffy の `length(px)` に焼き込む（Taffy 自体は vh/vw 単位を持たない）。ツリー側は各ノードに
+  `has_viewport_dims` を持たせ、**add 時に現 viewport で解決 + リサイズ時に再解決**（既存の
+  `refresh_visibility_styles` を `refresh_styles` に統合し、scroll-shrink / vh-vw 解決 / display:none を
+  `effective_style` 1関数で一貫適用）。`Container` に `max_height_vh` 等を Input/Button と対称公開。
+  clone の Restore カードを `max_height(576)` → `max_height_vh(80.0)` に置換 → ウィンドウ高の 80% に追従。
+  layout +4 / widgets +4 テスト（resolve 値・リサイズ再解決・plain px 非追従の回帰ガード）。
+  **`max-h-[80vh]` が本物の viewport 相対に**。実機確認待ち（layout 変更ゆえ単体テストで検証済）。
 
 ### G19. layer 内の clip がオフセット未適用 → **framework 実バグ第4号 → 解消（2026-07-03 landed）**
 - 症状（実機、slice 4）: Restore モーダル（唯一 ScrollView を持つモーダル）で、**バックアップ行の中身が
@@ -491,7 +496,9 @@ FW-18（drop-shadow G18 の shadow 半分）** として graduate 済み。
 - ~~**G16** Dropdown 寸法/角丸・MenuItem ラベル左寄せ（polish）~~ → **解消（FW-20、2026-07-04）**
 - ~~**G5** absolute/固定エッジ anchor・右寄せ placement・click 時の trigger rect 取得~~ →
   **解消（FW-21、2026-07-04）** = `on_press_rect` + `AnchorRect{align}` + `Viewport{h,v,offset}`
-- **G18 の残り半分** viewport 相対サイズ vh/vw 無し（shadow/elevation は **FW-18 で解消済**）
+- ~~**G18 の残り半分** viewport 相対サイズ vh/vw 無し~~ → **解消（FW-24、2026-07-07）** = `FlexStyle`
+  の vh/vw 意図 + `resolve_viewport` + ツリーの add/resize 再解決。`Container::max_height_vh` 他。
+  （shadow/elevation は **FW-18 で解消済**）
 - **G3 系の残り** 固定ピクセル高の multiline viewport 無し（slice 6 で追記）
 - **G7** focus が外側リング vs 正解は border 色変化（設計判断・open）
 - ~~**G15** capturing layer の hover 固定~~ → **解消（FW-23、2026-07-06）** = interactive layer push 前に

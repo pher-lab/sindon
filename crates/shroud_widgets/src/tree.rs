@@ -14,7 +14,7 @@ use crate::scroll_view::ScrollView;
 use crate::shortcut::ShortcutRouter;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Point, Rect, SecurityLevel, Size, Theme};
-use shroud_layout::{LayoutEngine, LayoutNodeId};
+use shroud_layout::{FlexStyle, LayoutEngine, LayoutNodeId};
 use shroud_text::TextEngine;
 
 /// An entry in the widget tree.
@@ -33,6 +33,12 @@ struct WidgetNode {
     /// while a steady-state visible node can keep the style installed at
     /// insert time.
     last_applied_visible: bool,
+    /// Whether this widget's style carries viewport-relative dimensions
+    /// (`vh`/`vw`). Such nodes must be re-resolved on a window resize (their
+    /// pixel extent depends on the viewport), so `refresh_styles` re-installs
+    /// them when the viewport changes. `false` for the overwhelming majority
+    /// of nodes, which keep their install-time style untouched.
+    has_viewport_dims: bool,
 }
 
 /// Manages a tree of widgets with layout integration.
@@ -79,6 +85,12 @@ pub struct WidgetTree {
     /// dispatch can place layer roots relative to it without threading a
     /// size through every call site. `(0, 0)` until the first layout.
     viewport: (f32, f32),
+    /// Viewport size at the last `refresh_styles` pass. When it differs from
+    /// [`Self::viewport`], nodes carrying viewport-relative dimensions
+    /// (`vh`/`vw`) are re-resolved; otherwise their install-time pixel style
+    /// still holds and is left alone. `(0, 0)` forces a resolve on the first
+    /// layout.
+    last_resolved_viewport: (f32, f32),
     /// App-level keyboard shortcut registry. Consulted at the head of
     /// [`Self::dispatch_event`] for every `KeyDown`; populated via
     /// `AppScope::on_shortcut` after the build closure returns. See
@@ -239,6 +251,7 @@ impl WidgetTree {
             layers: Vec::new(),
             root_replaced: false,
             viewport: (0.0, 0.0),
+            last_resolved_viewport: (0.0, 0.0),
             shortcuts: ShortcutRouter::new(),
             file_drop_handler: None,
             image_paste_handler: None,
@@ -532,10 +545,9 @@ impl WidgetTree {
     fn set_root_boxed(&mut self, widget: Box<dyn Widget + 'static>) -> usize {
         let effective_security = widget.security_level();
         let initial_visible = widget.visible();
-        let mut style = widget.style();
-        if !initial_visible {
-            style = style.display_none();
-        }
+        let style = widget.style();
+        let has_viewport_dims = style.has_viewport_dims();
+        let style = Self::effective_style(style, false, initial_visible, self.viewport);
         let layout_node = self.layout.add_leaf(style);
         let idx = self.nodes.len();
         self.nodes.push(Some(WidgetNode {
@@ -545,6 +557,7 @@ impl WidgetTree {
             parent: None,
             effective_security,
             last_applied_visible: initial_visible,
+            has_viewport_dims,
         }));
         self.root = Some(idx);
         idx
@@ -557,18 +570,15 @@ impl WidgetTree {
             .unwrap_or(SecurityLevel::Normal);
         let effective_security = parent_security.merge(widget.security_level());
         let initial_visible = widget.visible();
-        let mut style = widget.style();
-        if !initial_visible {
-            style = style.display_none();
-        }
-        if Self::is_scroll_view_idx(&self.nodes, parent) {
-            // Direct children of a `ScrollView` must keep their natural
-            // intrinsic size — Taffy's default `flex-shrink: 1` on a
-            // fixed-height column would otherwise squash them to fit the
-            // viewport, defeating the whole point of a scrollable container
-            // (this is what `overflow: scroll` does for free in CSS).
-            style = style.shrink(0.0);
-        }
+        // Direct children of a `ScrollView` must keep their natural intrinsic
+        // size — Taffy's default `flex-shrink: 1` on a fixed-height column
+        // would otherwise squash them to fit the viewport, defeating the whole
+        // point of a scrollable container (this is what `overflow: scroll`
+        // does for free in CSS).
+        let parent_is_scroll = Self::is_scroll_view_idx(&self.nodes, parent);
+        let style = widget.style();
+        let has_viewport_dims = style.has_viewport_dims();
+        let style = Self::effective_style(style, parent_is_scroll, initial_visible, self.viewport);
         let layout_node = self.layout.add_leaf(style);
         let idx = self.nodes.len();
         self.nodes.push(Some(WidgetNode {
@@ -578,6 +588,7 @@ impl WidgetTree {
             parent: Some(parent),
             effective_security,
             last_applied_visible: initial_visible,
+            has_viewport_dims,
         }));
 
         // Same two-phase dance as remove(): mutate the parent's children
@@ -621,10 +632,9 @@ impl WidgetTree {
     ) -> usize {
         let effective_security = widget.security_level();
         let initial_visible = widget.visible();
-        let mut style = widget.style();
-        if !initial_visible {
-            style = style.display_none();
-        }
+        let style = widget.style();
+        let has_viewport_dims = style.has_viewport_dims();
+        let style = Self::effective_style(style, false, initial_visible, self.viewport);
         let layout_node = self.layout.add_leaf(style);
         let idx = self.nodes.len();
         self.nodes.push(Some(WidgetNode {
@@ -634,6 +644,7 @@ impl WidgetTree {
             parent: None,
             effective_security,
             last_applied_visible: initial_visible,
+            has_viewport_dims,
         }));
         let interactive = options.interactive;
         self.layers.push(LayerEntry {
@@ -824,7 +835,7 @@ impl WidgetTree {
     pub fn compute_layout(&mut self, width: f32, height: f32) {
         self.viewport = (width, height);
         self.sync_reactive_children();
-        self.refresh_visibility_styles();
+        self.refresh_styles();
         if let Some(root) = self.root {
             let root_node = self
                 .node(root)
@@ -871,17 +882,48 @@ impl WidgetTree {
             .unwrap_or(false)
     }
 
-    /// Re-apply Taffy styles for widgets whose `visible()` flipped since the
-    /// last layout pass. A widget that went hidden gets `display: none`; one
-    /// that came back visible gets its real style re-installed. Stable-visible
-    /// nodes are left alone (their install-time style still applies) to avoid
-    /// redundant `set_style` churn every frame.
+    /// Resolve a widget's builder style into the Taffy-ready form installed on
+    /// its layout node, applying every context-dependent adjustment in one
+    /// place so the add path and [`Self::refresh_styles`] stay consistent:
     ///
-    /// Children of a `ScrollView` keep the `flex-shrink: 0` override that
-    /// `add_child_boxed` installed at insert time — re-emit it so a widget
-    /// going visible-again does not start shrinking under a fixed-height
-    /// scroll viewport.
-    fn refresh_visibility_styles(&mut self) {
+    /// - **scroll-shrink**: direct children of a `ScrollView` get
+    ///   `flex-shrink: 0` so a fixed-height column can't squash them (see
+    ///   [`Self::add_child_boxed`]).
+    /// - **viewport dims**: any `vh`/`vw` dimension is baked to pixels against
+    ///   the current viewport (see [`FlexStyle::resolve_viewport`]).
+    /// - **visibility**: a hidden widget collapses to `display: none`.
+    fn effective_style(
+        style: FlexStyle,
+        parent_is_scroll: bool,
+        visible: bool,
+        viewport: (f32, f32),
+    ) -> FlexStyle {
+        let mut style = style;
+        if parent_is_scroll {
+            style = style.shrink(0.0);
+        }
+        style = style.resolve_viewport(viewport.0, viewport.1);
+        if !visible {
+            style = style.display_none();
+        }
+        style
+    }
+
+    /// Re-apply Taffy styles for nodes whose effective style may have changed
+    /// since the last layout pass — either their `visible()` flipped, or they
+    /// carry viewport-relative dimensions (`vh`/`vw`) and the viewport
+    /// resized. A widget that went hidden gets `display: none`; one that came
+    /// back visible gets its real style re-installed; a `vh`/`vw` node gets
+    /// its pixel extent recomputed for the new viewport. Nodes with neither
+    /// trigger are left alone (their install-time style still applies) to
+    /// avoid redundant `set_style` churn every frame.
+    ///
+    /// All re-installs go through [`Self::effective_style`], so the
+    /// `ScrollView` `flex-shrink: 0` override and viewport resolution are
+    /// re-applied together and never clobber one another.
+    fn refresh_styles(&mut self) {
+        let viewport = self.viewport;
+        let viewport_changed = viewport != self.last_resolved_viewport;
         // Snapshot dirty indices first so we can read `is_scroll_view_idx`
         // (borrows `self.nodes`) without overlapping the per-node mut borrow
         // we need for `set_style`.
@@ -891,7 +933,9 @@ impl WidgetTree {
             .enumerate()
             .filter_map(|(i, slot)| {
                 let node = slot.as_ref()?;
-                (node.widget.visible() != node.last_applied_visible).then_some(i)
+                let vis_flip = node.widget.visible() != node.last_applied_visible;
+                let vp_reflow = node.has_viewport_dims && viewport_changed;
+                (vis_flip || vp_reflow).then_some(i)
             })
             .collect();
         for i in dirty {
@@ -904,15 +948,12 @@ impl WidgetTree {
                 continue;
             };
             let vis = node.widget.visible();
-            let mut style = node.widget.style();
-            if parent_is_scroll {
-                style = style.shrink(0.0);
-            }
-            let style = if vis { style } else { style.display_none() };
+            let style = Self::effective_style(node.widget.style(), parent_is_scroll, vis, viewport);
             let layout_node = node.layout_node;
             node.last_applied_visible = vis;
             self.layout.set_style(layout_node, style);
         }
+        self.last_resolved_viewport = viewport;
     }
 
     /// Compute layout, consulting `Widget::measure` for every leaf.
@@ -933,7 +974,7 @@ impl WidgetTree {
     ) {
         self.viewport = (width, height);
         self.sync_reactive_children();
-        self.refresh_visibility_styles();
+        self.refresh_styles();
 
         // Invalidate Taffy's measure cache. Taffy memoizes leaf measure
         // results by (node, available_width, available_height); when a

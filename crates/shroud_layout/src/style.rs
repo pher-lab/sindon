@@ -3,12 +3,44 @@
 use taffy::prelude::*;
 use taffy::style::Overflow;
 
+/// Viewport-relative size intents that Taffy cannot express natively.
+///
+/// Taffy dimensions are pixels, percentages (of the parent), or `auto` — it
+/// has no `vh`/`vw` unit. We stash the requested percentages here and bake
+/// them into concrete pixel lengths in [`FlexStyle::resolve_viewport`], which
+/// the widget tree calls once the viewport size is known (and again on
+/// resize). Each field is a percentage of the *same-axis* viewport extent
+/// (CSS `vw` for width fields, `vh` for height fields).
+#[derive(Debug, Clone, Default)]
+struct ViewportDims {
+    width_vw: Option<f32>,
+    height_vh: Option<f32>,
+    min_width_vw: Option<f32>,
+    min_height_vh: Option<f32>,
+    max_width_vw: Option<f32>,
+    max_height_vh: Option<f32>,
+}
+
+impl ViewportDims {
+    fn any(&self) -> bool {
+        self.width_vw.is_some()
+            || self.height_vh.is_some()
+            || self.min_width_vw.is_some()
+            || self.min_height_vh.is_some()
+            || self.max_width_vw.is_some()
+            || self.max_height_vh.is_some()
+    }
+}
+
 /// Builder for common flexbox layout styles.
 ///
 /// Converts to `taffy::Style` via `.build()` or `Into<Style>`.
 #[derive(Debug, Clone)]
 pub struct FlexStyle {
     style: Style,
+    /// Deferred viewport-relative dimensions (`vh`/`vw`). Empty for the vast
+    /// majority of nodes; resolved to pixels by [`Self::resolve_viewport`].
+    viewport: ViewportDims,
 }
 
 impl FlexStyle {
@@ -19,6 +51,7 @@ impl FlexStyle {
                 display: Display::Flex,
                 ..Default::default()
             },
+            viewport: ViewportDims::default(),
         }
     }
 
@@ -71,6 +104,29 @@ impl FlexStyle {
         self
     }
 
+    /// Width as a percentage of the **viewport** width (CSS `vw`).
+    ///
+    /// Unlike [`Self::width_percent`] (relative to the parent), this resolves
+    /// against the window's width regardless of ancestor sizing — the idiom
+    /// behind Tailwind `w-screen` (`width_vw(100.0)`) and arbitrary
+    /// `w-[90vw]`. Baked to pixels by the widget tree once the viewport is
+    /// known (and re-baked on resize); a bare [`Self::build`] with no viewport
+    /// leaves it unset.
+    pub fn width_vw(mut self, pct: f32) -> Self {
+        self.viewport.width_vw = Some(pct);
+        self
+    }
+
+    /// Height as a percentage of the **viewport** height (CSS `vh`).
+    ///
+    /// The viewport-relative counterpart to [`Self::height_percent`] — the
+    /// idiom behind Tailwind `h-screen` (`height_vh(100.0)`). See
+    /// [`Self::width_vw`] for how/when it resolves.
+    pub fn height_vh(mut self, pct: f32) -> Self {
+        self.viewport.height_vh = Some(pct);
+        self
+    }
+
     /// Width fills available space (flex-grow).
     pub fn width_full(mut self) -> Self {
         self.style.size.width = percent(1.0);
@@ -95,6 +151,21 @@ impl FlexStyle {
         self
     }
 
+    /// Minimum width as a percentage of the **viewport** width (CSS
+    /// `min-w-[..vw]`). See [`Self::width_vw`] for resolution semantics.
+    pub fn min_width_vw(mut self, pct: f32) -> Self {
+        self.viewport.min_width_vw = Some(pct);
+        self
+    }
+
+    /// Minimum height as a percentage of the **viewport** height — the idiom
+    /// behind Tailwind `min-h-screen` (`min_height_vh(100.0)`). See
+    /// [`Self::width_vw`] for resolution semantics.
+    pub fn min_height_vh(mut self, pct: f32) -> Self {
+        self.viewport.min_height_vh = Some(pct);
+        self
+    }
+
     /// Maximum width in pixels. Acts as a clamp: the node grows up to this
     /// width and no further, even when its parent offers more space. Useful
     /// for typography (`max_width(640.0)` for readable line length).
@@ -113,6 +184,23 @@ impl FlexStyle {
     /// Maximum height in pixels.
     pub fn max_height(mut self, px: f32) -> Self {
         self.style.max_size.height = length(px);
+        self
+    }
+
+    /// Maximum width as a percentage of the **viewport** width (CSS
+    /// `max-w-[..vw]`). See [`Self::width_vw`] for resolution semantics.
+    pub fn max_width_vw(mut self, pct: f32) -> Self {
+        self.viewport.max_width_vw = Some(pct);
+        self
+    }
+
+    /// Maximum height as a percentage of the **viewport** height — the idiom
+    /// behind Tailwind `max-h-[80vh]`, i.e. a modal card that never grows past
+    /// 80% of the window height and scrolls its body instead. Resolves against
+    /// the viewport, not the parent, so it holds even for a centered layer
+    /// whose parent is shrink-to-fit. See [`Self::width_vw`].
+    pub fn max_height_vh(mut self, pct: f32) -> Self {
+        self.viewport.max_height_vh = Some(pct);
         self
     }
 
@@ -314,7 +402,52 @@ impl FlexStyle {
         self
     }
 
+    /// Whether any viewport-relative dimension (`vh`/`vw`) is set and still
+    /// needs [`Self::resolve_viewport`] to become a concrete pixel length.
+    ///
+    /// The widget tree checks this to decide which nodes must be re-resolved
+    /// on a window resize — nodes without viewport dims keep their
+    /// install-time style untouched.
+    pub fn has_viewport_dims(&self) -> bool {
+        self.viewport.any()
+    }
+
+    /// Bake any viewport-relative dimensions (`vh`/`vw`) into concrete pixel
+    /// lengths against a viewport of `vw` × `vh` pixels.
+    ///
+    /// Idempotent and cheap: no-op when [`Self::has_viewport_dims`] is false.
+    /// Each set field overwrites the corresponding Taffy `size`/`min_size`/
+    /// `max_size` axis, so a later `*_vw`/`*_vh` builder wins over an earlier
+    /// pixel/percent one on the same axis. Called by the widget tree once the
+    /// viewport is known and again whenever it changes.
+    pub fn resolve_viewport(mut self, vw: f32, vh: f32) -> Self {
+        let vp = &self.viewport;
+        if let Some(p) = vp.width_vw {
+            self.style.size.width = length(vw * p / 100.0);
+        }
+        if let Some(p) = vp.height_vh {
+            self.style.size.height = length(vh * p / 100.0);
+        }
+        if let Some(p) = vp.min_width_vw {
+            self.style.min_size.width = length(vw * p / 100.0);
+        }
+        if let Some(p) = vp.min_height_vh {
+            self.style.min_size.height = length(vh * p / 100.0);
+        }
+        if let Some(p) = vp.max_width_vw {
+            self.style.max_size.width = length(vw * p / 100.0);
+        }
+        if let Some(p) = vp.max_height_vh {
+            self.style.max_size.height = length(vh * p / 100.0);
+        }
+        self
+    }
+
     /// Build the Taffy Style.
+    ///
+    /// Note: any unresolved viewport-relative dimensions (`vh`/`vw`) are
+    /// dropped here — call [`Self::resolve_viewport`] first if the style
+    /// carries them. In the running app the widget tree does this for you.
     pub fn build(self) -> Style {
         self.style
     }
