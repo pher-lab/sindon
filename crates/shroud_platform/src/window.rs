@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::display_protection::{DisplayProtection, DisplayProtectionResult};
 use crate::system_theme::SystemTheme;
-#[cfg(target_os = "windows")]
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
