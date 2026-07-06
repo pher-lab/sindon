@@ -395,11 +395,18 @@ overlay の slice 3（`popover` プリセット）に対し、これは **`modal
 - **未再現の状態**: ChangePassword の success サブ状態（中央の緑チェック）、`disabled:opacity-*` の
   無効化見た目、`ml-auto` は grow スペーサで代替。strength meter は静的に level 2（Fair）で表示。
 
-### Button の hover/press 既定色（小・記録のみ）
+### Button の hover/press 既定色（小・記録のみ）+ 透明ボタンの hover 文字色 → **解消（`hover_text_color`、2026-07-01 landed）**
 - `Button::background(x)` だけ指定して `hover_background`/`press_background` を省くと、ホバー/押下で
-  **既定の primary（青）にフェード**する（`button.rs:310-319`）。slice 3 でエラーバナーの透明 `×`
+  **既定の primary（青）にフェード**する（`button.rs`）。slice 3 でエラーバナーの透明 `×`
   が青い四角に化けたのはこれ（clone 側で両者を transparent 指定して解消）。バグではないが、
-  「透明ボタン」を作る時に踏みやすい footgun。`hover_text_color` も無い（React の `hover:text-*` 不可）。
+  「透明ボタン」を作る時に踏みやすい footgun。
+- **訂正（2026-07-07）**: かつてここに「`hover_text_color` も無い（React の `hover:text-*` 不可）」と
+  書いていたが**事実と逆**。透明ボタン（＝リンク）がホバーで**文字色だけ**濃くなる React の `hover:text-*`
+  は、**`Button::hover_text_color` として既に landed 済み**（commit `35ac369`、2026-07-01 — 背景 hover と
+  同じカーブで `text_color`→指定色にフェード、未指定なら不変）。この clone 自身が unlock「Forgot
+  password?」/ recovery「Back」/ エラーバナー `×` / タグチップ `×` で**実使用**している。clone 演習が
+  炙った小 framework 追加だが、G-gap 番号を振らず dogfood-log にも未記載で、台帳がコードに追いつけて
+  いなかったドリフト（[[feedback-roadmap-hygiene]]）。dogfood-log にも一行追記した。
 
 ### slice 5 所見（Setup / Create Vault、2026-07-03）
 `Auth/SetupScreen.tsx` を `examples/knot_clone/src/setup.rs` で写経。canonical 状態は
@@ -489,5 +496,10 @@ FW-18（drop-shadow G18 の shadow 半分）** として graduate 済み。
 - **G7** focus が外側リング vs 正解は border 色変化（設計判断・open）
 - ~~**G15** capturing layer の hover 固定~~ → **解消（FW-23、2026-07-06）** = interactive layer push 前に
   `clear_hover` で live chain へ `MouseLeave`（framework 実バグ第5号）
+- **小・番号なし（2026-07-07 の台帳リコンサイルで明示化 — これまで G5 の `<details>` や slice 所見に
+  埋没していて「持ち越し」として追えていなかった）**:
+  - **`Container::min_width` 無し** — context menu `min-w-[140px]` を固定 `width(140)` で代用（main_screen.rs）。
+  - **`MenuItem` に disabled 状態が無い** — actions の "Export all notes"（`disabled:opacity-40`）が常時 enabled（main_screen.rs）。
+  - **grid レイアウトプリミティブ無し** — backup の `grid-cols-2` を 2×`grow(1.0)` 列で近似（modals.rs）。
 
 <!-- 以降、追加演習があれば追記 -->

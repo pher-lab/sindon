@@ -457,25 +457,39 @@ fn tag_chip(tree: &mut WidgetTree, parent: usize, tag: &str) {
         chip,
         TextWidget::new(tag).font_size(12.0).color(text.clone()),
     );
+    // The `×` is a real remove-tag `<button>` in React, so it's a `Button` here
+    // (not inert text) — Tab/Enter reachable. Text-only styling: transparent
+    // fills so it stays a bare glyph (Button otherwise fades hover/press toward
+    // primary blue), zero padding so it doesn't inflate the chip, and the glyph
+    // darkens on hover via `hover_text_color` (React `hover:text-blue-900`).
     tree.add_child(
         chip,
-        TextWidget::new("\u{00D7}").font_size(12.0).color(text),
-    ); // ×
+        Button::new("\u{00D7}") // ×
+            .font_size(12.0)
+            .padding_x(0.0)
+            .padding_y(0.0)
+            .background(Color::TRANSPARENT)
+            .hover_background(Color::TRANSPARENT)
+            .press_background(Color::TRANSPARENT)
+            .text_color(text)
+            .hover_text_color(tokens::pick(tokens::blue_900(), tokens::blue_100()))
+            .on_click(|_ctx| { /* would remove the tag */ }),
+    );
 }
 
 /// Markdown toolbar (`flex items-center gap-1 px-6 py-2 border-b`): format
 /// buttons split into groups by vertical rules, then a `flex-1` spacer pushing
-/// a preview toggle to the right (G11). `px-6 py-2` is asymmetric (G4).
+/// a preview toggle to the right (G11). `px-6 py-2` is expressed directly with
+/// `padding_xy(24, 8)` (FW-19 / G4) — the same migration the title section got.
 fn editor_toolbar(tree: &mut WidgetTree, parent: usize) {
     let bar = tree.add_child(
         parent,
         Container::row()
             .align_center()
             .gap(4.0)
-            .padding(8.0)
+            .padding_xy(24.0, 8.0) // px-6 py-2 (FW-19 / G4) — was padding(8) + manual width spacers
             .border_bottom(1.0, border()), // toolbar `border-b` (FW-16 / G10)
     );
-    tree.add_child(bar, Container::row().width(16.0)); // left inset → ≈px-6
 
     // Format glyphs are single-char stand-ins for the real SVG icons; their
     // differing advance widths make the buttons uneven (no icon font → FW-12;
@@ -496,16 +510,14 @@ fn editor_toolbar(tree: &mut WidgetTree, parent: usize) {
 
     tree.add_child(bar, Container::row().grow(1.0)); // flex-1 → push toggle right
     flat_icon_button(tree, bar, "\u{1F441}", 6.0, icon_fg()); // 👁 preview toggle
-    // Trailing 8px spacer so the preview button's right edge matches the title
-    // row's delete button. The title section uses `padding(16)` (for `py-4`)
-    // but the toolbar `padding(8)` (for `py-2`); uniform padding can't give
-    // both the same horizontal inset (G4), so they'd otherwise stagger by 8px.
-    tree.add_child(bar, Container::row().width(8.0));
+    // The bar's own `px-6` (24px right pad) now matches the title section's, so
+    // the preview button's right edge lines up with the title's delete button —
+    // no trailing spacer needed (that was a pre-FW-19 uniform-padding workaround).
 }
 
 /// Editor body (`flex-1 overflow-auto`, content `padding: 16px 24px`, 15px,
-/// line-wrapped). A `grow` row holding a left-inset spacer + a borderless
-/// multi-line input seeded with dummy markdown.
+/// line-wrapped). A `grow` row holding a borderless multi-line input seeded
+/// with dummy markdown.
 ///
 /// `grow(1.0)` (not `height_full`) is deliberate: `height_full` made the input
 /// claim the *whole* pane height and paint over the toolbar/status dividers,

@@ -154,6 +154,8 @@
   対応(repro・実使用): [knot_clone main_screen.rs](../examples/knot_clone/src/main_screen.rs) — gear/⋮ ヘッダメニューを `menu_icon_trigger` の `on_press` → `on_press_rect` + 新ヘルパ `open_popover_below_rect`(`AnchorRect{prefer:Below, align:End}`)にして React の `right-0 top-full`(ボタンに anchor・右寄せ・下開き)を 1:1 に。context menu は cursor anchor のまま(正しい)。エラーバナーを `Viewport{Center, Start, offset:(128,8)}` に(x=128 = サイドバー 256px の半分 → エディタペイン中央 = React の pane-relative `left-1/2` と一致、y=8 = `top-2`)。
   **gate 全緑。実機 OK(light、2026-07-04 ユーザ確認 — 設定メニューが gear に anchor・エラーバナーがエディタペイン上端中央)。HDR ∴ 色はユーザの目が正([[feedback-screenshot-color-hdr]])。**
   - 残置(FW-21 後の続き候補): G18 の vh-vw / G3 残(固定高 multiline viewport)/ G7 focus 方式 / G15 hover 固定。**演習で炙った表現力 gap は G7/G15(共に設計判断・棚上げ)を除き graduate 完了。**
+- **✅ (小・遡及記録 2026-07-07) `Button::hover_text_color` — 透明ボタン(リンク)の hover 文字色 = 完了 (2026-07-01, commit `35ac369`)**
+  出所: 同じ Knot UI 再現演習。透明 fill のリンク(unlock「Forgot password?」等)が React の `hover:text-*`(文字色だけ濃くなる)を表現できず、背景 hover しか無い Button では「青い箱に化ける or hover 反応ゼロ」だった footgun の解消。背景 hover と同じカーブで `text_color`→指定色にフェード(未指定なら不変・既存 Button 不変)。FW 番号は振らず(G-gap でなく footgun 派生の小追加)。**当時 dogfood-log にも [knot-ui-repro-gaps.md] にも記録漏れ → 台帳リコンサイル(2026-07-07)で遡及記載**。使用: unlock/recovery のリンク・エラーバナー `×`・タグチップ `×`。
 
 #### Knot app — UX 磨き
 
