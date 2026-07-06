@@ -264,27 +264,32 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   main tree で不変 / `ViewportCenter` は不変）。`layer.rs` の `AnchorRect` doc も「rect は push する
   ハンドラの座標系。layer 内なら自動で viewport 化」と更新。clone の設定 select は実 `Dropdown` に復帰。
 
-### G15. capturing layer が trigger の `MouseLeave` を食い、ホバーが固定される → **framework gap（真因特定・棚上げ：実害軽微）**
+### G15. interactive layer push が trigger の `MouseLeave` を握り潰し、ホバーが固定される → **framework 実バグ → 解消（FW-23、2026-07-06 landed）**
 - 症状（slice 3、実機 + ユーザ指摘）: クリックで popover を開く trigger（`hoverable` な
   `Container`、gear/⋮ 等）が、popover を閉じた後も**ホバー色（灰）のまま固定**。もう一度ホバーし
   直すと直る（実害は軽微だが「全ボタンをホバー状態で固定できてしまう」違和感）。
-- **第一次仮説（外れ）**: 「layer push 時に main tree の現ホバーを `clear_hover` で消せばよい」。実装して
-  診断ログを仕込んだところ、**push 時点で `self.hovered` は毎回 `None`** だった → `clear_hover` は完全に
-  no-op。撤去済み。
-- **真因（診断で判明）**: gear の `hover_anim` は 1.0（灰色）なのに、それを hover として追跡している
-  ノードが無い（`hovered=None`）＝**hover の「見た目（anim）」と「状態（`self.hovered`）」が layer 境界を
-  またいで desync**。gear に来るべき `MouseEnter` の対の `MouseLeave` が layer 遷移のどこかで迷子になり、
-  `hover_anim` が孤児化して 1.0 に張り付く。enter/leave は `self.hovered` の遷移に紐づくので、状態が
-  既に None だと二度と leave が出ない。
-- **素直な修正が効かない二重の壁**: (a) push 時は `hovered=None` なので直接消せない、(b) 「push/pop 時に
-  カーソル位置から hover 再評価」も、**drain 時点では新 layer のレイアウトが未計算**（`layer.offset` は
-  次フレームの `compute_layout` まで stale/0）なので hit-test を当てられない。
-- **正攻法（要・別途設計）**: WidgetTree に最終カーソル位置を保持し、レイアウト確定後（次フレーム冒頭 or
-  paint 前）に layer push/pop を検知して hover を再同期する。あるいは enter/leave を `hover_anim` を持つ
-  全 Container に対し layer 遷移でフラッシュする。いずれも hover/layer 相互作用に踏み込むので test 必須。
-- **判断**: ユーザ評価どおり**実害軽微**につき棚上げ（真因はここに記録）。FW-13 tooltip の click-through
-  設計（`layer.rs:96-104`、非 interactive は `MouseLeave` を食わない）の「interactive 版の取りこぼし」に
-  当たる。影響範囲は「クリックで開く menu/dropdown」trigger 全般。
+- **真因（診断で判明）**: hover の「見た目（`Container` の `hover_anim`）」は **`MouseLeave` を受けた時だけ**
+  0.0 に戻る。ところが interactive layer を push する箇所（`tree.rs` `push_layer_boxed`）が
+  `self.hovered` を **`clear_hover` でなく直接 `= None` 代入**していて、chain に `MouseLeave` を一切撒かない。
+  → trigger の `hover_anim` が 1.0 に孤児化して固定。**hover の「見た目」と「状態（`self.hovered`）」が
+  layer 境界で desync** する severance が核。
+- **旧「棚上げ」診断の誤り**: かつて「push 時点で `self.hovered` は毎回 `None`」と観測して naive clear を
+  no-op と結論し棚上げしていた。今回 probe テスト（`g15_..._clears_trigger_hover`）で確定 →
+  `entered=1, exited=0, hovered=None`（push 後）＝ **push 直前まで `hovered=Some(trigger)` は live**、
+  silent null が leave を握り潰していただけ。旧診断は計測位置ミスだった。
+- **修正（Option A・最小）**: `apply_commands` の `PushLayer` arm で、interactive なら
+  push（＝pointer null）の**直前**に `self.clear_hover(event_ctx)` を呼び、live な hover chain へ
+  `MouseLeave` を leaf-first に撒く。`event_ctx` を持つのは drain/event 経路だけなので `push_layer_boxed`
+  内でなくここで行う（boot/test 経路は hover 自体が None ∴ 無関係）。`push_layer_boxed` の silent null は
+  boot 用 baseline としてそのまま残置（event 経路では既に None ＝ no-op）。
+- **非 interactive は据え置き**: `if options.interactive` gate により tooltip（click-through）layer は
+  hover を消さない。FW-13 の「非 interactive は入力を main tree に残す ∴ hover 継続」契約を保持
+  （消すと次 move で spurious re-enter → tip 再オープン）。
+- **テスト**: `layer_tests.rs` に2本 — interactive push で trigger が leave を受け `hover_anim` reset
+  （`exited==1`/`hovered==None`）/ 非 interactive（tooltip）push は hover 維持（`hovered==Some(trigger)`/
+  `exited==0`）。shroud_widgets 全 test 緑・fmt/clippy クリーン。**実機確認待ち。**
+- 演習で炙った framework 実バグの**第5号**（G13/G14/G17/G19 に続く）。影響範囲は「クリックで開く
+  menu/dropdown」trigger 全般。
 
 ### G16. 設定パネルの仕上がり差（Dropdown 寸法/角・MenuItem ラベル左寄せ）→ **解消（FW-20、2026-07-04 landed）**
 - slice 3 で設定 dropdown を実機確認したユーザ指摘の「惜しい」点。いずれも忠実再現を妨げないが質感差。
@@ -475,6 +480,7 @@ FW-18（drop-shadow G18 の shadow 半分）** として graduate 済み。
 - **G18 の残り半分** viewport 相対サイズ vh/vw 無し（shadow/elevation は **FW-18 で解消済**）
 - **G3 系の残り** 固定ピクセル高の multiline viewport 無し（slice 6 で追記）
 - **G7** focus が外側リング vs 正解は border 色変化（設計判断・open）
-- **G15** capturing layer の hover 固定（真因特定済・実害軽微で棚上げ）
+- ~~**G15** capturing layer の hover 固定~~ → **解消（FW-23、2026-07-06）** = interactive layer push 前に
+  `clear_hover` で live chain へ `MouseLeave`（framework 実バグ第5号）
 
 <!-- 以降、追加演習があれば追記 -->

@@ -62,6 +62,138 @@ fn dispatch(tree: &mut WidgetTree, ev: WidgetEvent) {
     tree.dispatch_event(&ev, &mut ctx);
 }
 
+// ── G15: interactive-layer push resets the trigger's hover ────────────
+//
+// A hoverable trigger (gear / ⋮ menu button) that opens an interactive
+// popover on click used to stay stuck in its hover highlight after the
+// popover closed. Root cause: pushing an interactive layer nulled the
+// tree-wide `hovered` pointer *silently* — the trigger never received the
+// paired MouseLeave, so its hover visual (`Container`'s fade) was orphaned
+// at "hovered". A probe (`entered=1, exited=0, hovered=None` after push)
+// confirmed the pointer was live at push time, refuting the old "hovered was
+// already None" diagnosis. The fix emits a real MouseLeave to the live hover
+// chain just before the push nulls the pointer.
+#[test]
+fn g15_interactive_layer_push_clears_trigger_hover() {
+    let entered = Rc::new(Cell::new(0u32));
+    let exited = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let main = tree.set_root(Container::column().width(800.0).height(600.0));
+    let trigger = {
+        let e = entered.clone();
+        let x = exited.clone();
+        tree.add_child(
+            main,
+            Container::column()
+                .width(50.0)
+                .height(50.0)
+                .hoverable()
+                .on_hover_enter(move |_rect, _ctx| e.set(e.get() + 1))
+                .on_hover_exit(move |_ctx| x.set(x.get() + 1))
+                .on_press(|_pos, ctx| {
+                    ctx.push_layer(
+                        LayerOptions::popover(),
+                        Container::column().width(120.0).height(80.0),
+                        |_t, _root| {},
+                    );
+                }),
+        )
+    };
+
+    measured_layout(&mut tree, 800.0, 600.0);
+
+    // 1) Cursor moves over the trigger → hovered + MouseEnter.
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseMove {
+            position: Point::new(25.0, 25.0),
+        },
+    );
+    assert_eq!(tree.hovered(), Some(trigger), "trigger hovered after move");
+    assert_eq!(entered.get(), 1, "trigger got MouseEnter");
+    assert_eq!(exited.get(), 0, "no MouseLeave yet");
+
+    // 2) Press the trigger → on_press pushes an interactive popover layer.
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            position: Point::new(25.0, 25.0),
+            button: MouseButton::Left,
+        },
+    );
+    assert_eq!(tree.layer_count(), 1, "interactive layer is up");
+
+    // 3) The fix: the trigger got its paired MouseLeave (hover visual reset),
+    //    and the tree-wide pointer is cleared so no stale leave fires at pop.
+    assert_eq!(tree.hovered(), None, "push clears the hover pointer");
+    assert_eq!(
+        exited.get(),
+        1,
+        "trigger received its MouseLeave → hover visual reset (G15 fixed)"
+    );
+    assert_eq!(entered.get(), 1, "no spurious re-enter");
+}
+
+// A *non-interactive* (click-through) layer — the tooltip preset — must NOT
+// clear the main-tree hover: input stays with the main tree, so the trigger
+// is still genuinely hovered. Clearing it would make the trigger see a
+// spurious re-enter on the next move and re-open the very tip it just opened
+// (the FW-13 click-through contract). Guards the `if options.interactive`
+// gate on the G15 fix.
+#[test]
+fn noninteractive_layer_push_preserves_trigger_hover() {
+    let exited = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let main = tree.set_root(Container::column().width(800.0).height(600.0));
+    let trigger = {
+        let x = exited.clone();
+        tree.add_child(
+            main,
+            Container::column()
+                .width(50.0)
+                .height(50.0)
+                .hoverable()
+                .on_hover_exit(move |_ctx| x.set(x.get() + 1))
+                .on_press(|_pos, ctx| {
+                    ctx.push_layer(
+                        LayerOptions::tooltip(),
+                        Container::column().width(120.0).height(40.0),
+                        |_t, _root| {},
+                    );
+                }),
+        )
+    };
+
+    measured_layout(&mut tree, 800.0, 600.0);
+
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseMove {
+            position: Point::new(25.0, 25.0),
+        },
+    );
+    assert_eq!(tree.hovered(), Some(trigger), "trigger hovered after move");
+
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            position: Point::new(25.0, 25.0),
+            button: MouseButton::Left,
+        },
+    );
+    assert_eq!(tree.layer_count(), 1, "tooltip layer is up");
+
+    // Non-interactive push leaves the hover chain intact.
+    assert_eq!(
+        tree.hovered(),
+        Some(trigger),
+        "click-through layer must not clear main-tree hover"
+    );
+    assert_eq!(exited.get(), 0, "trigger must not receive a spurious leave");
+}
+
 // ── basic push/pop ────────────────────────────────────────────────
 
 #[test]

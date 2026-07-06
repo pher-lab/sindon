@@ -643,12 +643,16 @@ impl WidgetTree {
             measured_size: Size::ZERO,
         });
         // An interactive layer takes input priority, so the cursor is no
-        // longer "over" any main-tree widget — clear the hover chain so a
+        // longer "over" any main-tree widget — drop the hover pointer so a
         // stale MouseLeave doesn't fire at the wrong time when the layer
-        // pops. A non-interactive (click-through) tooltip layer leaves input
-        // with the main tree, so its hover chain must persist: clearing it
-        // would make the trigger see a spurious re-enter on the next move
-        // and re-open the very tip it just opened.
+        // pops. On the event path, `apply_commands` has already emitted a
+        // real MouseLeave to this chain (resetting the trigger's hover
+        // visual — G15) just before calling us, so this is a no-op null
+        // there; on the boot/test path there is no live hover to leave. A
+        // non-interactive (click-through) tooltip layer leaves input with
+        // the main tree, so its hover chain must persist: clearing it would
+        // make the trigger see a spurious re-enter on the next move and
+        // re-open the very tip it just opened.
         if interactive {
             self.hovered = None;
         }
@@ -741,6 +745,18 @@ impl WidgetTree {
                     root_widget,
                     populate,
                 } => {
+                    // An interactive layer takes input priority: the cursor is
+                    // no longer "over" any main-tree widget. Emit MouseLeave to
+                    // the live hover chain *before* the push nulls the pointer,
+                    // so a hoverable trigger (gear / ⋮ menu button) that opened
+                    // this layer resets its hover visual instead of sticking
+                    // highlighted after the layer closes (G15). This must run
+                    // here rather than in `push_layer_boxed`, because emitting
+                    // leaves needs an `event_ctx` and only the drain/event path
+                    // carries one; the boot/test push has no live hover anyway.
+                    if options.interactive {
+                        self.clear_hover(event_ctx);
+                    }
                     let layer_root = self.push_layer_boxed(options, root_widget);
                     populate(self, layer_root);
                 }
