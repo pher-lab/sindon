@@ -354,7 +354,9 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   `effective_style` 1関数で一貫適用）。`Container` に `max_height_vh` 等を Input/Button と対称公開。
   clone の Restore カードを `max_height(576)` → `max_height_vh(80.0)` に置換 → ウィンドウ高の 80% に追従。
   layout +4 / widgets +4 テスト（resolve 値・リサイズ再解決・plain px 非追従の回帰ガード）。
-  **`max-h-[80vh]` が本物の viewport 相対に**。実機確認待ち（layout 変更ゆえ単体テストで検証済）。
+  **`max-h-[80vh]` が本物の viewport 相対に**。**実機 OK（2026-07-07、ユーザ確認）**: ウィンドウを縦に潰すと
+  カードが現ウィンドウ高の 80% に張り付いて縮み、ヘッダ + Cancel フッタは pinned・本文だけスクロール（720px
+  決め打ちの旧実装なら短いウィンドウで画面外にはみ出していた）。
 
 ### G19. layer 内の clip がオフセット未適用 → **framework 実バグ第4号 → 解消（2026-07-03 landed）**
 - 症状（実機、slice 4）: Restore モーダル（唯一 ScrollView を持つモーダル）で、**バックアップ行の中身が

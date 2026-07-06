@@ -154,7 +154,7 @@
   対応(repro・実使用): [knot_clone main_screen.rs](../examples/knot_clone/src/main_screen.rs) — gear/⋮ ヘッダメニューを `menu_icon_trigger` の `on_press` → `on_press_rect` + 新ヘルパ `open_popover_below_rect`(`AnchorRect{prefer:Below, align:End}`)にして React の `right-0 top-full`(ボタンに anchor・右寄せ・下開き)を 1:1 に。context menu は cursor anchor のまま(正しい)。エラーバナーを `Viewport{Center, Start, offset:(128,8)}` に(x=128 = サイドバー 256px の半分 → エディタペイン中央 = React の pane-relative `left-1/2` と一致、y=8 = `top-2`)。
   **gate 全緑。実機 OK(light、2026-07-04 ユーザ確認 — 設定メニューが gear に anchor・エラーバナーがエディタペイン上端中央)。HDR ∴ 色はユーザの目が正([[feedback-screenshot-color-hdr]])。**
   - 残置(FW-21 後の続き候補): G18 の vh-vw / G3 残(固定高 multiline viewport)/ G7 focus 方式 / G15 hover 固定。**演習で炙った表現力 gap は G7/G15(共に設計判断・棚上げ)を除き graduate 完了。**
-- **✅ FW-24 [fw] P3 🧷 — viewport 相対サイズ vh/vw(G18 の残り半分)= 完了 (2026-07-07, gate 全緑・実機確認待ち)**
+- **✅ FW-24 [fw] P3 🧷 — viewport 相対サイズ vh/vw(G18 の残り半分)= 完了 (2026-07-07, gate 全緑・実機 OK)**
   出所: FW-15〜21 と同じ **Knot UI 完全再現演習**。slice 4(Modal 群)で Restore カードの `max-h-[80vh]` を表現できず、既知の 720px ウィンドウ前提で `max_height(576)` をハードコードしていた(リサイズ非追従)。G18 は shadow 半分(FW-18)を先に消化済で、この vh/vw 半分が「layout 側の別作業」として残置されていた分。ユーザ選択(「半分残ってるのが気になる、G18 の残り半分から」)。
   対応(framework):
   - **`FlexStyle` に viewport 相対長さの意図を別フィールド `ViewportDims` で保持** — `width_vw`/`height_vh`/`min_width_vw`/`min_height_vh`/`max_width_vw`/`max_height_vh`(**同軸のみ** = vw は width 系・vh は height 系。cross-axis の `w-[50vh]` は YAGNI で見送り)。Taffy 自体は vh/vw 単位を持たない ∴ builder では px に焼けない。
@@ -163,7 +163,7 @@
   - **`Container` に `width_vw`/`height_vh`/`min_height_vh`/`max_width_vw`/`max_height_vh` を Input/Button と対称公開**。
   テスト: layout_tests +4(`max_height_vh` が parent でなく viewport に対して clamp / vw+min の解決 / `has_viewport_dims` フラグ / 同軸で vw が px を上書き)・viewport_dims_tests(新規)+4(ツリーで解決・**リサイズ再解決**・vw 解決・**plain px が viewport path に引きずられない回帰ガード**)。`fmt --all` / `clippy(--workspace --exclude knot + knot、-D warnings)` / `doc(-D warnings)` クリーン([[feedback-prepush-fmt-check]])。
   対応(repro・実使用): [knot_clone modals.rs](../examples/knot_clone/src/modals.rs) — Restore カードを `max_height(576.0)` → `max_height_vh(80.0)` に置換。ウィンドウ高の 80% に追従(リサイズしても本物の `max-h-[80vh]` 挙動)。
-  **gate 全緑。layout 変更ゆえ単体テストで検証済・実機確認待ち(HDR ∴ 色でなくレイアウトはユーザの目で最終確認、[[feedback-screenshot-color-hdr]])。**
+  **gate 全緑。実機 OK(2026-07-07 ユーザ確認 — ウィンドウを縦に潰すとカードが現ウィンドウ高の 80% に追従して縮み、ヘッダ + Cancel フッタ pinned・本文だけスクロール。720px 決め打ちの旧実装なら短いウィンドウで画面外にはみ出していた)。**
   - 残置(FW-24 後の続き候補): G3 残(固定高 multiline viewport)/ G7 focus 方式(設計判断・棚上げ継続)/ 小・番号なし 3件(`Container::min_width` は landed 済 → 要確認 / `MenuItem` disabled / grid プリミティブ)。**演習で炙った表現力 gap は G7(設計判断・棚上げ)を除き graduate 完了。**
 - **✅ (小・遡及記録 2026-07-07) `Button::hover_text_color` — 透明ボタン(リンク)の hover 文字色 = 完了 (2026-07-01, commit `35ac369`)**
   出所: 同じ Knot UI 再現演習。透明 fill のリンク(unlock「Forgot password?」等)が React の `hover:text-*`(文字色だけ濃くなる)を表現できず、背景 hover しか無い Button では「青い箱に化ける or hover 反応ゼロ」だった footgun の解消。背景 hover と同じカーブで `text_color`→指定色にフェード(未指定なら不変・既存 Button 不変)。FW 番号は振らず(G-gap でなく footgun 派生の小追加)。**当時 dogfood-log にも [knot-ui-repro-gaps.md] にも記録漏れ → 台帳リコンサイル(2026-07-07)で遡及記載**。使用: unlock/recovery のリンク・エラーバナー `×`・タグチップ `×`。
