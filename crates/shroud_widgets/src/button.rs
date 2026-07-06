@@ -564,19 +564,48 @@ impl Widget for Button {
     }
 
     fn event(&mut self, event: &WidgetEvent, layout: Rect, ctx: &mut EventContext) -> EventResult {
-        // A disabled button is inert: swallow no state, fire no click. Left
-        // fully transparent to events so nothing latches a stale press/hover.
-        if self.disabled.get() {
-            return EventResult::Ignored;
-        }
+        let disabled = self.disabled.get();
         match event {
-            WidgetEvent::MouseEnter => {
-                self.drive_hover(1.0);
-                EventResult::Consumed
-            }
+            // De-activation is processed *even while disabled*. `disabled` gates
+            // entering an active state, never leaving one. The tree still routes
+            // MouseLeave / FocusLost to a disabled-but-visible widget — hit-test
+            // filters on `visible()` and focus dispatch blurs the outgoing
+            // widget regardless of `focusable()` — so a button that flips to
+            // disabled mid-interaction (its `disabled` is a `Reactive<bool>`,
+            // e.g. a form submit) would otherwise strand a stale hover / focus
+            // that resurfaces the instant it is re-enabled. These arms always
+            // clear.
             WidgetEvent::MouseLeave => {
                 self.drive_hover(0.0);
                 self.pressed = false;
+                EventResult::Consumed
+            }
+            WidgetEvent::FocusLost => {
+                self.focused = false;
+                EventResult::Ignored
+            }
+            // Releasing the press latch is also de-activation: clear it even
+            // while disabled (so a press begun before the disable can't stick),
+            // but only fire the click when still enabled.
+            WidgetEvent::MouseUp {
+                button: MouseButton::Left,
+                ..
+            } => {
+                if self.pressed {
+                    self.pressed = false;
+                    if !disabled {
+                        self.activate(layout, ctx);
+                    }
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            // Everything below newly *enters* an active state or activates the
+            // button — all inert while disabled, so nothing latches.
+            _ if disabled => EventResult::Ignored,
+            WidgetEvent::MouseEnter => {
+                self.drive_hover(1.0);
                 EventResult::Consumed
             }
             WidgetEvent::MouseDown {
@@ -586,24 +615,8 @@ impl Widget for Button {
                 self.pressed = true;
                 EventResult::Consumed
             }
-            WidgetEvent::MouseUp {
-                button: MouseButton::Left,
-                ..
-            } => {
-                if self.pressed {
-                    self.pressed = false;
-                    self.activate(layout, ctx);
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
             WidgetEvent::FocusGained => {
                 self.focused = true;
-                EventResult::Ignored
-            }
-            WidgetEvent::FocusLost => {
-                self.focused = false;
                 EventResult::Ignored
             }
             // Keyboard activation: Enter triggers click while focused.
@@ -622,5 +635,125 @@ impl Widget for Button {
             }
             _ => EventResult::Ignored,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shroud_core::Point;
+    use shroud_reactive::Signal;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn rect() -> Rect {
+        Rect::new(0.0, 0.0, 60.0, 24.0)
+    }
+
+    fn left(pos_down: bool) -> WidgetEvent {
+        let position = Point::new(5.0, 5.0);
+        let button = MouseButton::Left;
+        if pos_down {
+            WidgetEvent::MouseDown { position, button }
+        } else {
+            WidgetEvent::MouseUp { position, button }
+        }
+    }
+
+    // Audit regression (disabled early-return): a button disabled mid-focus
+    // must still process FocusLost. The tree blurs the outgoing widget when
+    // Tab moves on, and a swallowed blur would leave `focused` true so the
+    // ring resurfaces the moment the button is re-enabled.
+    #[test]
+    fn focus_lost_clears_focus_even_while_disabled() {
+        let disabled = Signal::new(false);
+        let mut b = Button::new("ok").disabled(disabled);
+        let mut ctx = EventContext::new();
+
+        b.event(&WidgetEvent::FocusGained, rect(), &mut ctx);
+        assert!(b.is_focused(), "button takes focus while enabled");
+
+        disabled.set(true);
+        b.event(&WidgetEvent::FocusLost, rect(), &mut ctx);
+        assert!(
+            !b.is_focused(),
+            "FocusLost must clear focus even while disabled"
+        );
+    }
+
+    // Same invariant for hover: MouseLeave while disabled must retarget the
+    // fade to 0, or the button re-enables looking hovered under a cursor that
+    // has moved away.
+    #[test]
+    fn mouse_leave_clears_hover_even_while_disabled() {
+        let disabled = Signal::new(false);
+        let mut b = Button::new("ok").disabled(disabled);
+        let mut ctx = EventContext::new();
+
+        b.event(&WidgetEvent::MouseEnter, rect(), &mut ctx);
+        assert_eq!(
+            b.hover_anim.as_ref().map(|a| a.target()),
+            Some(1.0),
+            "hover fade targets 1 while hovered"
+        );
+
+        disabled.set(true);
+        b.event(&WidgetEvent::MouseLeave, rect(), &mut ctx);
+        assert_eq!(
+            b.hover_anim.as_ref().map(|a| a.target()),
+            Some(0.0),
+            "MouseLeave must retarget the hover fade to 0 even while disabled"
+        );
+    }
+
+    // The press latch: a press begun while enabled, then disabled, must clear
+    // on release rather than sticking (which would show as a stale press color
+    // on re-enable).
+    #[test]
+    fn press_latch_clears_on_release_while_disabled() {
+        let disabled = Signal::new(false);
+        let mut b = Button::new("ok").disabled(disabled);
+        let mut ctx = EventContext::new();
+
+        b.event(&left(true), rect(), &mut ctx);
+        assert!(b.pressed, "left press latches while enabled");
+
+        disabled.set(true);
+        b.event(&left(false), rect(), &mut ctx);
+        assert!(
+            !b.pressed,
+            "release must clear the press latch even while disabled"
+        );
+    }
+
+    // The other half of the invariant: while disabled a press must NOT latch
+    // in the first place, and must never fire the click.
+    #[test]
+    fn disabled_button_never_presses_or_activates() {
+        let clicks = Rc::new(Cell::new(0u32));
+        let c = Rc::clone(&clicks);
+        let mut b = Button::new("ok")
+            .disabled(true)
+            .on_click(move |_| c.set(c.get() + 1));
+        let mut ctx = EventContext::new();
+
+        b.event(&left(true), rect(), &mut ctx);
+        assert!(!b.pressed, "disabled button does not latch a press");
+
+        b.event(&left(false), rect(), &mut ctx);
+        assert_eq!(clicks.get(), 0, "disabled button never fires on_click");
+    }
+
+    // Enabled behavior is unchanged: a full press→release fires the click once.
+    #[test]
+    fn enabled_click_still_fires_once() {
+        let clicks = Rc::new(Cell::new(0u32));
+        let c = Rc::clone(&clicks);
+        let mut b = Button::new("ok").on_click(move |_| c.set(c.get() + 1));
+        let mut ctx = EventContext::new();
+
+        b.event(&left(true), rect(), &mut ctx);
+        b.event(&left(false), rect(), &mut ctx);
+        assert_eq!(clicks.get(), 1, "enabled press→release fires exactly once");
     }
 }
