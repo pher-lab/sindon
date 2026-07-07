@@ -17,7 +17,7 @@
 
 use std::cell::OnceCell;
 
-use shroud::core::{Color, Theme};
+use shroud::core::{Color, FocusIndicator, Theme};
 use shroud::reactive::{Reactive, Signal};
 
 // --- Tailwind palette ------------------------------------------------------
@@ -153,6 +153,11 @@ fn light_theme() -> Theme {
     cols.input_border_focused = blue_500();
     cols.input_placeholder = gray_400();
     cols.error = red_700();
+    // Knot's inputs use `focus:outline-none focus:border-blue-500` — the
+    // border recolors on focus, no outer ring. Pick that focus idiom app-wide
+    // (Button/Checkbox fall back to the ring, matching the reference).
+    t.focus.indicator = FocusIndicator::Border;
+    t.focus.ring_color = blue_500();
     t
 }
 
@@ -175,6 +180,9 @@ fn dark_theme() -> Theme {
     cols.input_border_focused = blue_500();
     cols.input_placeholder = gray_500();
     cols.error = red_500();
+    // Same focus idiom as light: border recolors to blue-500 on focus.
+    t.focus.indicator = FocusIndicator::Border;
+    t.focus.ring_color = blue_500();
     t
 }
 

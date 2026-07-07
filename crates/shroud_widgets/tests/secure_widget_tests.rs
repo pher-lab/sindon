@@ -559,6 +559,62 @@ fn secure_input_focus_ring_paints() {
     );
 }
 
+#[test]
+fn secure_input_border_mode_recolors_border_and_omits_ring() {
+    // FW-26 (G7): under a Border-mode theme a focused SecureInput recolors
+    // its own 1px border to the focus color instead of drawing a ring —
+    // symmetric with Input.
+    use shroud_core::{FocusIndicator, Theme};
+    let mut theme = Theme::default();
+    theme.focus.indicator = FocusIndicator::Border;
+    let focus_color = theme.focus.ring_color;
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let idx = tree.add_child(root, SecureInput::new());
+    tree.compute_layout(200.0, 60.0);
+    let mut ev = EventContext::new();
+    tree.focus(Some(idx), &mut ev);
+    let mut ctx = PaintContext::new(theme);
+    tree.paint(&mut ctx);
+
+    // The caret is a bw==0 fill, so filtering on border_width isolates chrome.
+    let strokes: Vec<_> = ctx.rects.iter().filter(|r| r.border_width > 0.0).collect();
+    assert_eq!(strokes.len(), 1, "recolored border only — no separate ring");
+    assert_eq!(
+        strokes[0].border_width, 1.0,
+        "still a 1px border, not a 2px ring"
+    );
+    assert_eq!(
+        strokes[0].color, focus_color,
+        "the border is recolored to the focus color"
+    );
+}
+
+#[test]
+fn secure_input_borderless_border_mode_falls_back_to_ring() {
+    // A borderless SecureInput has no border to recolor, so Border mode falls
+    // back to the ring.
+    use shroud_core::{FocusIndicator, Theme};
+    let mut theme = Theme::default();
+    theme.focus.indicator = FocusIndicator::Border;
+    let ring_color = theme.focus.ring_color;
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let idx = tree.add_child(root, SecureInput::new().borderless());
+    tree.compute_layout(200.0, 60.0);
+    let mut ev = EventContext::new();
+    tree.focus(Some(idx), &mut ev);
+    let mut ctx = PaintContext::new(theme);
+    tree.paint(&mut ctx);
+
+    let strokes: Vec<_> = ctx.rects.iter().filter(|r| r.border_width > 0.0).collect();
+    assert_eq!(strokes.len(), 1, "borderless: just the fallback ring");
+    assert_eq!(strokes[0].border_width, 2.0, "fallback is the 2px ring");
+    assert_eq!(strokes[0].color, ring_color);
+}
+
 // ── SecureInput chrome (G2 — symmetric with Input's FW-14) ────────
 //
 // An unfocused, empty SecureInput paints exactly two rects: the

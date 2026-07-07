@@ -22,7 +22,7 @@ use crate::layer::{HAlign, LayerAnchor, LayerOptions, Placement};
 use crate::menu_item::MenuItem;
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Color, Rect, Size};
+use shroud_core::{Color, FocusIndicator, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Reactive, Signal};
 
@@ -318,11 +318,21 @@ impl Widget for Dropdown {
             .as_ref()
             .map(|c| c.get())
             .unwrap_or(colors.on_surface);
-        let border = self
-            .border_color
-            .as_ref()
-            .map(|c| c.get())
-            .unwrap_or(colors.input_border);
+        // Focus indicator: the trigger always draws a border, so `Border`
+        // mode recolors it to the focus color and suppresses the ring below.
+        let focus_active = self.state.focused && ctx.focus_visible();
+        let border_focus = focus_active && ctx.theme.focus.indicator == FocusIndicator::Border;
+        let border = if border_focus {
+            self.focus_ring_color
+                .as_ref()
+                .map(|c| c.get())
+                .unwrap_or(ctx.theme.focus.ring_color)
+        } else {
+            self.border_color
+                .as_ref()
+                .map(|c| c.get())
+                .unwrap_or(colors.input_border)
+        };
         let font_size = self
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);
@@ -378,7 +388,8 @@ impl Widget for Dropdown {
             }
         }
 
-        if self.state.focused && ctx.focus_visible() {
+        // Ring in Ring mode; suppressed when Border mode recolored the border.
+        if focus_active && !border_focus {
             let override_color = self.focus_ring_color.as_ref().map(|c| c.get());
             ctx.paint_focus_ring(layout, override_color, self.radius);
         }

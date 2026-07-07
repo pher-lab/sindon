@@ -19,7 +19,7 @@ use crate::clear_trigger::ClearTrigger;
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, Point, Rect, SecurityLevel};
+use shroud_core::{Color, FocusIndicator, Point, Rect, SecurityLevel};
 use shroud_layout::FlexStyle;
 use shroud_security::SecureString;
 
@@ -321,6 +321,13 @@ impl SecureInput {
         self.border_color.unwrap_or(colors.input_border)
     }
 
+    /// Color of the focus indicator (ring in `Ring` mode, focused border in
+    /// `Border` mode): the per-widget `focus_ring_color` override if set,
+    /// else the theme's `focus.ring_color`. Mirrors `Input`.
+    fn focus_indicator_color(&self, focus: &shroud_core::FocusStyle) -> Color {
+        self.focus_ring_color.unwrap_or(focus.ring_color)
+    }
+
     /// Byte offset within the secure buffer of the char at `char_idx`
     /// (clamped to the buffer end when `char_idx == char_count`).
     ///
@@ -397,11 +404,24 @@ impl Widget for SecureInput {
         // historical sharp rect unless the app opted into rounded corners.
         ctx.fill_rect_rounded(layout, bg, self.radius);
 
+        // Focus indicator: mirror `Input`. `border_focus` recolors the stroke
+        // (theme `Border` mode + a visible border) and suppresses the ring;
+        // otherwise the ring paints below (Ring mode, or Border-mode fallback
+        // for a borderless field).
+        let focus_active = self.focused && ctx.focus_visible();
+        let border_focus = focus_active
+            && self.border_visible
+            && ctx.theme.focus.indicator == FocusIndicator::Border;
+
         // Border: one rounded 1px stroke hugging the inside of the layout edge
         // (the SDF rounds its corners with the same radius), replacing the four
         // sharp edge rects. Skipped entirely when the field is borderless.
         if self.border_visible {
-            let border = self.resolve_border(&ctx.theme.colors);
+            let border = if border_focus {
+                self.focus_indicator_color(&ctx.theme.focus)
+            } else {
+                self.resolve_border(&ctx.theme.colors)
+            };
             ctx.stroke_rect_rounded(layout, border, self.radius, 1.0);
         }
 
@@ -523,7 +543,8 @@ impl Widget for SecureInput {
             ctx.suppress_ime();
             // Ring follows the `:focus-visible` heuristic and tracks the
             // field's corner radius, so a rounded input gets a rounded ring.
-            if ctx.focus_visible() {
+            // Suppressed when `Border` mode already recolored the border above.
+            if ctx.focus_visible() && !border_focus {
                 ctx.paint_focus_ring(layout, self.focus_ring_color, self.radius);
             }
         }

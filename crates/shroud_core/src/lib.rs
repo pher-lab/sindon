@@ -16,4 +16,6 @@ pub use geometry::{Color, Point, Rect, Size};
 pub use id::{NodeId, ScopeId, WidgetId};
 pub use lerp::Lerp;
 pub use security_level::SecurityLevel;
-pub use theme::{Colors, FocusStyle, HoverStyle, Spacing, TextStyle, Theme, Typography};
+pub use theme::{
+    Colors, FocusIndicator, FocusStyle, HoverStyle, Spacing, TextStyle, Theme, Typography,
+};

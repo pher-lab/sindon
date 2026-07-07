@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 use crate::event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, Point, Rect};
+use shroud_core::{Color, FocusIndicator, Point, Rect};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Animated, Easing, Reactive, Signal};
 use shroud_text::{FontWeight, TextAttrs, TextSpan};
@@ -1369,6 +1369,17 @@ impl Input {
             .unwrap_or(colors.input_border)
     }
 
+    /// Color of the focus indicator (ring in `Ring` mode, focused border in
+    /// `Border` mode): the per-widget `focus_ring_color` override if set,
+    /// else the theme's `focus.ring_color`. One source keeps the two modes
+    /// in agreement and makes the existing override work for both.
+    fn focus_indicator_color(&self, focus: &shroud_core::FocusStyle) -> Color {
+        self.focus_ring_color
+            .as_ref()
+            .map(|c| c.get())
+            .unwrap_or(focus.ring_color)
+    }
+
     /// Find the previous char boundary before `pos` in `s`.
     fn prev_char_boundary(s: &str, pos: usize) -> usize {
         if pos == 0 {
@@ -1673,11 +1684,25 @@ impl Widget for Input {
         // historical sharp rect unless the app opted into rounded corners.
         ctx.fill_rect_rounded(layout, bg, self.radius);
 
+        // Focus indicator: whether this frame should signal focus, and whether
+        // the theme's `Border` mode can express it here (needs a visible border
+        // to recolor). `border_focus` recolors the stroke below and suppresses
+        // the ring; otherwise the ring paints (Ring mode, or Border-mode
+        // fallback when the field is borderless).
+        let focus_active = self.focused && ctx.focus_visible();
+        let border_focus = focus_active
+            && self.border_visible
+            && ctx.theme.focus.indicator == FocusIndicator::Border;
+
         // Border: one rounded 1px stroke hugging the inside of the layout edge
         // (the SDF rounds its corners with the same radius), replacing the four
         // sharp edge rects. Skipped entirely when the field is borderless.
         if self.border_visible {
-            let border = self.resolve_border(&ctx.theme.colors);
+            let border = if border_focus {
+                self.focus_indicator_color(&ctx.theme.focus)
+            } else {
+                self.resolve_border(&ctx.theme.colors)
+            };
             ctx.stroke_rect_rounded(layout, border, self.radius, 1.0);
         }
 
@@ -2178,9 +2203,10 @@ impl Widget for Input {
             );
         }
 
-        if self.focused && ctx.focus_visible() {
+        if focus_active && !border_focus {
             // Ring tracks the field's corner radius, so a rounded input gets a
             // rounded ring instead of a square one around rounded corners.
+            // Skipped when `Border` mode already recolored the border above.
             ctx.paint_focus_ring(
                 layout,
                 self.focus_ring_color.as_ref().map(|c| c.get()),

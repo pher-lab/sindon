@@ -15,21 +15,49 @@ pub struct Theme {
     pub hover: HoverStyle,
 }
 
-/// Visual tokens for the keyboard-focus ring.
+/// How a focused widget signals keyboard focus.
 ///
-/// Focusable widgets (`Input`, `SecureInput`, `Button`, `Checkbox`) read
-/// these defaults from the active theme during paint. The ring is drawn
-/// just *outside* the widget rect — `ring_offset` is the gap between the
+/// A theme-wide choice so an app picks one focus idiom the way a design
+/// system does. The default is [`Ring`](FocusIndicator::Ring), which is
+/// bit-for-bit the historical behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusIndicator {
+    /// Draw a stroked ring *outside* the widget rect (browsers' `outline`).
+    /// Works for every focusable widget regardless of whether it has a
+    /// border.
+    #[default]
+    Ring,
+    /// Recolor the widget's own border to `ring_color` instead of drawing
+    /// a ring (the web `focus:border-*` idiom). Only widgets that draw a
+    /// border honor this — `Input` / `SecureInput` / `Dropdown`. Widgets
+    /// with no border to recolor (`Button`, `Checkbox`) and borderless
+    /// inputs fall back to the ring so focus is never left unindicated.
+    Border,
+}
+
+/// Visual tokens for the keyboard-focus indicator.
+///
+/// Focusable widgets (`Input`, `SecureInput`, `Button`, `Checkbox`,
+/// `Dropdown`) read these defaults from the active theme during paint.
+/// In [`Ring`](FocusIndicator::Ring) mode the indicator is drawn just
+/// *outside* the widget rect — `ring_offset` is the gap between the
 /// widget edge and the ring's inner edge — so it complements (rather
 /// than replaces) any existing border, mirroring browsers' `outline`.
+/// In [`Border`](FocusIndicator::Border) mode `ring_color` becomes the
+/// focused-border color and `ring_width` / `ring_offset` are unused.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FocusStyle {
-    /// Stroke color for the ring.
+    /// Which form the focus indicator takes app-wide.
+    pub indicator: FocusIndicator,
+    /// Ring stroke color in `Ring` mode; focused-border color in `Border`
+    /// mode. A per-widget `focus_ring_color` override takes precedence in
+    /// either mode.
     pub ring_color: Color,
-    /// Stroke thickness in px.
+    /// Stroke thickness in px (`Ring` mode only).
     pub ring_width: f32,
     /// Distance in px between the widget rect and the inner edge of the
-    /// ring. `0.0` paints the ring flush against the widget edge.
+    /// ring. `0.0` paints the ring flush against the widget edge
+    /// (`Ring` mode only).
     pub ring_offset: f32,
 }
 
@@ -186,6 +214,7 @@ impl Theme {
                 xl: 32.0,
             },
             focus: FocusStyle {
+                indicator: FocusIndicator::Ring,
                 ring_color: Color::rgb(0.5, 0.65, 1.0),
                 ring_width: 2.0,
                 ring_offset: 2.0,
@@ -256,6 +285,7 @@ impl Theme {
                 xl: 32.0,
             },
             focus: FocusStyle {
+                indicator: FocusIndicator::Ring,
                 ring_color: Color::rgb(0.2, 0.45, 0.95),
                 ring_width: 2.0,
                 ring_offset: 2.0,
@@ -352,8 +382,10 @@ impl Lerp for Colors {
 impl Lerp for FocusStyle {
     fn lerp(&self, to: &Self, t: f32) -> Self {
         Self {
+            // Indicator mode and ring geometry snap to the target — only
+            // the color fades.
+            indicator: to.indicator,
             ring_color: self.ring_color.lerp(&to.ring_color, t),
-            // Ring geometry snaps to the target — only the color fades.
             ring_width: to.ring_width,
             ring_offset: to.ring_offset,
         }
@@ -419,6 +451,33 @@ mod tests {
         assert_eq!(base.spacing, scaled.spacing);
         assert_eq!(base.focus, scaled.focus);
         assert_eq!(base.hover, scaled.hover);
+    }
+
+    #[test]
+    fn focus_indicator_defaults_to_ring() {
+        // Both built-in themes ship Ring so existing apps are bit-for-bit
+        // unchanged; Border is strictly opt-in.
+        assert_eq!(Theme::dark().focus.indicator, FocusIndicator::Ring);
+        assert_eq!(Theme::light().focus.indicator, FocusIndicator::Ring);
+        assert_eq!(Theme::default().focus.indicator, FocusIndicator::Ring);
+    }
+
+    #[test]
+    fn focus_style_lerp_snaps_indicator_to_target() {
+        // The indicator mode is discrete — a cross-fade can't render "half a
+        // ring", so it snaps to the target's mode like ring geometry does.
+        let ring = FocusStyle {
+            indicator: FocusIndicator::Ring,
+            ..Theme::dark().focus
+        };
+        let border = FocusStyle {
+            indicator: FocusIndicator::Border,
+            ..Theme::dark().focus
+        };
+        // Snap to `to` even at t=0.0 (matches ring_width/ring_offset snap).
+        assert_eq!(ring.lerp(&border, 0.0).indicator, FocusIndicator::Border);
+        assert_eq!(ring.lerp(&border, 0.5).indicator, FocusIndicator::Border);
+        assert_eq!(border.lerp(&ring, 1.0).indicator, FocusIndicator::Ring);
     }
 
     #[test]

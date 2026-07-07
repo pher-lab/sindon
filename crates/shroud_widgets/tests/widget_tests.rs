@@ -1,4 +1,4 @@
-use shroud_core::{Color, Point, Theme};
+use shroud_core::{Color, FocusIndicator, Point, Theme};
 use shroud_reactive::Signal;
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::tree::WidgetTree;
@@ -5550,6 +5550,136 @@ fn clicking_keyboard_focused_widget_drops_its_ring() {
         0,
         "clicking the already-focused widget drops the ring"
     );
+}
+
+// ── FW-26 (G7): focus indicator Border mode ───────────────────────
+
+/// `Theme::default()` (Ring) with the focus indicator switched to Border.
+fn border_theme() -> Theme {
+    let mut t = Theme::default();
+    t.focus.indicator = FocusIndicator::Border;
+    t
+}
+
+/// Programmatically focus `widget` (→ focus-visible) and paint it under
+/// `theme`, returning the context so callers can inspect the emitted rects.
+fn paint_focused_under_theme(widget: impl Widget + 'static, theme: Theme) -> PaintContext {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let idx = tree.add_child(root, widget);
+    tree.compute_layout(200.0, 60.0);
+    let mut ev = EventContext::new();
+    tree.focus(Some(idx), &mut ev);
+    let mut ctx = PaintContext::new(theme);
+    tree.paint(&mut ctx);
+    ctx
+}
+
+#[test]
+fn input_border_mode_recolors_border_and_omits_ring() {
+    // Border mode: a focused Input turns its own 1px border to the focus
+    // color instead of drawing an outer ring (the web focus:border-* idiom).
+    let theme = border_theme();
+    let focus_color = theme.focus.ring_color;
+    let ctx = paint_focused_under_theme(Input::new(), theme);
+
+    let strokes: Vec<_> = ctx.rects.iter().filter(|r| r.border_width > 0.0).collect();
+    assert_eq!(
+        strokes.len(),
+        1,
+        "just the recolored border — no separate ring stroke"
+    );
+    assert_eq!(
+        strokes[0].border_width, 1.0,
+        "still a 1px border, not a 2px ring"
+    );
+    assert_eq!(
+        strokes[0].color, focus_color,
+        "the border is recolored to the focus color"
+    );
+}
+
+#[test]
+fn input_ring_mode_keeps_ring_and_plain_border() {
+    // Contrast / regression: under the default (Ring) theme a focused Input
+    // still draws BOTH a plain input_border stroke and an outer ring.
+    let theme = Theme::default();
+    let ring_color = theme.focus.ring_color;
+    let border_color = theme.colors.input_border;
+    let ctx = paint_focused_under_theme(Input::new(), theme);
+
+    let ring = ctx
+        .rects
+        .iter()
+        .find(|r| r.color == ring_color)
+        .expect("ring present in Ring mode");
+    assert_eq!(ring.border_width, 2.0, "ring is the 2px stroke");
+    assert!(
+        ctx.rects
+            .iter()
+            .any(|r| r.color == border_color && r.border_width == 1.0),
+        "the 1px border keeps the plain input_border color in Ring mode"
+    );
+}
+
+#[test]
+fn borderless_input_border_mode_falls_back_to_ring() {
+    // Border mode has no border to recolor on a borderless field, so it must
+    // fall back to the ring — focus is never left unindicated.
+    let theme = border_theme();
+    let ring_color = theme.focus.ring_color;
+    let ctx = paint_focused_under_theme(Input::new().borderless(), theme);
+
+    let strokes: Vec<_> = ctx.rects.iter().filter(|r| r.border_width > 0.0).collect();
+    assert_eq!(
+        strokes.len(),
+        1,
+        "borderless: no border, just the fallback ring"
+    );
+    assert_eq!(strokes[0].border_width, 2.0, "fallback is the 2px ring");
+    assert_eq!(strokes[0].color, ring_color);
+}
+
+#[test]
+fn input_focus_ring_color_override_drives_border_in_border_mode() {
+    // One color source: the per-widget focus_ring_color override recolors the
+    // focused border in Border mode just as it recolors the ring in Ring mode.
+    let custom = Color::rgb(1.0, 0.0, 0.0);
+    let ctx = paint_focused_under_theme(Input::new().focus_ring_color(custom), border_theme());
+    let strokes: Vec<_> = ctx.rects.iter().filter(|r| r.border_width > 0.0).collect();
+    assert_eq!(strokes.len(), 1);
+    assert_eq!(
+        strokes[0].color, custom,
+        "override wins for the focused border"
+    );
+}
+
+#[test]
+fn button_keeps_ring_in_border_mode() {
+    // Buttons have no border to recolor, so Border mode still rings them
+    // (the web-consistent mixed model: fields recolor, buttons ring).
+    let theme = border_theme();
+    let ring_color = theme.focus.ring_color;
+    let ctx = paint_focused_under_theme(Button::new("Go"), theme);
+    let n = ctx
+        .rects
+        .iter()
+        .filter(|r| r.color == ring_color && r.border_width == 2.0)
+        .count();
+    assert_eq!(n, 1, "Button falls back to the ring in Border mode");
+}
+
+#[test]
+fn checkbox_keeps_ring_in_border_mode() {
+    let theme = border_theme();
+    let ring_color = theme.focus.ring_color;
+    let ctx = paint_focused_under_theme(Checkbox::new("Yes"), theme);
+    let n = ctx
+        .rects
+        .iter()
+        .filter(|r| r.color == ring_color && r.border_width == 2.0)
+        .count();
+    assert_eq!(n, 1, "Checkbox falls back to the ring in Border mode");
 }
 
 // ── Knot gap 3: focus_initially + EventContext::focus ─────────────

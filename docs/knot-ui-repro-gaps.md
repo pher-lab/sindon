@@ -154,10 +154,24 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - 残: `cursor: not-allowed`（カーソル形状 API 自体が無い）は非対象。アイコン均一化の根因の半分は
   アイコンフォント未同梱（FW-12、本 clone の対象外）だが、`min_width` で幅は揃えられるようになった。
 
-### G7. focus モデルの差（外側リング vs border 色変化）— **小〜中（要判断）**
+### G7. focus モデルの差（外側リング vs border 色変化）→ **解消（FW-26、2026-07-08 landed）**
 - 正解は `focus:outline-none focus:border-blue-500`＝**枠線の色が変わるだけ**。
-- shroud は外側に focus ring を描く（offset 付き）。見た目の質感が異なる。
-- 「どちらが正か」は設計判断。Knot 再現の観点では border-color 方式が欲しい場面がある。
+- ~~shroud は外側に focus ring を描く（offset 付き）ので見た目の質感が異なる。~~
+- 「どちらを既定にするか」は設計判断だったので、**テーマレベルで選べる**ようにして graduate（ユーザ選択）。
+- 対応: `FocusStyle` に `indicator: FocusIndicator { Ring（既定）/ Border }` を追加（dark/light とも
+  `Ring` 既定 ＝ 既存挙動ビット等価・非破壊。lerp は指標 snap）。`Border` モードでは **border を持つ
+  widget（`Input` / `SecureInput` / `Dropdown`）** が focus-visible 時に自分の 1px border を focus 色
+  （per-widget `focus_ring_color` override があればそれ、無ければ `focus.ring_color`）に recolor し、
+  リングは描かない。色ソースを `focus.ring_color` に一本化したので、既存の `focus_ring_color` override が
+  両モードで効く。
+- **リングの `:focus-visible` ゲート（キーボード／プログラム由来のフォーカスだけ表示）は従来どおり効く**
+  ので、`Border` モードでも「クリック focus では枠が変わらない」挙動は保たれる（G9 と同じ意図）。
+- **非対象の fallback**: recolor する border を持たない `Button` / `Checkbox`、および `borderless()` な
+  入力は、`Border` モードでも**リングに fallback**（focus 表示を失わない。Web も入力=border/ボタン=ring の
+  mixed model なので Knot 再現としても正しい）。
+- テスト: theme +2 / widgets +6 / secure +2 / dropdown +1（= +11）。全 gate 緑。
+- clone 配線: [tokens.rs](../examples/knot_clone/src/tokens.rs) の light/dark を `focus.indicator = Border`
+  ＋ `focus.ring_color = blue_500()` に。入力欄のリングが実 border 変化になり `focus:border-blue-500` に 1:1。
 
 ### G8. ~~sRGB hex で色が洗い出される（ガンマ非対応）~~ → **誤検知（取り下げ）**
 - 第一稿のスクショで全色が洗い出されて見えたが、**原因は描画ではなく HDR→SDR スクショ側の
@@ -178,8 +192,9 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - ~~未フォーカスで枠がごく薄く、border/radius ビルダーが無いので常時枠を意図的に付けられない。~~
 - G2 で `SecureInput` / `Input` とも border が既定 ON（`input_border` 追従）+ `radius`
   対応になったので、未フォーカスでも常時 `border border-gray-300 rounded-lg` 相当が出る。
-- 残る差は G7（フォーカス時に「外側リング」が出る vs 正解は「枠線の色が変わるだけ」）。
-  これは設計判断としてまだ open。常時枠が出るようになった分、G7 の体感差は小さくなった。
+- 残っていた差は G7（フォーカス時に「外側リング」が出る vs 正解は「枠線の色が変わるだけ」）→
+  **FW-26（2026-07-08）でテーマ `FocusIndicator::Border` として解消**。`Border` モードで未フォーカス〜
+  フォーカスとも `border border-gray-300 rounded-lg` → `focus:border-blue-500` の遷移が 1:1 になった。
 
 ### G10. 片側 border (`border-r` / `border-b`) が引けない → **解消（FW-16、2026-07-02 landed）**
 - 正解は仕切り線を片側 border で多用する: サイドバー右端 `border-r`、ヘッダ／検索／タグ各
@@ -510,7 +525,9 @@ FW-18（drop-shadow G18 の shadow 半分）** として graduate 済み。
 - ~~**G3 系の残り** 固定ピクセル高の multiline viewport 無し~~ → **解消（FW-25、2026-07-08）** =
   `Input::height(px)`（definite な固定箱・multiline は clip+スクロール。`min_height` は floor で cap でない
   問題を解消）。clone recovery textarea を `min_height(96)`→`height(96)` に格上げ。
-- **G7** focus が外側リング vs 正解は border 色変化（設計判断・open）
+- ~~**G7** focus が外側リング vs 正解は border 色変化（設計判断）~~ → **解消（FW-26、2026-07-08）** =
+  テーマ `FocusStyle::indicator`（`Ring` 既定 / `Border`）。Border モードで border-bearing widget が
+  focus 色に recolor、Button/Checkbox/borderless はリング fallback。
 - ~~**G15** capturing layer の hover 固定~~ → **解消（FW-23、2026-07-06）** = interactive layer push 前に
   `clear_hover` で live chain へ `MouseLeave`（framework 実バグ第5号）
 - **小・番号なし（2026-07-07 の台帳リコンサイルで明示化 — これまで G5 の `<details>` や slice 所見に

@@ -185,6 +185,39 @@ fn space_on_focused_trigger_opens_popover() {
     assert_eq!(tree.layer_count(), 1, "Space opens popover");
 }
 
+#[test]
+fn trigger_border_mode_recolors_border_and_omits_ring() {
+    // FW-26 (G7): the trigger always draws a border, so a Border-mode theme
+    // recolors it to the focus color on focus and suppresses the ring.
+    use shroud_core::FocusIndicator;
+    let (mut tree, dd, _sig) = dropdown_tree(vec!["A", "B"]);
+    measured_layout(&mut tree, 400.0, 300.0);
+
+    let mut ev = EventContext::new();
+    tree.focus(Some(dd), &mut ev);
+
+    let mut theme = Theme::default();
+    theme.focus.indicator = FocusIndicator::Border;
+    let focus_color = theme.focus.ring_color;
+    let mut ctx = shroud_widgets::paint::PaintContext::new(theme);
+    tree.paint(&mut ctx);
+
+    let strokes: Vec<_> = ctx.rects.iter().filter(|r| r.border_width > 0.0).collect();
+    assert_eq!(
+        strokes.len(),
+        1,
+        "trigger border recolored — no separate ring stroke"
+    );
+    assert_eq!(
+        strokes[0].border_width, 1.0,
+        "still a 1px border, not a 2px ring"
+    );
+    assert_eq!(
+        strokes[0].color, focus_color,
+        "the trigger border is recolored to the focus color"
+    );
+}
+
 // ── G16: trigger box metrics (padding_x / padding_y / min_height) ──────────
 
 /// Lay out a single configured dropdown and return its border-box height plus
