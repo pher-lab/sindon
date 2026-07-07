@@ -455,13 +455,19 @@ slice 4 の語彙で組めた。**実機 OK**（2026-07-03 ユーザ確認、lig
   説明 text-sm）/ `space-y-4` フィールド群（リカバリーキー textarea + 新PW + 確認PW）/ 青フル幅
   "Recover Vault" / 中央 "Back" テキストリンク。max-w-md 中央寄せ・space-y-6 は unlock/setup と同型。
 - **★ このスライスの新語彙 = mnemonic の `<textarea>`（clone 初の複数行入力）**: `resize-none h-24`
-  → `Input::multiline().padding_x(16).padding_y(12).min_height(96)`。React ソースは**素の
-  `<textarea>`（パスワード欄ではない・12単語は可視）**なので `SecureInput` でなく `Input`。border/
-  radius は unlock 系と同じ既定 chrome。
-- **小 gap 発見（G3 系に追記）= 固定ピクセル高の multiline が無い**: `h-24` は**固定96px でスクロール**
-  だが shroud の `min_height` は**下限（floor）**。空欄では 96px でピクセル一致するが、5行以上打つと
-  本物は内部スクロール・shroud は箱が伸びる。固定ビューポート multiline は `height_full()`（＝*親*を
-  埋める）しかなく、正確な固定箱には wrapper が要る。静止スナップショットには無影響ゆえ min_height で近似。
+  → `Input::multiline().padding_x(16).padding_y(12).height(96)`（当初 `min_height(96)` で近似 → FW-25 で
+  `height(96)` に格上げ）。React ソースは**素の `<textarea>`（パスワード欄ではない・12単語は可視）**なので
+  `SecureInput` でなく `Input`。border/radius は unlock 系と同じ既定 chrome。
+- **小 gap 発見（G3 系に追記）= 固定ピクセル高の multiline が無い → 解消（FW-25、2026-07-08 landed）**:
+  `h-24` は**固定96px でスクロール**。当初は `min_height(96)` で近似したが、`min_height` は**下限（floor）**
+  ＝正確には *cap* でない。**実測すると Input は content サイズを measure 返さないので floor 96 にちょうど
+  収まり静的には一致**する（メモの「shroud は箱が伸びる」は誤り）が、**floor ゆえ flex で stretch/grow
+  される文脈では 96 を超えて膨らむ**（row の cross-axis stretch で実証。`min_height(96)`→300 に伸びる /
+  `height(96)`→96 でキャップ）。∴ `h-24` の正しいプリミティブは *definite* な固定高。**解消**: `Input::height(px)`
+  を追加（Taffy `size.height` を definite にセット・derived `min_height`/`height_full` を supersede）。
+  multiline では definite ビューポート＝はみ出しを clip + 内部スクロール（既存の scroll 機構は
+  `layout.size.height` ベース ∴ 流用）。single-line では箱を固定（テキストは縦中央）。従来の `height_full()`
+  （＝*親*を埋める）に加えて**正確な固定箱**が手に入った。
 - **Back リンク**は unlock の "Forgot password?" と同一 idiom（transparent fills + `hover_text_color`
   で文字色ダーク化）。**おまけ**: unlock の "Forgot password?" をダミーから実 Recovery 遷移に接続
   （本物の UnlockScreen と一致）。
@@ -501,7 +507,9 @@ FW-18（drop-shadow G18 の shadow 半分）** として graduate 済み。
 - ~~**G18 の残り半分** viewport 相対サイズ vh/vw 無し~~ → **解消（FW-24、2026-07-07）** = `FlexStyle`
   の vh/vw 意図 + `resolve_viewport` + ツリーの add/resize 再解決。`Container::max_height_vh` 他。
   （shadow/elevation は **FW-18 で解消済**）
-- **G3 系の残り** 固定ピクセル高の multiline viewport 無し（slice 6 で追記）
+- ~~**G3 系の残り** 固定ピクセル高の multiline viewport 無し~~ → **解消（FW-25、2026-07-08）** =
+  `Input::height(px)`（definite な固定箱・multiline は clip+スクロール。`min_height` は floor で cap でない
+  問題を解消）。clone recovery textarea を `min_height(96)`→`height(96)` に格上げ。
 - **G7** focus が外側リング vs 正解は border 色変化（設計判断・open）
 - ~~**G15** capturing layer の hover 固定~~ → **解消（FW-23、2026-07-06）** = interactive layer push 前に
   `clear_hover` で live chain へ `MouseLeave`（framework 実バグ第5号）

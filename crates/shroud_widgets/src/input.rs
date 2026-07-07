@@ -604,6 +604,13 @@ pub struct Input {
     /// multi-line mode this turns it into a fixed viewport that scrolls its
     /// content internally rather than sizing to a fixed [`line_count`].
     fill_height: bool,
+    /// Explicit fixed box height (px), CSS `h-24`. When `Some`, the field is
+    /// exactly this tall regardless of content or parent — a *definite*
+    /// viewport that (in multi-line mode) clips and scrolls overflow instead
+    /// of growing. Takes precedence over the derived `min_height` floor and
+    /// over [`fill_height`](Self::fill_height). `None` = size by
+    /// `min_height` / `line_count` / `fill_height` as before.
+    fixed_height: Option<f32>,
     /// IME preedit (composition) text — the uncommitted characters the user
     /// is currently composing via an IME. Spliced into the buffer *for
     /// display only* at the caret (with an underline) so the user can see
@@ -674,6 +681,7 @@ impl Input {
             last_max_scroll: Cell::new(0.0),
             grow: None,
             fill_height: false,
+            fixed_height: None,
             preedit: String::new(),
             preedit_cursor: None,
         }
@@ -809,6 +817,24 @@ impl Input {
     /// [`lines`](Self::lines) line-heights. No effect in single-line mode.
     pub fn height_full(mut self) -> Self {
         self.fill_height = true;
+        self
+    }
+
+    /// Set a fixed box height in pixels (CSS `h-24` on a `<textarea>`).
+    ///
+    /// Unlike [`min_height`](Self::min_height) (a floor the field grows past
+    /// as content is added) and [`height_full`](Self::height_full) (fills the
+    /// parent), this pins the field to *exactly* `px` tall regardless of
+    /// content or parent size. In [`multiline`](Self::multiline) mode that
+    /// makes it a definite viewport: content taller than the box clips and
+    /// scrolls internally (wheel + caret auto-reveal), matching a Tailwind
+    /// `resize-none h-24` textarea. In single-line mode it simply fixes the
+    /// box height with the text vertically centered.
+    ///
+    /// Takes precedence over the derived `min_height` floor and over
+    /// [`height_full`](Self::height_full).
+    pub fn height(mut self, px: f32) -> Self {
+        self.fixed_height = Some(px.max(0.0));
         self
     }
 
@@ -1588,7 +1614,13 @@ impl Widget for Input {
     fn style(&self) -> FlexStyle {
         let font_size = self.font_size.unwrap_or(16.0);
         let (pad_x, pad_y) = (self.pad_x, self.pad_y);
-        let mut style = if self.multiline {
+        let base = FlexStyle::new().padding_trbl(pad_y, pad_x, pad_y, pad_x);
+        // A fixed `height(px)` is a definite viewport that owns its own size —
+        // it supersedes the derived `min_height` floor (and `fill_height`
+        // below), so overflow clips and scrolls instead of growing the box.
+        let mut style = if let Some(h) = self.fixed_height {
+            base.height(h)
+        } else if self.multiline {
             let line_height = font_size * 1.2;
             // When the field fills its parent's height it owns a viewport that
             // scrolls internally, so a tiny floor (2 rows) is enough to keep it
@@ -1602,18 +1634,14 @@ impl Widget for Input {
             // Default floor = rows of text plus the top/bottom insets (so a
             // taller `padding_y` grows the box); `min_height` overrides it.
             let derived = rows * line_height + 2.0 * pad_y;
-            FlexStyle::new()
-                .padding_trbl(pad_y, pad_x, pad_y, pad_x)
-                .min_height(self.min_height_override.unwrap_or(derived))
+            base.min_height(self.min_height_override.unwrap_or(derived))
         } else {
             // `+ 4.0` keeps a hair of breathing room around the centered line,
             // preserving the historical `font_size + 20` at the default pad 8.
             let derived = font_size + 2.0 * pad_y + 4.0;
-            FlexStyle::new()
-                .padding_trbl(pad_y, pad_x, pad_y, pad_x)
-                .min_height(self.min_height_override.unwrap_or(derived))
+            base.min_height(self.min_height_override.unwrap_or(derived))
         };
-        if self.fill_height {
+        if self.fill_height && self.fixed_height.is_none() {
             style = style.height_full();
         }
         if let Some(factor) = self.grow {

@@ -22,8 +22,8 @@
 //! New vocabulary this slice exercises (vs. Unlock/Setup): the recovery-key
 //! `<textarea resize-none h-24>` — the first *multi-line* input in the clone.
 //! Mapped to `Input::multiline()` (a plain, visible field — the React source
-//! uses a bare `<textarea>`, not a password box). See the field for the one
-//! sizing nuance (`min_height` floor vs. `resize-none`'s fixed height).
+//! uses a bare `<textarea>`, not a password box), sized by `Input::height`
+//! (FW-25) for the `resize-none h-24` fixed scrolling box.
 //!
 //! Departures (documented inline where they occur):
 //!   - the strength meter is omitted — canonical is an empty password, so the
@@ -107,13 +107,11 @@ pub fn build(tree: &mut WidgetTree) {
     // it is *not* a password box). `px-4 py-3` → `padding_x(16).padding_y(12)`,
     // `rounded-lg` → `radius(8)`, default border tracks `input_border`.
     //
-    // NUANCE: `h-24` is a *fixed* 96px box that scrolls its content; `min_height`
-    // is a *floor*, so an empty field renders at exactly 96px (identical here)
-    // but would grow past it once you type >4 rows, where the real `resize-none`
-    // textarea would scroll instead. shroud's fixed-viewport multiline is
-    // `height_full()`, which fills the *parent*, so an exact fixed-pixel
-    // scrolling box needs a wrapper — a small dimension-API gap (G3 family),
-    // immaterial to this at-rest snapshot.
+    // `h-24` → `Input::height(96.0)` (FW-25): a *definite* fixed 96px box that
+    // clips + scrolls its content, matching `resize-none h-24`. (Previously
+    // approximated with `min_height(96)` — a floor that renders at 96 here but
+    // is only a lower bound, so a stretching parent could balloon it; the
+    // definite height caps it exactly.)
     let key_group = tree.add_child(fields, Container::column().gap(8.0)); // label mb-2
     tree.add_child(
         key_group,
@@ -131,7 +129,7 @@ pub fn build(tree: &mut WidgetTree) {
             .radius(8.0)
             .padding_x(16.0)
             .padding_y(12.0)
-            .min_height(96.0), // h-24
+            .height(96.0), // h-24 (fixed viewport, FW-25)
     );
 
     // New-password field. The strength meter (`newPassword.length > 0`) is

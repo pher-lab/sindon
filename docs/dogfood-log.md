@@ -165,6 +165,14 @@
   対応(repro・実使用): [knot_clone modals.rs](../examples/knot_clone/src/modals.rs) — Restore カードを `max_height(576.0)` → `max_height_vh(80.0)` に置換。ウィンドウ高の 80% に追従(リサイズしても本物の `max-h-[80vh]` 挙動)。
   **gate 全緑。実機 OK(2026-07-07 ユーザ確認 — ウィンドウを縦に潰すとカードが現ウィンドウ高の 80% に追従して縮み、ヘッダ + Cancel フッタ pinned・本文だけスクロール。720px 決め打ちの旧実装なら短いウィンドウで画面外にはみ出していた)。**
   - 残置(FW-24 後の続き候補): G3 残(固定高 multiline viewport)/ G7 focus 方式(設計判断・棚上げ継続)/ 小・番号なし 3件(`Container::min_width` は landed 済 → 要確認 / `MenuItem` disabled / grid プリミティブ)。**演習で炙った表現力 gap は G7(設計判断・棚上げ)を除き graduate 完了。**
+- **✅ FW-25 [fw] P3 🧷 — 固定ピクセル高の multiline Input(G3 の残り = `resize-none h-24`)= 完了 (2026-07-08, gate 全緑・実機確認待ち)**
+  出所: FW-15〜24 と同じ **Knot UI 完全再現演習**。slice 6(Recovery)で mnemonic textarea の `resize-none h-24`(固定96px でスクロール)を表現できず `min_height(96)` で近似していた分。ユーザ選択(「G7 は棚上げ・確実な G3 残を埋める」)。
+  **まず真因を実測で再検証**(メモの stale 警告に従い): Input は `measure()` を持たない ∴ multiline leaf は content=0 で **Taffy が min_height floor にちょうど収める** → `min_height(96)` は静的には 96px で一致し「箱が伸びる」は**誤り**(メモ訂正)。**本当の gap = `min_height` は floor で cap でない**: content measure が無い今は一致するが、**flex で stretch/grow される文脈では 96 を超える**(row の cross-axis stretch で `min_height(96)`→300 / `height(96)`→96 と実証)。∴ `h-24` の正しいプリミティブは *definite* な固定高。
+  対応(framework): `Input::height(px)` を追加 — `fixed_height: Option<f32>` を `style()` で Taffy `size.height` に definite セットし、derived `min_height`/`height_full` を **supersede**(fixed 優先)。multiline では definite ビューポート＝はみ出しを clip + 内部スクロール(既存 scroll 機構は `viewport_h = layout.size.height - 2*pad_y` ベース ∴ **無改造で流用**)。single-line は箱固定・テキスト縦中央。SecureInput は mask ゆえ非対象(FW-17/19 と同じ Input-only 慣習)。
+  テスト: 新 `input_fixed_height_tests.rs` +4(**height が min_height の stretch を cap する対比**・fixed multiline が clip+scrollbar・fits で no-scrollbar・single-line 固定)。`fmt --all` / `clippy(--workspace --exclude knot + knot、-D warnings)` / `doc(-D warnings)` クリーン([[feedback-prepush-fmt-check]])。281 lib + 全 integration 緑。
+  対応(repro・実使用): [knot_clone recovery.rs](../examples/knot_clone/src/recovery.rs) — mnemonic textarea を `min_height(96)` → `height(96)`(本物の `resize-none h-24`)。
+  **gate 全緑。実機確認待ち(HDR ∴ レイアウトはユーザの目で最終確認、[[feedback-screenshot-color-hdr]])。**
+  - 残置(FW-25 後): **G7 focus 方式(設計判断・棚上げ継続)= 演習で残る唯一の open gap** / 小・番号なし 3件(`Container::min_width` は landed 済 → 要確認 / `MenuItem` disabled / grid プリミティブ)。**演習で炙った表現力 gap は G7(設計判断・棚上げ)を除き全 graduate 完了。**
 - **✅ (小・遡及記録 2026-07-07) `Button::hover_text_color` — 透明ボタン(リンク)の hover 文字色 = 完了 (2026-07-01, commit `35ac369`)**
   出所: 同じ Knot UI 再現演習。透明 fill のリンク(unlock「Forgot password?」等)が React の `hover:text-*`(文字色だけ濃くなる)を表現できず、背景 hover しか無い Button では「青い箱に化ける or hover 反応ゼロ」だった footgun の解消。背景 hover と同じカーブで `text_color`→指定色にフェード(未指定なら不変・既存 Button 不変)。FW 番号は振らず(G-gap でなく footgun 派生の小追加)。**当時 dogfood-log にも [knot-ui-repro-gaps.md] にも記録漏れ → 台帳リコンサイル(2026-07-07)で遡及記載**。使用: unlock/recovery のリンク・エラーバナー `×`・タグチップ `×`。
 
