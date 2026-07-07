@@ -74,6 +74,12 @@ pub struct Button {
     /// background (and label) to half alpha — a theme-agnostic "greyed out"
     /// that reads on any surface. Set via [`disabled_background`](Self::disabled_background).
     disabled_bg: Option<Reactive<Color>>,
+    /// Label color while [`disabled`](Self::disabled) reads true. `None` dims
+    /// the normal label to half alpha (matching the default `disabled_bg`);
+    /// set it via [`disabled_text_color`](Self::disabled_text_color) to keep a
+    /// crisp label over an explicit `disabled_bg` (e.g. white text on a darker
+    /// fill — Tailwind `disabled:bg-* text-white` with no `disabled:text-*`).
+    disabled_text_color: Option<Reactive<Color>>,
     /// Whether the button is inert: it drops its hover/press feedback, skips
     /// keyboard focus, and does not fire `on_click`. Reactive so a form can
     /// gate its submit on a signal. Defaults to always-enabled.
@@ -118,6 +124,7 @@ impl Button {
             hover_text_color: None,
             focus_ring_color: None,
             disabled_bg: None,
+            disabled_text_color: None,
             disabled: Reactive::Static(false),
             radius: 0.0,
             pad_x: 8.0,
@@ -150,6 +157,7 @@ impl Button {
             hover_text_color: None,
             focus_ring_color: None,
             disabled_bg: None,
+            disabled_text_color: None,
             disabled: Reactive::Static(false),
             radius: 0.0,
             pad_x: 8.0,
@@ -328,6 +336,17 @@ impl Button {
     /// Reactive, like the other color setters.
     pub fn disabled_background(mut self, color: impl Into<Reactive<Color>>) -> Self {
         self.disabled_bg = Some(color.into());
+        self
+    }
+
+    /// Override the label color painted while [`disabled`](Self::disabled) reads
+    /// true, replacing the default half-alpha dim. Pair it with
+    /// [`disabled_background`](Self::disabled_background) to reproduce a design
+    /// whose disabled state recolors the fill but keeps a full-strength label
+    /// (Tailwind `disabled:bg-* text-white`, no `disabled:text-*`). Reactive,
+    /// like the other color setters.
+    pub fn disabled_text_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
+        self.disabled_text_color = Some(color.into());
         self
     }
 
@@ -511,14 +530,19 @@ impl Widget for Button {
             normal.lerp(&hover, hover_t)
         };
 
-        // Label color: dimmed to match a disabled fill; otherwise fades toward
-        // `hover_text_color` on the same curve when one is set (a text-only
-        // link that darkens on hover), else the base color throughout.
+        // Label color: while disabled, the explicit `disabled_text_color` if
+        // set (a crisp label over a recolored fill), else the base label dimmed
+        // to half alpha to match the default `disabled_bg`. Otherwise fades
+        // toward `hover_text_color` on the same curve when one is set (a
+        // text-only link that darkens on hover), else the base color throughout.
         let text_color = if disabled {
-            Color {
-                a: base_text.a * 0.5,
-                ..base_text
-            }
+            self.disabled_text_color
+                .as_ref()
+                .map(|c| c.get())
+                .unwrap_or(Color {
+                    a: base_text.a * 0.5,
+                    ..base_text
+                })
         } else {
             match self.hover_text_color.as_ref().map(|c| c.get()) {
                 Some(hover_text) if hover_t >= 1.0 => hover_text,

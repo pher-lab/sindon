@@ -3191,6 +3191,66 @@ fn button_text_color_tracks_signal_updates() {
 }
 
 #[test]
+fn disabled_button_defaults_to_half_alpha_label() {
+    // Without a `disabled_text_color`, a disabled button dims its label to half
+    // alpha (the theme-agnostic greyed-out). Guards the default so adding the
+    // override didn't change the fallback.
+    let white = Color::WHITE;
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(80.0));
+    tree.add_child(root, Button::new("Z").text_color(white).disabled(true));
+    tree.compute_layout(200.0, 80.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert!(!ctx.glyphs.is_empty(), "expected label glyphs");
+    for g in &ctx.glyphs {
+        assert_eq!(
+            g.color.a,
+            white.a * 0.5,
+            "disabled dims the label to half alpha"
+        );
+        assert_eq!(
+            (g.color.r, g.color.g, g.color.b),
+            (white.r, white.g, white.b)
+        );
+    }
+}
+
+#[test]
+fn disabled_text_color_overrides_the_dim() {
+    // `disabled_text_color` keeps a crisp label over an explicit `disabled_bg`
+    // (Tailwind `disabled:bg-* text-white`, no `disabled:text-*`) — the exact
+    // shape the knot_clone Unlock button needs (white on blue-800). The label
+    // must stay full-strength white, not the half-alpha default.
+    let white = Color::WHITE;
+    let blue = Color::rgb(0.1, 0.2, 0.6);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(80.0));
+    tree.add_child(
+        root,
+        Button::new("Z")
+            .text_color(white)
+            .disabled(true)
+            .disabled_background(blue)
+            .disabled_text_color(white),
+    );
+    tree.compute_layout(200.0, 80.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert!(!ctx.glyphs.is_empty(), "expected label glyphs");
+    for g in &ctx.glyphs {
+        assert_eq!(g.color, white, "disabled_text_color keeps the label crisp");
+    }
+    // The fill is the explicit disabled background, at full strength.
+    assert!(
+        ctx.rects.iter().any(|r| r.color == blue),
+        "disabled_background paints the darker fill"
+    );
+}
+
+#[test]
 fn button_reactive_label_reflects_signal() {
     // `Button::reactive_label` parallels `TextWidget::reactive` — the label
     // closure is re-read each paint, so updating the signal changes the

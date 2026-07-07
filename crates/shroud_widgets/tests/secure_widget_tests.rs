@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use shroud_core::{Color, Point, SecurityLevel};
 use shroud_security::SecureString;
 use shroud_widgets::*;
@@ -392,6 +395,129 @@ fn secure_input_caret_handles_multibyte_chars() {
     press(&mut input, &mut ctx, rect, NamedKey::ArrowLeft);
     type_char(&mut input, &mut ctx, rect, 'x');
     input.expose(|s| assert_eq!(s, "あxい"));
+}
+
+// ── SecureInput::on_length_change (reactive emptiness gap) ────────
+//
+// A per-keystroke change hook that hands out only the character count — a
+// length, never the plaintext — so an app can gate a submit button on
+// emptiness (the "dim the Unlock button until a password is typed" idiom).
+// Fires on typing, delete, and clears; stays silent on caret moves.
+
+/// A fresh, focused SecureInput whose `on_length_change` counts are collected
+/// into the returned log.
+fn length_log_input() -> (
+    SecureInput,
+    EventContext,
+    shroud_core::Rect,
+    Rc<RefCell<Vec<usize>>>,
+) {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&log);
+    let mut input = SecureInput::new().on_length_change(move |n| sink.borrow_mut().push(n));
+    let mut ctx = EventContext::new();
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
+    input.event(&WidgetEvent::FocusGained, rect, &mut ctx);
+    (input, ctx, rect, log)
+}
+
+#[test]
+fn on_length_change_reports_each_keystroke() {
+    let (mut input, mut ctx, rect, log) = length_log_input();
+    for ch in "abc".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
+    }
+    assert_eq!(
+        *log.borrow(),
+        vec![1, 2, 3],
+        "one report per character typed, carrying the new count"
+    );
+}
+
+#[test]
+fn on_length_change_reports_deletes() {
+    let (mut input, mut ctx, rect, log) = length_log_input();
+    for ch in "ab".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
+    }
+    log.borrow_mut().clear();
+
+    input.event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Backspace),
+        },
+        rect,
+        &mut ctx,
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec![1],
+        "backspace reports the shorter count"
+    );
+}
+
+#[test]
+fn on_length_change_silent_on_caret_moves() {
+    let (mut input, mut ctx, rect, log) = length_log_input();
+    for ch in "ab".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
+    }
+    log.borrow_mut().clear();
+
+    // Caret navigation doesn't change the length — nothing to report.
+    for key in [
+        NamedKey::ArrowLeft,
+        NamedKey::Home,
+        NamedKey::End,
+        NamedKey::ArrowRight,
+    ] {
+        input.event(
+            &WidgetEvent::KeyDown {
+                key: Key::Named(key),
+            },
+            rect,
+            &mut ctx,
+        );
+    }
+    assert!(
+        log.borrow().is_empty(),
+        "caret moves must not fire on_length_change"
+    );
+}
+
+#[test]
+fn on_length_change_reports_zero_on_clear_trigger() {
+    // A trigger-driven clear is first observed at paint, not in `event`, so the
+    // drop-to-empty report must come from the paint path.
+    let clear = ClearTrigger::new();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&log);
+
+    let mut input = SecureInput::new()
+        .clear_on(clear)
+        .on_length_change(move |n| sink.borrow_mut().push(n));
+    let mut ctx = EventContext::new();
+    let rect = shroud_core::Rect::new(0.0, 0.0, 200.0, 40.0);
+    input.event(&WidgetEvent::FocusGained, rect, &mut ctx);
+    for ch in "pw".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, rect, &mut ctx);
+    }
+    assert_eq!(
+        *log.borrow(),
+        vec![1, 2],
+        "typed counts reported from event"
+    );
+    log.borrow_mut().clear();
+
+    // Bump the trigger; the clear + its length report land on the next paint.
+    clear.bump();
+    let mut pctx = PaintContext::default();
+    input.paint(rect, &mut pctx);
+    assert_eq!(
+        *log.borrow(),
+        vec![0],
+        "clear-trigger empties the field and reports 0 from paint"
+    );
 }
 
 // ── Tier 2 IME bypass ─────────────────────────────────────────────

@@ -33,6 +33,10 @@ pub const DEFAULT_SECURE_INPUT_MAX_BYTES: usize = 256;
 
 type SubmitHandler = Box<dyn FnMut(&SecureString, &mut EventContext)>;
 
+/// Handler for [`SecureInput::on_length_change`]. Receives the new character
+/// count — a length, never the plaintext.
+type LengthHandler = Box<dyn FnMut(usize)>;
+
 /// A secure text input field for passwords and sensitive data.
 ///
 /// Key security properties:
@@ -80,6 +84,13 @@ pub struct SecureInput {
     /// Submit handler, fired on Enter. Receives `&SecureString` so callers
     /// can copy, hash, or consume the value without widening its exposure.
     on_submit: Option<SubmitHandler>,
+    /// Fired whenever the character count changes, with the new count (never
+    /// the plaintext). `RefCell` so it can fire from `paint` — where a
+    /// trigger-driven clear is first observed — as well as from `event`.
+    on_length_change: RefCell<Option<LengthHandler>>,
+    /// Last character count handed to `on_length_change`, so the callback
+    /// fires only on an actual change. Starts at 0 (a fresh buffer is empty).
+    last_reported_len: Cell<usize>,
     /// Optional external clear signal. When `bump()`ed, the widget zeroizes
     /// its buffer on the next paint/event.
     clear_trigger: Option<ClearTrigger>,
@@ -136,6 +147,8 @@ impl SecureInput {
             cursor: Cell::new(0),
             pending_click: Cell::new(None),
             on_submit: None,
+            on_length_change: RefCell::new(None),
+            last_reported_len: Cell::new(0),
             clear_trigger: None,
             last_clear_version: Cell::new(0),
             bg_color: None,
@@ -274,6 +287,30 @@ impl SecureInput {
         self
     }
 
+    /// Register a handler fired whenever the character count changes —
+    /// on typing, delete/backspace, or a clear (`clear()` or a bumped
+    /// [`ClearTrigger`]). The handler receives the *new* count.
+    ///
+    /// This deliberately mirrors `Input::on_change` but hands out only a
+    /// length, never the plaintext: a secret must not flow into a per-keystroke
+    /// callback. The count is already observable anyway — the field renders one
+    /// mask dot per character — so this exposes nothing the screen doesn't.
+    ///
+    /// The natural use is driving reactive state: bind a `Signal` and gate a
+    /// submit button on emptiness (`s.set(n == 0)`), or show a length / strength
+    /// meter. Fires only on a *change*; the initial empty state is not reported,
+    /// so initialize any bound signal to match a fresh (empty) field.
+    ///
+    /// ```ignore
+    /// let empty = Signal::new(true);
+    /// let field = SecureInput::new().on_length_change(move |n| empty.set(n == 0));
+    /// let unlock = Button::new("Unlock").disabled(empty); // dimmed until typed
+    /// ```
+    pub fn on_length_change(self, f: impl FnMut(usize) + 'static) -> Self {
+        *self.on_length_change.borrow_mut() = Some(Box::new(f));
+        self
+    }
+
     /// Bind a [`ClearTrigger`] that clears (zeroizes) this widget's buffer
     /// whenever the caller invokes `trigger.bump()`.
     ///
@@ -357,6 +394,24 @@ impl SecureInput {
             }
         }
     }
+
+    /// Fire `on_length_change` if the character count changed since the last
+    /// report. Cheap enough (two `usize` reads) to call unconditionally after
+    /// any path that might mutate the buffer — the edit keys in `event`, and an
+    /// externally observed clear in `paint`. Reads only a length, so the
+    /// `value` borrow is released before the handler runs.
+    fn emit_len_if_changed(&self) {
+        if self.on_length_change.borrow().is_none() {
+            return;
+        }
+        let len = self.value.borrow().char_count();
+        if len != self.last_reported_len.get() {
+            self.last_reported_len.set(len);
+            if let Some(handler) = self.on_length_change.borrow_mut().as_mut() {
+                handler(len);
+            }
+        }
+    }
 }
 
 impl Default for SecureInput {
@@ -390,6 +445,9 @@ impl Widget for SecureInput {
 
     fn paint(&self, layout: Rect, ctx: &mut PaintContext) {
         self.sync_clear();
+        // A trigger-driven clear is first observed here (not in `event`), so
+        // report the resulting length change from paint too.
+        self.emit_len_if_changed();
 
         let font_size = self
             .font_size
@@ -558,7 +616,7 @@ impl Widget for SecureInput {
         // may have bumped the trigger earlier this dispatch cycle.
         self.sync_clear();
 
-        match event {
+        let result = match event {
             WidgetEvent::MouseDown { position, button } => {
                 // Focus is already set by WidgetTree's click-to-focus path
                 // (dispatched FocusGained before this handler runs). Record a
@@ -656,6 +714,11 @@ impl Widget for SecureInput {
             },
 
             _ => EventResult::Ignored,
-        }
+        };
+
+        // Report any length change from this event (typing, delete, or a
+        // clear the Enter handler bumped) after the buffer has settled.
+        self.emit_len_if_changed();
+        result
     }
 }
