@@ -783,6 +783,47 @@ fn focused_empty_secure_input_draws_caret() {
 }
 
 #[test]
+fn pointer_focus_secure_input_shows_ring() {
+    // FW-27 (G7 follow-up): text entry is always focus-visible, so clicking a
+    // SecureInput lights its ring (Ring mode) even though the pointer path
+    // suppresses the ring for command widgets like Button.
+    use shroud_core::Theme;
+    let theme = Theme::default();
+    let ring_color = theme.focus.ring_color;
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let idx = tree.add_child(root, SecureInput::new());
+    tree.compute_layout(200.0, 60.0);
+    let r = tree.layout_rect(idx);
+
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(
+                r.origin.x + r.size.width / 2.0,
+                r.origin.y + r.size.height / 2.0,
+            ),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    assert_eq!(tree.focused(), Some(idx), "click should focus the field");
+
+    let mut ctx = PaintContext::new(theme);
+    tree.paint(&mut ctx);
+    let rings = ctx
+        .rects
+        .iter()
+        .filter(|rc| rc.color == ring_color && rc.border_width == 2.0)
+        .count();
+    assert_eq!(
+        rings, 1,
+        "click-focused SecureInput must paint the ring (text entry is always focus-visible)"
+    );
+}
+
+#[test]
 fn secure_text_builder() {
     let _text = SecureText::new(SecureString::new("secret"))
         .font_size(20.0)

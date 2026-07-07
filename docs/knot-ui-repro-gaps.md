@@ -164,8 +164,13 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   （per-widget `focus_ring_color` override があればそれ、無ければ `focus.ring_color`）に recolor し、
   リングは描かない。色ソースを `focus.ring_color` に一本化したので、既存の `focus_ring_color` override が
   両モードで効く。
-- **リングの `:focus-visible` ゲート（キーボード／プログラム由来のフォーカスだけ表示）は従来どおり効く**
-  ので、`Border` モードでも「クリック focus では枠が変わらない」挙動は保たれる（G9 と同じ意図）。
+- ~~**リングの `:focus-visible` ゲート（キーボード／プログラム由来のフォーカスだけ表示）は従来どおり効く**
+  ので、`Border` モードでも「クリック focus では枠が変わらない」挙動は保たれる。~~
+  → **FW-27（2026-07-08）で訂正**。web の `:focus-visible` は一律ではなく、**テキスト入力欄（`<input>`/
+  `<textarea>`）はマウスクリックでも常に focus-visible**（キャレット位置を見せる必要がある）。コマンド系
+  （Button/link）だけ keyboard 由来に限定される。∴ `Input`/`SecureInput` は **focused なら常に指標を出す**
+  （`focus_active = self.focused`、Border も Ring もクリックで点灯）ように直し、Web と 1:1 に。
+  **Button/Checkbox/Dropdown は `:focus-visible` ゲート据え置き**（コマンド系=毎クリックの表示はノイズ）。
 - **非対象の fallback**: recolor する border を持たない `Button` / `Checkbox`、および `borderless()` な
   入力は、`Border` モードでも**リングに fallback**（focus 表示を失わない。Web も入力=border/ボタン=ring の
   mixed model なので Knot 再現としても正しい）。

@@ -5682,6 +5682,96 @@ fn checkbox_keeps_ring_in_border_mode() {
     assert_eq!(n, 1, "Checkbox falls back to the ring in Border mode");
 }
 
+// ── FW-27 (G7 follow-up): text inputs are always focus-visible ────
+//
+// The web platform treats `<input>`/`<textarea>` as always matching
+// `:focus-visible`, so clicking a field shows its focus indicator — unlike
+// command widgets (Button/Checkbox), whose pointer focus stays suppressed
+// (asserted in `pointer_focus_suppresses_ring`). These lock in that split.
+
+/// Build a 200×60 tree with `widget`, click its center to focus it via the
+/// pointer (FocusReason::Pointer → tree-global focus-visible is `false`), and
+/// paint under `theme`.
+fn paint_after_pointer_focus(widget: impl Widget + 'static, theme: Theme) -> PaintContext {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let idx = tree.add_child(root, widget);
+    tree.compute_layout(200.0, 60.0);
+    let r = tree.layout_rect(idx);
+
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(
+                r.origin.x + r.size.width / 2.0,
+                r.origin.y + r.size.height / 2.0,
+            ),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    assert_eq!(tree.focused(), Some(idx), "click should focus the widget");
+
+    let mut ctx = PaintContext::new(theme);
+    tree.paint(&mut ctx);
+    ctx
+}
+
+#[test]
+fn pointer_focus_input_shows_ring() {
+    // Ring mode: unlike a Button (see `pointer_focus_suppresses_ring`), a text
+    // Input lights its ring on click — text entry is always focus-visible.
+    let ctx = paint_after_pointer_focus(Input::new(), Theme::default());
+    assert_eq!(
+        ring_count(&ctx),
+        1,
+        "click-focused Input must paint the ring (text entry is always focus-visible)"
+    );
+}
+
+#[test]
+fn pointer_focus_input_border_mode_recolors_border() {
+    // Border mode: click focus recolors the 1px border to the focus color and
+    // paints no ring — the web `focus:border-*` idiom fires on click too.
+    let theme = border_theme();
+    let focus_color = theme.focus.ring_color;
+    let ctx = paint_after_pointer_focus(Input::new(), theme);
+
+    let strokes: Vec<_> = ctx.rects.iter().filter(|r| r.border_width > 0.0).collect();
+    assert_eq!(
+        strokes.len(),
+        1,
+        "just the recolored border — no separate ring"
+    );
+    assert_eq!(
+        strokes[0].border_width, 1.0,
+        "still a 1px border, not a ring"
+    );
+    assert_eq!(
+        strokes[0].color, focus_color,
+        "click focus recolors the border in Border mode"
+    );
+}
+
+#[test]
+fn pointer_focus_button_still_suppresses_ring_in_border_mode() {
+    // Contrast: a Button clicked in Border mode has no border to recolor and
+    // the pointer path suppresses its ring — command widgets do NOT get the
+    // text-entry always-visible treatment, so a clicked button shows nothing.
+    let theme = border_theme();
+    let ring_color = theme.focus.ring_color;
+    let ctx = paint_after_pointer_focus(Button::new("Go"), theme);
+    let rings = ctx
+        .rects
+        .iter()
+        .filter(|r| r.color == ring_color && r.border_width == 2.0)
+        .count();
+    assert_eq!(
+        rings, 0,
+        "click-focused Button stays ringless (keyboard-only)"
+    );
+}
+
 // ── Knot gap 3: focus_initially + EventContext::focus ─────────────
 
 #[test]

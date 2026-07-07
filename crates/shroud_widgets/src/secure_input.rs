@@ -407,8 +407,10 @@ impl Widget for SecureInput {
         // Focus indicator: mirror `Input`. `border_focus` recolors the stroke
         // (theme `Border` mode + a visible border) and suppresses the ring;
         // otherwise the ring paints below (Ring mode, or Border-mode fallback
-        // for a borderless field).
-        let focus_active = self.focused && ctx.focus_visible();
+        // for a borderless field). A text-entry field is always focus-visible
+        // when focused (see `Input`) — click focus lights it too, unlike the
+        // command widgets that honor the pointer/keyboard `:focus-visible` gate.
+        let focus_active = self.focused;
         let border_focus = focus_active
             && self.border_visible
             && ctx.theme.focus.indicator == FocusIndicator::Border;
@@ -541,10 +543,11 @@ impl Widget for SecureInput {
             // candidate window to anchor. This is a security measure and
             // stays unconditional on focus, independent of the ring below.
             ctx.suppress_ime();
-            // Ring follows the `:focus-visible` heuristic and tracks the
-            // field's corner radius, so a rounded input gets a rounded ring.
+            // Ring shows whenever the field is focused (text entry is always
+            // focus-visible, so `focus_active == self.focused` here) and tracks
+            // the field's corner radius, so a rounded input gets a rounded ring.
             // Suppressed when `Border` mode already recolored the border above.
-            if ctx.focus_visible() && !border_focus {
+            if focus_active && !border_focus {
                 ctx.paint_focus_ring(layout, self.focus_ring_color, self.radius);
             }
         }

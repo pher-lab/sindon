@@ -1689,7 +1689,14 @@ impl Widget for Input {
         // to recolor). `border_focus` recolors the stroke below and suppresses
         // the ring; otherwise the ring paints (Ring mode, or Border-mode
         // fallback when the field is borderless).
-        let focus_active = self.focused && ctx.focus_visible();
+        //
+        // A text-entry field is *always* focus-visible when focused — it does
+        // not consult the pointer-vs-keyboard `:focus-visible` gate the way
+        // command widgets (Button/Checkbox) do. The web platform treats
+        // `<input>`/`<textarea>` this way: clicking in has to light the field
+        // so you can see where the caret landed, so click focus shows the
+        // indicator too (FW-27, the G7 follow-up).
+        let focus_active = self.focused;
         let border_focus = focus_active
             && self.border_visible
             && ctx.theme.focus.indicator == FocusIndicator::Border;
