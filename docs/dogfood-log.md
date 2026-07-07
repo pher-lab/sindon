@@ -173,13 +173,13 @@
   対応(repro・実使用): [knot_clone recovery.rs](../examples/knot_clone/src/recovery.rs) — mnemonic textarea を `min_height(96)` → `height(96)`(本物の `resize-none h-24`)。
   **gate 全緑。実機確認待ち(HDR ∴ レイアウトはユーザの目で最終確認、[[feedback-screenshot-color-hdr]])。**
   - 残置(FW-25 後): **G7 focus 方式(設計判断・棚上げ継続)= 演習で残る唯一の open gap** / 小・番号なし 3件(`Container::min_width` は landed 済 → 要確認 / `MenuItem` disabled / grid プリミティブ)。**演習で炙った表現力 gap は G7(設計判断・棚上げ)を除き全 graduate 完了。**
-- **✅ FW-26 [fw] P3 🧷 — フォーカス表示 border 色変化モード(G7)= 完了 (2026-07-08, gate 全緑・実機確認待ち)**
+- **✅ FW-26 [fw] P3 🧷 — フォーカス表示 border 色変化モード(G7)= 完了 (2026-07-08, gate 全緑・実機 OK)**
   出所: FW-15〜25 と同じ **Knot UI 完全再現演習**の**最後の open gap**。正解の入力欄は `focus:outline-none focus:border-blue-500`(枠線の色が青に変わるだけ)なのに、shroud は外側リング固定 ∴ 質感が違った。ユーザ選択(AskUserQuestion=「テーマモード追加」= app 全体で 1 つの focus イディオムを選ぶ / Knot の作り方に一致)。
   **設計の要点**: リング+`:focus-visible` ゲート(キーボード時のみリング)は**既に実装済**=アクセシビリティの難所は済。かつ `input_border_focused` トークン(青)も既存で clone tokens も配線済だった ∴ G7 は「新機能」でなく**既存トークン/ゲートを border を持つ widget に繋ぎ直す**小改修。色ソースは **`focus.ring_color` に一本化**(FocusStyle 自己完結・既存の per-widget `focus_ring_color` override が両モードで効く)。
   対応(framework): `FocusStyle` に `indicator: FocusIndicator{Ring(既定)/Border}` を追加(dark/light とも **Ring 既定=ビット等価・非破壊**、lerp は指標 snap)。**border を持つ 3 widget(Input/SecureInput/Dropdown)**が `Border` モードかつ `focus-visible` で border を focus 色に recolor しリングを抑止。**Button/Checkbox は recolor する border が無い ∴ Border モードでもリング据え置き**(Web と同じ mixed model・Knot も入力=border/ボタン=別)。**borderless 入力は Border モードでもリング fallback**(focus 表示を失わない)。
   テスト: theme +2(既定 Ring / lerp 指標 snap)/ widgets +6(Input recolor・Ring モード対比・borderless fallback・override が border 駆動・Button/Checkbox はリング維持)/ secure +2(recolor・borderless fallback)/ dropdown +1(trigger recolor)= +11。`fmt --all` / `clippy(--workspace --exclude knot + knot、-D warnings)` / `doc(-D warnings)` クリーン([[feedback-prepush-fmt-check]])。287 lib + 全 integration 緑。
   対応(repro・実使用): [knot_clone tokens.rs](../examples/knot_clone/src/tokens.rs) — light/dark とも `focus.indicator = Border` + `focus.ring_color = blue_500()`。入力欄のリング写経が実 border 変化になり `focus:border-blue-500` に 1:1。
-  **gate 全緑。実機確認待ち(HDR ∴ 色はユーザの目が正、[[feedback-screenshot-color-hdr]])。これで演習の open gap ゼロ。**
+  **gate 全緑。実機 OK(2026-07-08 ユーザ確認 — master password 欄が Tab フォーカスで blue-500 の枠に変わるのを確認。SecureInput 経路の実機確認)。これで演習の open gap ゼロ。**
 - **✅ (小・遡及記録 2026-07-07) `Button::hover_text_color` — 透明ボタン(リンク)の hover 文字色 = 完了 (2026-07-01, commit `35ac369`)**
   出所: 同じ Knot UI 再現演習。透明 fill のリンク(unlock「Forgot password?」等)が React の `hover:text-*`(文字色だけ濃くなる)を表現できず、背景 hover しか無い Button では「青い箱に化ける or hover 反応ゼロ」だった footgun の解消。背景 hover と同じカーブで `text_color`→指定色にフェード(未指定なら不変・既存 Button 不変)。FW 番号は振らず(G-gap でなく footgun 派生の小追加)。**当時 dogfood-log にも [knot-ui-repro-gaps.md] にも記録漏れ → 台帳リコンサイル(2026-07-07)で遡及記載**。使用: unlock/recovery のリンク・エラーバナー `×`・タグチップ `×`。
 

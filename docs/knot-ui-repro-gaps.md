@@ -154,7 +154,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - 残: `cursor: not-allowed`（カーソル形状 API 自体が無い）は非対象。アイコン均一化の根因の半分は
   アイコンフォント未同梱（FW-12、本 clone の対象外）だが、`min_width` で幅は揃えられるようになった。
 
-### G7. focus モデルの差（外側リング vs border 色変化）→ **解消（FW-26、2026-07-08 landed）**
+### G7. focus モデルの差（外側リング vs border 色変化）→ **解消（FW-26、2026-07-08 landed・実機 OK）**
 - 正解は `focus:outline-none focus:border-blue-500`＝**枠線の色が変わるだけ**。
 - ~~shroud は外側に focus ring を描く（offset 付き）ので見た目の質感が異なる。~~
 - 「どちらを既定にするか」は設計判断だったので、**テーマレベルで選べる**ようにして graduate（ユーザ選択）。
@@ -172,6 +172,8 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - テスト: theme +2 / widgets +6 / secure +2 / dropdown +1（= +11）。全 gate 緑。
 - clone 配線: [tokens.rs](../examples/knot_clone/src/tokens.rs) の light/dark を `focus.indicator = Border`
   ＋ `focus.ring_color = blue_500()` に。入力欄のリングが実 border 変化になり `focus:border-blue-500` に 1:1。
+- **実機 OK（2026-07-08 ユーザ確認）**: master password 欄を Tab フォーカスすると枠が blue-500 に変わる
+  （リングは出ない）のを確認＝ SecureInput 経路の実機確認（HDR ∴ 色はユーザの目が正、[[feedback-screenshot-color-hdr]]）。
 
 ### G8. ~~sRGB hex で色が洗い出される（ガンマ非対応）~~ → **誤検知（取り下げ）**
 - 第一稿のスクショで全色が洗い出されて見えたが、**原因は描画ではなく HDR→SDR スクショ側の
