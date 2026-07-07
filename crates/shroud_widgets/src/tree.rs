@@ -1487,19 +1487,26 @@ impl WidgetTree {
         // never fall through to the main tree.
         if layer_active {
             if let Some(pos) = event_position(event) {
-                let local_pos = Point::new(pos.x - offset.0, pos.y - offset.1);
+                // `pos` is viewport-space here — events are shifted by
+                // `-offset` into the target subtree's frame only *after* this
+                // block, so every layer's rect is tested in the same space
+                // (`entry.offset` + `entry.measured_size`, both from the last
+                // layout pass).
+                let point = Point::new(pos.x, pos.y);
                 // The active interactive layer (not necessarily the literal
                 // topmost — a tooltip may paint above it). `offset` above
-                // came from the same entry, so its size and offset agree.
-                let layer = self
+                // came from the same entry, so its rect agrees.
+                let top = self
                     .topmost_interactive_layer()
                     .expect("layer_active implies an interactive layer");
-                let layer_size = layer.measured_size;
-                let layer_root = layer.root;
-                let dismiss_on_outside = layer.options.dismiss_on_outside_click;
-                let layer_rect = Rect::new(0.0, 0.0, layer_size.width, layer_size.height);
-                if !layer_rect.contains(local_pos) {
-                    // Outside the layer's content rect.
+                let top_rect = Rect::new(
+                    top.offset.0,
+                    top.offset.1,
+                    top.measured_size.width,
+                    top.measured_size.height,
+                );
+                if !top_rect.contains(point) {
+                    // Outside the topmost interactive layer's content rect.
                     if let WidgetEvent::MouseMove { .. } = event {
                         // Cursor over scrim / margin: drop any layer-side
                         // hover (so widgets get a final MouseLeave) but
@@ -1508,8 +1515,52 @@ impl WidgetTree {
                         return EventResult::Ignored;
                     }
                     if let WidgetEvent::MouseDown { .. } = event {
-                        if dismiss_on_outside {
-                            self.pop_layer(layer_root);
+                        // Location-aware collapse: a pointer carries a
+                        // position, and that position encodes how deep to
+                        // dismiss. Walk the interactive layers top→down and
+                        // pop the run that (a) does not contain the click and
+                        // (b) opts into outside-click dismiss, stopping at the
+                        // first layer that contains the click or refuses to
+                        // dismiss — that layer, and everything below it, stays.
+                        //
+                        // So a click in dead space outside the whole stack
+                        // collapses all of it in one go, while a click that
+                        // lands inside an *intermediate* layer (e.g. the
+                        // popover body beneath an open dropdown) peels only the
+                        // layers stacked above it. Escape, by contrast, always
+                        // peels a single level (a keystroke has no location) —
+                        // see the Escape interceptor above.
+                        //
+                        // Testing each layer's *own* rect is what makes a
+                        // dropdown that overflows its parent popover behave:
+                        // the click is judged against the dropdown's rect and
+                        // the popover's rect independently, not against a
+                        // parent box that visually swallows the child.
+                        let mut to_pop: Vec<usize> = Vec::new();
+                        for entry in self.layers.iter().rev() {
+                            if !entry.options.interactive {
+                                // Click-through overlay (tooltip): never a
+                                // dismiss target, and it doesn't shield the
+                                // interactive layers beneath it.
+                                continue;
+                            }
+                            let rect = Rect::new(
+                                entry.offset.0,
+                                entry.offset.1,
+                                entry.measured_size.width,
+                                entry.measured_size.height,
+                            );
+                            if rect.contains(point) || !entry.options.dismiss_on_outside_click {
+                                // The click landed inside this layer, or this
+                                // layer eats outside clicks without closing
+                                // (a non-dismissable modal). Stop: it and
+                                // everything below stay.
+                                break;
+                            }
+                            to_pop.push(entry.root);
+                        }
+                        for root in to_pop {
+                            self.pop_layer(root);
                         }
                     }
                     // MouseUp / Scroll / other position-bearing events

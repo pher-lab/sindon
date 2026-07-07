@@ -763,6 +763,118 @@ fn outside_click_does_not_reach_main_tree() {
     );
 }
 
+// ── stacked-layer dismissal (location-aware collapse) ─────────────
+//
+// An outside-click carries a position, and that position encodes how deep
+// to dismiss: clicking dead space outside the whole stack collapses all of
+// it at once, while clicking an *intermediate* layer peels only the layers
+// above it (the dropdown-inside-a-popover case — one click on the popover
+// body closes the dropdown but keeps the popover). Escape stays a one-level
+// peel; only the pointer path is location-aware.
+
+/// Two stacked popovers at known viewport rects: `lower` fills a 300×300 box
+/// pinned at (100,100); `upper` is an 80×50 box pinned at (120,120), nested
+/// inside the lower's rect. `lower_dismissable` toggles the lower layer's
+/// outside-click dismiss; the upper always dismisses.
+fn stacked_popovers(lower_dismissable: bool) -> (WidgetTree, usize, usize) {
+    let mut tree = WidgetTree::new();
+    tree.set_root(Container::column().width(800.0).height(600.0));
+    let lower = tree.push_layer(
+        LayerOptions::popover()
+            .dismiss_on_outside_click(lower_dismissable)
+            .anchor(LayerAnchor::Viewport {
+                h: HAlign::Start,
+                v: VAlign::Start,
+                offset: (100.0, 100.0),
+            }),
+        Container::column()
+            .width(300.0)
+            .height(300.0)
+            .background(Color::rgb(0.2, 0.2, 0.3)),
+    );
+    let upper = tree.push_layer(
+        LayerOptions::popover().anchor(LayerAnchor::Viewport {
+            h: HAlign::Start,
+            v: VAlign::Start,
+            offset: (120.0, 120.0),
+        }),
+        Container::column()
+            .width(80.0)
+            .height(50.0)
+            .background(Color::rgb(0.3, 0.3, 0.4)),
+    );
+    tree.compute_layout(800.0, 600.0);
+    (tree, lower, upper)
+}
+
+#[test]
+fn outside_click_collapses_whole_layer_stack() {
+    // A click in dead space outside *both* popovers dismisses the entire
+    // stack in one go — not one layer per click.
+    let (mut tree, lower, upper) = stacked_popovers(true);
+    assert_eq!(tree.layer_count(), 2);
+
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            // outside lower (x<400) and outside upper.
+            position: Point::new(600.0, 500.0),
+            button: MouseButton::Left,
+        },
+    );
+
+    assert_eq!(
+        tree.layer_count(),
+        0,
+        "click outside the whole stack closes every layer"
+    );
+    assert!(!tree.contains(lower));
+    assert!(!tree.contains(upper));
+}
+
+#[test]
+fn click_in_lower_layer_peels_only_upper() {
+    // A click inside the lower popover but outside the upper one peels just
+    // the upper layer — the dropdown-in-popover case: clicking the popover
+    // body closes only the dropdown, the popover stays open.
+    let (mut tree, lower, upper) = stacked_popovers(true);
+
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            // inside lower (100..400) but outside upper (120..200, 120..170).
+            position: Point::new(300.0, 300.0),
+            button: MouseButton::Left,
+        },
+    );
+
+    assert_eq!(tree.layer_count(), 1, "only the upper layer peels");
+    assert!(tree.contains(lower), "lower popover stays open");
+    assert!(!tree.contains(upper), "upper popover dismissed");
+    assert_eq!(tree.top_layer_root(), Some(lower));
+}
+
+#[test]
+fn nondismissable_layer_blocks_collapse_below_it() {
+    // The lower popover opts out of outside-click dismiss. A click outside
+    // both still peels the dismissable upper layer, but the collapse stops
+    // at the lower one — it eats the outside click and stays (modal-style
+    // shielding), never reaching past it.
+    let (mut tree, lower, upper) = stacked_popovers(false);
+
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            position: Point::new(600.0, 500.0),
+            button: MouseButton::Left,
+        },
+    );
+
+    assert_eq!(tree.layer_count(), 1, "upper peels, lower is shielded");
+    assert!(tree.contains(lower), "non-dismissable lower must persist");
+    assert!(!tree.contains(upper));
+}
+
 #[test]
 fn escape_dismisses_layer() {
     let (mut tree, _main, _layer) = tree_with_layer(LayerOptions::modal());
