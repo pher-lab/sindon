@@ -185,6 +185,12 @@
   **設計の要点**: ブラウザと同じ「テキスト入力欄は always focus-visible」を widget 側の特性として表現。`Input`/`SecureInput` の `focus_active` を `self.focused && ctx.focus_visible()` → **`self.focused`** に(ゲートを外す)。Border/Ring 両モードで有効(Border=クリックで border 青、borderless/Ring=クリックでリング)。**Button/Checkbox/Dropdown は `ctx.focus_visible()` ゲート据え置き**(コマンド系=毎クリックの表示はノイズ)= web の mixed model を維持。tree-global の `focus_visible()` は据え置き(訂正は widget 単位の override として local に置くのが正しい設計 ∵ 「入力は常に visible」は widget 特性)。
   テスト: widgets +3(クリック Input=リング表示 / クリック Input=Border で border recolor / 対比: クリック Button は Border でも無表示)/ secure +1(クリック SecureInput=リング表示)= +4。既存 FW-8 の Button クリック抑止テスト 3 件は**そのまま緑**(コマンド系は不変)。`fmt --all` / `clippy(--workspace)` クリーン([[feedback-prepush-fmt-check]])。widgets 全 test 緑(widget_tests 290 / secure 42、integration +4)。
   **gate 全緑。実機 OK(2026-07-08 ユーザ確認 — クリックで入力欄の枠が青くなる / Button クリックは無表示のまま を確認。[[feedback-screenshot-color-hdr]] ∴ 色はユーザの目が正)。**
+- **✅ FW-29 [fw] P2 — 和文とラテンが別書体で混ざり「日本語非対応エディタに無理やり流し込んだ」ガタつき(元 #31)= 完了 (2026-07-10, 実機 OK)**
+  真因確定: 無指定テキストは `TextAttrs::default()` = `TextFamily::SansSerif`。cosmic-text 0.18 は generic sans-serif を既定で `set_sans_serif_family("Open Sans")`([font/system.rs:196])にしており、**Open Sans は stock Windows に無い** → ラテンは fontdb の代替フォント、和文は別の per-script フォールバックへ分岐。1画面に x-height / ウェイト / メトリクスの食い違う2書体が同居して「ガタガタ・違和感がとんでもない」見えに。縦ベースラインの [[fix-text-baseline-script-jitter]] とは別問題(あちらは行内の上下ズレ是正で、書体そのものの不一致は未対処だった)。
+  対応: framework に generic sans-serif の実体を1点だけ差し替えるレバーを新設。`TextEngine::set_default_font_family(name)`([engine.rs](../crates/shroud_text/src/engine.rs) = fontdb `set_sans_serif_family` + shape cache drop)+ `App::default_font_family(name)`([event_loop.rs](../crates/shroud_app/src/event_loop.rs) = bundled font 登録後・初回 paint 前に1回適用)。**widget / `TextAttrs` は無改変**。ラテンも和文も持つ1ファミリを指すだけで per-script フォールバック自体が起きず混在が根絶。app = knot に `UI_FONT_FAMILY = "Yu Gothic UI"`(Windows 同梱 ∴ バンドルゼロ)。同梱路線(Noto Sans JP)は const + `.font()` 差し替えの2手で切替可能だが、数 MB アセット(CJK はアイコンのようにサブセット不可)につき今回は見送り。
+  設計判断: 「`SansSerif` が指す実体」の再定義に一本化。generic family は fontdb の `query` 経路が `set_sans_serif_family` を尊重する([font/system.rs:374-380])ので widget を触らず全 UI に効く。`Monospace`(コードスパン)/ `Named`(アイコンフォント)は不変で既定だけ remap。解決できない名前は従来動作に degrade ∴ 投機的に呼んでも壊れない。
+  テスト: font_loading +1 — fixture の PUA アイコングリフ(システムフォント非依存)で「remap 後の**無指定**テキスト == `Named` 明示」を advance 一致で判別。fmt / clippy(-D warnings)/ doc(-D warnings)/ build 全緑([[feedback-prepush-fmt-check]])。
+  **実機 OK(2026-07-10 ユーザ確認: かなり綺麗・混在解消。[[feedback-screenshot-color-hdr]] ∴ 見た目はユーザの目が正)。**
 - **✅ (小・遡及記録 2026-07-07) `Button::hover_text_color` — 透明ボタン(リンク)の hover 文字色 = 完了 (2026-07-01, commit `35ac369`)**
   出所: 同じ Knot UI 再現演習。透明 fill のリンク(unlock「Forgot password?」等)が React の `hover:text-*`(文字色だけ濃くなる)を表現できず、背景 hover しか無い Button では「青い箱に化ける or hover 反応ゼロ」だった footgun の解消。背景 hover と同じカーブで `text_color`→指定色にフェード(未指定なら不変・既存 Button 不変)。FW 番号は振らず(G-gap でなく footgun 派生の小追加)。**当時 dogfood-log にも [knot-ui-repro-gaps.md] にも記録漏れ → 台帳リコンサイル(2026-07-07)で遡及記載**。使用: unlock/recovery のリンク・エラーバナー `×`・タグチップ `×`。
 
@@ -206,7 +212,7 @@
 
 - **元 #23 パスワード強度メーター** — [[roadmap]] で「強度ポリシーは*意図的に非移植*」と記録済。今回は据え置き。E(リリース)前に復活させるか改めて判断。
 - **元 #35 live split preview が使いにくい** — **要設計判断**。実装ではなく方向決めが先: ①split の比率/プレビュー見やすさを改善 ②toggle 方式(編集⇄プレビュー)に戻す ③可変ペイン幅。決めてから昇格。
-- **元 #31 フォントに差があって見づらい** — **要再現**。どの画面のどのフォント差か曖昧。次の dogfood で具体化してから。
+- **元 #31 フォントに差があって見づらい** — **✅ FW-29 で解消(2026-07-10)**。真因は和欧混在(generic `SansSerif` の二系統フォールバック)。既定 family を Latin+CJK 一体の1書体(`Yu Gothic UI`)に固定して消えた。上の FW-29 参照。
 
 ### → 棄却
 

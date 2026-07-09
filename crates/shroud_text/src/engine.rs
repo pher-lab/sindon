@@ -350,6 +350,33 @@ impl TextEngine {
         names
     }
 
+    /// Redefine the concrete font family that generic / unstyled text resolves
+    /// to.
+    ///
+    /// A widget that never calls `.family(..)` shapes as
+    /// [`TextFamily::SansSerif`](crate::TextFamily), which cosmic-text resolves
+    /// through fontdb's *sans-serif* generic. cosmic defaults that generic to
+    /// `"Open Sans"` — a family absent from a stock Windows install — so Latin
+    /// text lands on whatever fontdb substitutes while CJK text is served by a
+    /// *separate* per-script fallback. The two typefaces disagree on x-height,
+    /// weight, and metrics, which reads as the ragged "text forced through an
+    /// editor that doesn't do Japanese" look.
+    ///
+    /// Point the sans-serif generic at one family that covers every script the
+    /// app renders — a bundled `"Noto Sans JP"` (register its bytes first via
+    /// [`load_font_data`](Self::load_font_data)) or an installed `"Yu Gothic
+    /// UI"` — and unstyled text shapes in that single typeface end to end, with
+    /// no cross-script mixing. Explicit `Monospace` / `Named` families (code
+    /// spans, the icon font) are unaffected; only the default is remapped.
+    ///
+    /// A `name` fontdb can't resolve degrades to the prior behavior rather than
+    /// erroring, so this is safe to call speculatively. Drops the shape cache so
+    /// text shaped before the swap re-resolves against the new default.
+    pub fn set_default_font_family(&mut self, name: &str) {
+        self.font_system.db_mut().set_sans_serif_family(name);
+        self.shape_cache.clear();
+    }
+
     /// Shape a text string with default attributes (sans-serif, normal weight,
     /// normal style). Equivalent to calling [`shape_text_attrs`](Self::shape_text_attrs)
     /// with `TextAttrs::default()`; retained as the original API used by

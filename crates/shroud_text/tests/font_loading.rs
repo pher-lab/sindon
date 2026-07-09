@@ -34,6 +34,46 @@ fn load_font_data_returns_family_and_resolves_by_name() {
     );
 }
 
+/// `set_default_font_family` redefines what generic / unstyled text resolves
+/// to: after the swap, *default* attrs (`TextFamily::SansSerif` — what every
+/// widget carries unless it calls `.family(..)`) shape the same glyph, with the
+/// same advance, as an explicit `Named` request for that family. The fixture's
+/// icon codepoint lives in a private-use block no system font provides, so the
+/// equivalence pins the remap itself rather than any host-font coincidence.
+#[test]
+fn set_default_font_family_routes_unstyled_text_to_that_family() {
+    let mut engine = TextEngine::new();
+    let families = engine.load_font_data(ICON_FONT);
+    let family = families
+        .first()
+        .expect("fixture must report a family")
+        .clone();
+
+    // Reference: explicitly request the fixture family by name.
+    let named = TextAttrs::default().family(TextFamily::Named(family.clone()));
+    let reference = engine.shape_text_attrs(ICON_GLYPH, 32.0, 38.0, None, &named);
+    assert!(
+        !reference.glyphs.is_empty() && reference.width > 0.0,
+        "named fixture family must shape the icon glyph"
+    );
+
+    // Point the sans-serif generic at the fixture, then shape with *default*
+    // attrs (no `.family(..)`). It must land on the same face → same glyphs.
+    engine.set_default_font_family(&family);
+    let defaulted = engine.shape_text_attrs(ICON_GLYPH, 32.0, 38.0, None, &TextAttrs::default());
+    assert_eq!(
+        defaulted.glyphs.len(),
+        reference.glyphs.len(),
+        "remapped default must resolve the same glyph run as the named family"
+    );
+    assert!(
+        (defaulted.width - reference.width).abs() < 1e-3,
+        "remapped default must carry the named family's advance (got {}, want {})",
+        defaulted.width,
+        reference.width
+    );
+}
+
 #[test]
 fn load_font_data_rejects_garbage() {
     let mut engine = TextEngine::new();

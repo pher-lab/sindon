@@ -63,12 +63,22 @@ fn main() {
     settings::signals();
     shroud::app::system_theme_signal();
 
+    // UI text family for the Latin+CJK unification fix (dogfood 元#31: unstyled
+    // text mixed a Latin substitute with a separate Japanese fallback, giving a
+    // ragged two-typeface look). Naming one cohesive family that covers both
+    // scripts collapses it to a single face. "Yu Gothic UI" ships with Windows
+    // (zero bundle) — flip this to a bundled family like "Noto Sans JP" (with a
+    // matching `.font(..)`) to compare the portable route on real hardware.
+    const UI_FONT_FAMILY: &str = "Yu Gothic UI";
+
     App::new()
         .title("Knot \u{2014} M3")
         .size(1080, 720)
         // Register the bundled icon font (FW-12) before the first paint, so the
         // editor toolbar can draw its formatting glyphs. See `icons`.
         .font(icons::FONT)
+        // Collapse unstyled text onto one Latin+CJK family (see above).
+        .default_font_family(UI_FONT_FAMILY)
         .capture_prevention(true)
         // Theme is derived live from the settings signals + OS appearance,
         // re-evaluated every paint — a settings change repaints the whole

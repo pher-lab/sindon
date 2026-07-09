@@ -353,6 +353,13 @@ struct AppConfig {
     /// [`TextEngine::load_font_data`](shroud_text::TextEngine::load_font_data).
     /// `'static` bytes (an `include_bytes!` slice) cost nothing to carry.
     fonts: Vec<std::borrow::Cow<'static, [u8]>>,
+    /// Family that generic / unstyled text (`TextFamily::SansSerif`, the
+    /// default of every widget) resolves to. `None` keeps cosmic-text's built-in
+    /// generic (which mixes a Latin substitute with a separate CJK fallback);
+    /// `Some(name)` pins one cohesive family via
+    /// [`TextEngine::set_default_font_family`](shroud_text::TextEngine::set_default_font_family),
+    /// applied once after `fonts` are registered and before the first paint.
+    default_font_family: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -380,6 +387,7 @@ impl Default for AppConfig {
             theme: Reactive::Static(Theme::default()),
             tick_interval: DEFAULT_TICK_INTERVAL,
             fonts: Vec::new(),
+            default_font_family: None,
         }
     }
 }
@@ -475,6 +483,35 @@ impl App {
     /// ```
     pub fn font(mut self, data: impl Into<std::borrow::Cow<'static, [u8]>>) -> Self {
         self.config.fonts.push(data.into());
+        self
+    }
+
+    /// Pin the font family that generic / unstyled text resolves to.
+    ///
+    /// Every widget's text defaults to `TextFamily::SansSerif`. Left to
+    /// cosmic-text's built-in generic, that maps Latin runs to one substitute
+    /// font and CJK runs to a *different* per-script fallback, so mixed
+    /// Japanese-and-Latin UI renders in two clashing typefaces. Naming one
+    /// family here that carries every script the app shows — a cohesive UI font
+    /// like `"Yu Gothic UI"`, or a family you bundled with [`font`](Self::font)
+    /// such as `"Noto Sans JP"` — makes unstyled text shape in that single face
+    /// throughout. Explicit `.family(..)` on a widget (code monospace, the icon
+    /// font) still wins; only the default is affected.
+    ///
+    /// Applied once after bundled [`font`](Self::font)s are registered and
+    /// before the first paint. A name no installed / bundled font provides is
+    /// ignored (text keeps the previous behavior), so it never fails hard.
+    ///
+    /// ```no_run
+    /// use shroud_app::App;
+    /// use shroud_widgets::tree::WidgetTree;
+    ///
+    /// App::new()
+    ///     .default_font_family("Yu Gothic UI")
+    ///     .run(|_scope| WidgetTree::new());
+    /// ```
+    pub fn default_font_family(mut self, name: impl Into<String>) -> Self {
+        self.config.default_font_family = Some(name.into());
         self
     }
 
@@ -1016,6 +1053,12 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         if !self.fonts_loaded {
             for data in &self.config.fonts {
                 paint_ctx.text_engine.load_font_data(data);
+            }
+            // Remap the generic sans-serif to the app's chosen UI family *after*
+            // the bundled faces are registered, so a bundled name resolves.
+            // Kills the Latin/CJK two-typeface split for unstyled text.
+            if let Some(family) = &self.config.default_font_family {
+                paint_ctx.text_engine.set_default_font_family(family);
             }
             self.fonts_loaded = true;
         }
