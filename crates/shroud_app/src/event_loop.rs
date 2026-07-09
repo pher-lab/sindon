@@ -1,8 +1,8 @@
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use shroud_core::{Point, Rect, Theme};
+use shroud_core::{Color, Colors, Point, Rect, Theme};
 use shroud_platform::{PlatformWindow, SecureClipboard, SystemTheme};
 use shroud_reactive::{Reactive, Signal};
 use shroud_render::renderer::Renderer;
@@ -88,6 +88,78 @@ thread_local! {
 /// app default".
 pub fn system_theme_signal() -> Signal<Option<SystemTheme>> {
     SYSTEM_THEME_SIGNAL.with(|cell| *cell.get_or_init(|| Signal::new(None)))
+}
+
+thread_local! {
+    /// Snapshot of the theme the running app resolved on the last paint.
+    /// The event loop publishes into it every frame, right after pulling
+    /// [`App::theme`]'s reactive source (see [`publish_active_theme`]), so
+    /// during paint it always holds the theme the widgets are being drawn
+    /// against. Read only through [`theme_value`] / [`theme_color`], never
+    /// directly — those wrap it in a pull-based [`Reactive`] that matches
+    /// how the rest of the framework consumes theme tokens.
+    static ACTIVE_THEME: RefCell<Theme> = RefCell::new(Theme::default());
+}
+
+/// Publish the theme resolved for this frame so [`theme_color`] /
+/// [`theme_value`] accessors read fresh tokens when the tree paints.
+/// Called by the event loop at each paint, before the tree is painted.
+fn publish_active_theme(theme: &Theme) {
+    ACTIVE_THEME.with(|cell| *cell.borrow_mut() = theme.clone());
+}
+
+/// Bind a value derived from the active [`Theme`] into a [`Reactive`] that
+/// tracks live theme swaps — without the app hand-rolling a
+/// `Reactive::derive(|| my_theme().‹field›)` wrapper per token.
+///
+/// The framework already re-pulls every `Reactive` on each paint (that is
+/// how [`App::theme`] repaints with new tokens), and it publishes the
+/// frame's resolved theme just before painting. So a closure handed here
+/// reads the same theme the widgets are drawn against, and any
+/// [`App::theme`] swap becomes visible on the next repaint with no
+/// per-widget rewiring — the same contract as `App::theme` itself.
+///
+/// Use this for tokens outside the color palette (e.g. `|t| t.hover.bg`,
+/// `|t| t.spacing.md`); reach for [`theme_color`] for the common
+/// palette-color case.
+///
+/// ```no_run
+/// use shroud_app::theme_value;
+/// // Track the hover background across a light/dark toggle:
+/// let hover_bg = theme_value(|t| t.hover.bg);
+/// ```
+///
+/// Reads the theme published on the most recent paint. Before the first
+/// paint (or when called off the UI thread, which the pull model never
+/// does) it reflects [`Theme::default`].
+pub fn theme_value<T, F>(f: F) -> Reactive<T>
+where
+    T: Clone + 'static,
+    F: Fn(&Theme) -> T + 'static,
+{
+    Reactive::derive(move || ACTIVE_THEME.with(|cell| f(&cell.borrow())))
+}
+
+/// Bind a color from the active [`Theme`]'s palette into a [`Reactive`]
+/// that tracks live theme swaps. The ergonomic common case of
+/// [`theme_value`], scoped to [`Colors`] so the closure reads
+/// `|c| c.primary` instead of `|t| t.colors.primary`.
+///
+/// This collapses the boilerplate every app otherwise reinvents — a
+/// `Reactive::derive(|| my_theme().colors.‹name›)` wrapper for each token
+/// a panel needs. Hand the result straight to any widget builder that
+/// takes `impl Into<Reactive<Color>>`:
+///
+/// ```no_run
+/// use shroud_app::theme_color;
+/// use shroud_widgets::Container;
+/// let panel = Container::column().background(theme_color(|c| c.surface));
+/// ```
+pub fn theme_color<F>(f: F) -> Reactive<Color>
+where
+    F: Fn(&Colors) -> Color + 'static,
+{
+    theme_value(move |t| f(&t.colors))
 }
 
 /// Custom events sent to the event loop via [`AppHandle`].
@@ -933,7 +1005,9 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         let window_arc = platform_window.arc();
         let renderer = pollster::block_on(Renderer::new(Arc::clone(&window_arc)));
 
-        let mut paint_ctx = PaintContext::new(self.config.theme.get());
+        let theme = self.config.theme.get();
+        publish_active_theme(&theme);
+        let mut paint_ctx = PaintContext::new(theme);
 
         // Register bundled fonts (e.g. an icon font) into the text engine
         // before the first layout/paint, so widgets can resolve their families
@@ -1199,7 +1273,12 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 // `Signal<Theme>::set(...)` (or a derived `Reactive`
                 // that depends on `system_theme_signal()`) visible on
                 // the very next paint without per-widget rewiring.
-                paint_ctx.theme = self.config.theme.get();
+                let theme = self.config.theme.get();
+                // Mirror it into the process-wide snapshot so `theme_color`
+                // / `theme_value` accessors read this frame's tokens when
+                // the tree paints below.
+                publish_active_theme(&theme);
+                paint_ctx.theme = theme;
 
                 // Apply any deferred initial focus before layout so widget
                 // state set by FocusGained (cursor visibility, focus ring)
@@ -1472,6 +1551,40 @@ mod tests {
         assert_eq!(sig.get(), Some(SystemTheme::Light));
         sig.set(Some(SystemTheme::Dark));
         assert_eq!(sig.get(), Some(SystemTheme::Dark));
+    }
+
+    #[test]
+    fn theme_color_tracks_the_published_theme() {
+        // theme_color(...) must read whatever the paint loop last published
+        // via publish_active_theme, and reflect a *later* publish through
+        // the SAME Reactive handle — that is the live-theme-swap contract
+        // apps get for free instead of hand-rolling a
+        // Reactive::derive(|| my_theme().colors.X) wrapper per token.
+        let primary = theme_color(|c| c.primary);
+
+        let mut a = Theme::default();
+        a.colors.primary = Color::rgb(0.1, 0.2, 0.3);
+        publish_active_theme(&a);
+        assert_eq!(primary.get(), a.colors.primary);
+
+        let mut b = Theme::default();
+        b.colors.primary = Color::rgb(0.9, 0.8, 0.7);
+        publish_active_theme(&b);
+        // Same handle, new value — a swap needs no per-widget rewiring.
+        assert_eq!(primary.get(), b.colors.primary);
+    }
+
+    #[test]
+    fn theme_value_reaches_tokens_outside_the_palette() {
+        // theme_value is the general primitive underneath theme_color: it
+        // must reach tokens that aren't palette colors (or live outside
+        // Colors), e.g. hover.bg — the case a color-only accessor can't
+        // express, which is exactly why theme_value exists.
+        let hover_bg = theme_value(|t| t.hover.bg);
+        let mut t = Theme::default();
+        t.hover.bg = Color::rgb(0.4, 0.4, 0.4);
+        publish_active_theme(&t);
+        assert_eq!(hover_bg.get(), t.hover.bg);
     }
 
     #[test]

@@ -17,6 +17,7 @@
 
 use std::cell::OnceCell;
 
+use shroud::app::theme_color;
 use shroud::core::{Color, FocusIndicator, Theme};
 use shroud::reactive::{Reactive, Signal};
 
@@ -218,28 +219,32 @@ pub fn theme() -> Theme {
 }
 
 // --- Reactive color helpers ------------------------------------------------
-// Each re-reads the active theme on every paint, so panels track the toggle.
+// Delegate to the framework's `theme_color`, which reads the theme the app
+// published for the current frame (our `theme()` above, resolved through
+// `App::theme`) and re-pulls it on every paint so panels track the toggle.
+// This is the exact boilerplate `theme_color` exists to erase: each of these
+// used to hand-roll its own `Reactive::derive(|| theme().colors.X)`.
 
 pub fn background() -> Reactive<Color> {
-    Reactive::derive(|| theme().colors.background)
+    theme_color(|c| c.background)
 }
 pub fn surface() -> Reactive<Color> {
-    Reactive::derive(|| theme().colors.surface)
+    theme_color(|c| c.surface)
 }
 pub fn on_surface() -> Reactive<Color> {
-    Reactive::derive(|| theme().colors.on_surface)
+    theme_color(|c| c.on_surface)
 }
 pub fn muted() -> Reactive<Color> {
-    Reactive::derive(|| theme().colors.on_surface_variant)
+    theme_color(|c| c.on_surface_variant)
 }
 pub fn primary() -> Reactive<Color> {
-    Reactive::derive(|| theme().colors.primary)
+    theme_color(|c| c.primary)
 }
 pub fn primary_hover() -> Reactive<Color> {
-    Reactive::derive(|| theme().colors.primary_hover)
+    theme_color(|c| c.primary_hover)
 }
 pub fn error() -> Reactive<Color> {
-    Reactive::derive(|| theme().colors.error)
+    theme_color(|c| c.error)
 }
 
 /// Pick a fixed pair of colors by current mode — for the many Tailwind
