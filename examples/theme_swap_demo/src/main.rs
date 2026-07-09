@@ -14,8 +14,8 @@
 //! followed by the redraw any click already triggers is enough — no
 //! `tree.replace_root` or rebuild needed. Widgets that read theme
 //! tokens during paint (Button background, Input border, focus ring,
-//! the outline/divider border tokens, the window clear color) flip in
-//! lockstep.
+//! the outline/divider border tokens, the disabled fill/label tokens,
+//! the window clear color) flip in lockstep.
 
 use shroud::app::{App, system_theme_signal};
 use shroud::core::Theme;
@@ -57,7 +57,7 @@ fn main() {
 
     App::new()
         .title("shroud \u{2014} theme swap demo (Phase 30)")
-        .size(640, 360)
+        .size(640, 440)
         .theme(theme_reactive)
         .run(move |_scope| {
             let mut tree = WidgetTree::new();
@@ -138,6 +138,28 @@ fn main() {
                 section_b,
                 TextWidget::new("colors.divider \u{2014} the hairline parting these sections")
                     .font_size(13.0),
+            );
+
+            // Showcase the disabled tokens: a control that opts into the flat
+            // themed disabled look via `colors.disabled` / `colors.on_disabled`,
+            // beside an enabled twin for contrast. Both are pulled per paint, so
+            // a Light/Dark flip retints the disabled fill and label live.
+            let disabled_bg = {
+                let t = theme_for_tokens.clone();
+                Reactive::derive(move || t.get().colors.disabled)
+            };
+            let disabled_fg = {
+                let t = theme_for_tokens.clone();
+                Reactive::derive(move || t.get().colors.on_disabled)
+            };
+            let controls_row = tree.add_child(root, Container::row().gap(12.0));
+            tree.add_child(controls_row, Button::new("Enabled"));
+            tree.add_child(
+                controls_row,
+                Button::new("Disabled")
+                    .disabled(true)
+                    .disabled_background(disabled_bg)
+                    .disabled_text_color(disabled_fg),
             );
 
             tree.add_child(

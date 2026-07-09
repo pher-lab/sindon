@@ -144,6 +144,19 @@ pub struct Colors {
     pub warning: Color,
     /// Success state.
     pub success: Color,
+
+    // Disabled state
+    /// Flat fill for a disabled control — the conventional "greyed-out"
+    /// container color. Opt in with `Button::disabled_background` (or a
+    /// container's `background`) when you want a design-system disabled look
+    /// instead of the default self-adjusting half-alpha dim, which preserves a
+    /// recolored control's hue. Pair with [`on_disabled`](Self::on_disabled).
+    pub disabled: Color,
+    /// Muted label/content color on a [`disabled`](Self::disabled) fill —
+    /// always lower-contrast than the enabled text tokens, since that muting is
+    /// the whole visual meaning of "disabled". Pair with
+    /// `Button::disabled_text_color`.
+    pub on_disabled: Color,
 }
 
 /// Typography scale.
@@ -225,6 +238,12 @@ impl Theme {
                 error: Color::rgb(0.9, 0.3, 0.3),
                 warning: Color::rgb(0.9, 0.7, 0.2),
                 success: Color::rgb(0.3, 0.8, 0.4),
+
+                // Flat inert fill lifted just off surface_variant (0.15) so it
+                // reads as a dead control; on_disabled a step below
+                // on_surface_variant (0.5) so disabled text is the faintest.
+                disabled: Color::rgb(0.22, 0.22, 0.27),
+                on_disabled: Color::rgb(0.42, 0.42, 0.47),
             },
             typography: Typography {
                 heading: TextStyle {
@@ -306,6 +325,12 @@ impl Theme {
                 error: Color::rgb(0.85, 0.2, 0.2),
                 warning: Color::rgb(0.85, 0.6, 0.1),
                 success: Color::rgb(0.2, 0.7, 0.3),
+
+                // Light-gray inert fill below surface_variant (0.92) so it
+                // reads as a dead control; on_disabled above input_placeholder
+                // (0.6) so disabled text is muted yet still the faintest.
+                disabled: Color::rgb(0.88, 0.88, 0.9),
+                on_disabled: Color::rgb(0.68, 0.68, 0.72),
             },
             typography: Typography {
                 heading: TextStyle {
@@ -430,6 +455,8 @@ impl Lerp for Colors {
             error: self.error.lerp(&to.error, t),
             warning: self.warning.lerp(&to.warning, t),
             success: self.success.lerp(&to.success, t),
+            disabled: self.disabled.lerp(&to.disabled, t),
+            on_disabled: self.on_disabled.lerp(&to.on_disabled, t),
         }
     }
 }
@@ -540,6 +567,22 @@ mod tests {
     }
 
     #[test]
+    fn built_in_themes_ship_muted_disabled_tokens() {
+        // Both themes carry disabled/on_disabled, and the disabled *content*
+        // color is always lower-contrast than the enabled text (on_surface) —
+        // that muting is the entire visual meaning of "disabled". Contrast
+        // direction flips with theme, so compare on the green channel (monotonic
+        // in both palettes), the same trick the outline/divider hierarchy uses:
+        // on the dark surface disabled text sits darker (lower green) than crisp
+        // text; on the light surface it sits lighter (higher green).
+        let dark = Theme::dark().colors;
+        assert!(dark.on_disabled.g < dark.on_surface.g);
+
+        let light = Theme::light().colors;
+        assert!(light.on_disabled.g > light.on_surface.g);
+    }
+
+    #[test]
     fn theme_lerp_snaps_shape_to_target() {
         // Corner radius is geometry — it snaps to the destination like spacing
         // rather than tweening, so a color cross-fade never animates roundness.
@@ -635,6 +678,10 @@ mod tests {
         assert_eq!(
             mid.colors.primary,
             dark.colors.primary.lerp(&light.colors.primary, 0.5)
+        );
+        assert_eq!(
+            mid.colors.disabled,
+            dark.colors.disabled.lerp(&light.colors.disabled, 0.5)
         );
         assert_eq!(mid.hover.bg, dark.hover.bg.lerp(&light.hover.bg, 0.5));
         assert_eq!(
