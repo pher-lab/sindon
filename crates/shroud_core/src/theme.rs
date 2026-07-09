@@ -11,6 +11,7 @@ pub struct Theme {
     pub colors: Colors,
     pub typography: Typography,
     pub spacing: Spacing,
+    pub shape: Shape,
     pub focus: FocusStyle,
     pub hover: HoverStyle,
 }
@@ -158,6 +159,25 @@ pub struct Spacing {
     pub xl: f32,
 }
 
+/// Corner-radius scale in pixels — one app-wide source of truth for how
+/// round the UI is.
+///
+/// The control widgets (`Button`, `Input`, `SecureInput`, `Dropdown`) read
+/// one of these as their *default* corner radius during paint, so retuning
+/// the scale rounds the whole app at once. A per-widget `.radius(px)`
+/// override still wins. `Container` stays sharp by default — it is the
+/// generic layout primitive — but can opt in with `.radius(shape.radius_*)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shape {
+    /// Small controls: inputs, dropdowns, chips. (`Input` / `SecureInput` /
+    /// `Dropdown` default.)
+    pub radius_sm: f32,
+    /// Standard controls and cards. (`Button` default.)
+    pub radius_md: f32,
+    /// Large surfaces: panels, modals.
+    pub radius_lg: f32,
+}
+
 impl Theme {
     /// Built-in dark theme.
     pub fn dark() -> Self {
@@ -212,6 +232,11 @@ impl Theme {
                 md: 16.0,
                 lg: 24.0,
                 xl: 32.0,
+            },
+            shape: Shape {
+                radius_sm: 4.0,
+                radius_md: 8.0,
+                radius_lg: 16.0,
             },
             focus: FocusStyle {
                 indicator: FocusIndicator::Ring,
@@ -284,6 +309,11 @@ impl Theme {
                 lg: 24.0,
                 xl: 32.0,
             },
+            shape: Shape {
+                radius_sm: 4.0,
+                radius_md: 8.0,
+                radius_lg: 16.0,
+            },
             focus: FocusStyle {
                 indicator: FocusIndicator::Ring,
                 ring_color: Color::rgb(0.2, 0.45, 0.95),
@@ -304,7 +334,7 @@ impl Theme {
 
 impl Theme {
     /// Returns a new `Theme` whose typography font sizes and line heights
-    /// are all multiplied by `scale`. Colors, spacing, focus, and hover
+    /// are all multiplied by `scale`. Colors, spacing, shape, focus, and hover
     /// tokens are unchanged.
     ///
     /// Pair with `Reactive::derive` to drive UI-wide font scaling from a
@@ -343,7 +373,7 @@ impl Default for Theme {
 //
 // `Lerp for Theme` lets a theme swap animate as a cross-fade rather than a
 // hard cut (drive it with `Animated<Theme>` + `App::theme`). Only *color*
-// tokens interpolate; typography and spacing snap to the target. Animating
+// tokens interpolate; typography, spacing, and shape snap to the target. Animating
 // font sizes would reflow text on every frame of the fade, and a font-size
 // change is meant to read as instant — so the result always carries `to`'s
 // typography/spacing. (That means `lerp(to, 0.0)` is *not* a strict
@@ -411,6 +441,7 @@ impl Lerp for Theme {
             // Snap, don't tween (see the note above this impl block).
             typography: to.typography.clone(),
             spacing: to.spacing,
+            shape: to.shape,
         }
     }
 }
@@ -449,8 +480,31 @@ mod tests {
 
         assert_eq!(base.colors, scaled.colors);
         assert_eq!(base.spacing, scaled.spacing);
+        assert_eq!(base.shape, scaled.shape);
         assert_eq!(base.focus, scaled.focus);
         assert_eq!(base.hover, scaled.hover);
+    }
+
+    #[test]
+    fn built_in_themes_ship_a_rounded_shape_scale() {
+        // Both themes ship the same monotonic radius scale, so control widgets
+        // default to rounded corners and the scale reads sm ≤ md ≤ lg.
+        for t in [Theme::dark(), Theme::light(), Theme::default()] {
+            assert!(t.shape.radius_sm > 0.0);
+            assert!(t.shape.radius_md >= t.shape.radius_sm);
+            assert!(t.shape.radius_lg >= t.shape.radius_md);
+        }
+    }
+
+    #[test]
+    fn theme_lerp_snaps_shape_to_target() {
+        // Corner radius is geometry — it snaps to the destination like spacing
+        // rather than tweening, so a color cross-fade never animates roundness.
+        let mut a = Theme::dark();
+        a.shape.radius_md = 2.0;
+        let mut b = Theme::dark();
+        b.shape.radius_md = 20.0;
+        assert_eq!(a.lerp(&b, 0.5).shape.radius_md, 20.0);
     }
 
     #[test]

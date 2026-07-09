@@ -58,7 +58,7 @@ pub struct Dropdown {
     open: Rc<Cell<bool>>,
 
     // Trigger styling — `None` reads from the theme each paint.
-    radius: f32,
+    radius: Option<f32>,
     background: Option<Reactive<Color>>,
     text_color: Option<Reactive<Color>>,
     border_color: Option<Reactive<Color>>,
@@ -84,7 +84,7 @@ impl Dropdown {
             placeholder: None,
             state: InteractionState::default(),
             open: Rc::new(Cell::new(false)),
-            radius: 4.0,
+            radius: None,
             background: None,
             text_color: None,
             border_color: None,
@@ -134,9 +134,11 @@ impl Dropdown {
         self
     }
 
-    /// Round the trigger's corners. Negative values clamp to `0.0`.
+    /// Round the trigger's corners (and the popover, which matches). Unset,
+    /// both round to `theme.shape.radius_sm`; pass `0.0` for square corners.
+    /// Negative values clamp to `0.0`.
     pub fn radius(mut self, px: f32) -> Self {
-        self.radius = px.max(0.0);
+        self.radius = Some(px.max(0.0));
         self
     }
 
@@ -337,12 +339,15 @@ impl Widget for Dropdown {
             .font_size
             .unwrap_or(ctx.theme.typography.body.font_size);
 
-        ctx.fill_rect_rounded(layout, bg, self.radius);
+        // Unset radius rounds to the theme's small-control radius; `.radius(px)`
+        // overrides (0.0 = square).
+        let radius = self.radius.unwrap_or(ctx.theme.shape.radius_sm);
+        ctx.fill_rect_rounded(layout, bg, radius);
 
         // 1px border following the same rounded corners as the fill — one SDF
         // stroke, matching `Input`/`SecureInput` (rather than four sharp
         // hairlines that square off the corners).
-        ctx.stroke_rect_rounded(layout, border, self.radius, 1.0);
+        ctx.stroke_rect_rounded(layout, border, radius, 1.0);
 
         // Left-aligned label, inset by the horizontal padding; the chevron sits
         // padding-inset on the right, with an 8px gutter before the label.
@@ -391,7 +396,7 @@ impl Widget for Dropdown {
         // Ring in Ring mode; suppressed when Border mode recolored the border.
         if focus_active && !border_focus {
             let override_color = self.focus_ring_color.as_ref().map(|c| c.get());
-            ctx.paint_focus_ring(layout, override_color, self.radius);
+            ctx.paint_focus_ring(layout, override_color, radius);
         }
     }
 
@@ -456,7 +461,8 @@ impl Widget for Dropdown {
 struct DropdownPopover {
     /// Resolved at paint time from theme.surface if `Color::TRANSPARENT`.
     background: Color,
-    radius: f32,
+    /// Mirrors the trigger's radius. `None` reads `theme.shape.radius_sm`.
+    radius: Option<f32>,
     open: Rc<Cell<bool>>,
     /// Minimum width — matches the trigger so the popover is at least as
     /// wide. Wider option labels still grow the popover.
@@ -477,11 +483,12 @@ impl Widget for DropdownPopover {
         } else {
             self.background
         };
-        ctx.fill_rect_rounded(layout, bg, self.radius);
+        let radius = self.radius.unwrap_or(ctx.theme.shape.radius_sm);
+        ctx.fill_rect_rounded(layout, bg, radius);
         // Subtle 1px border so the popover separates from the surface it
         // overlaps — one rounded SDF stroke, matching the trigger.
         let border = ctx.theme.colors.input_border;
-        ctx.stroke_rect_rounded(layout, border, self.radius, 1.0);
+        ctx.stroke_rect_rounded(layout, border, radius, 1.0);
     }
 }
 

@@ -758,12 +758,17 @@ fn paint_secure_input(input: SecureInput) -> PaintContext {
 }
 
 #[test]
-fn secure_input_default_chrome_is_sharp_fill_plus_border() {
+fn secure_input_default_chrome_reads_theme_shape_radius() {
+    use shroud_core::Theme;
     let ctx = paint_secure_input(SecureInput::new());
+    let r = Theme::default().shape.radius_sm;
     assert_eq!(ctx.rects.len(), 2, "bg fill + 1px border stroke");
-    assert_eq!(ctx.rects[0].radius, 0.0, "fill defaults to sharp corners");
+    assert_eq!(
+        ctx.rects[0].radius, r,
+        "fill rounds to theme small-control radius"
+    );
     assert_eq!(ctx.rects[0].border_width, 0.0, "rect[0] is a solid fill");
-    assert_eq!(ctx.rects[1].radius, 0.0, "border defaults to sharp corners");
+    assert_eq!(ctx.rects[1].radius, r, "border matches the fill radius");
     assert_eq!(ctx.rects[1].border_width, 1.0, "border is a 1px stroke");
 }
 

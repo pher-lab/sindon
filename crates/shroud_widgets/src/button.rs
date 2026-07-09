@@ -84,7 +84,9 @@ pub struct Button {
     /// keyboard focus, and does not fire `on_click`. Reactive so a form can
     /// gate its submit on a signal. Defaults to always-enabled.
     disabled: Reactive<bool>,
-    radius: f32,
+    /// Corner radius. `None` reads `theme.shape.radius_md` at paint; a
+    /// `.radius(px)` override sets `Some(px)`.
+    radius: Option<f32>,
     /// Horizontal padding (px) between the button edge and its label, each
     /// side — Tailwind `px-*`. Default 8.
     pad_x: f32,
@@ -126,7 +128,7 @@ impl Button {
             disabled_bg: None,
             disabled_text_color: None,
             disabled: Reactive::Static(false),
-            radius: 0.0,
+            radius: None,
             pad_x: 8.0,
             pad_y: 8.0,
             min_width: None,
@@ -159,7 +161,7 @@ impl Button {
             disabled_bg: None,
             disabled_text_color: None,
             disabled: Reactive::Static(false),
-            radius: 0.0,
+            radius: None,
             pad_x: 8.0,
             pad_y: 8.0,
             min_width: None,
@@ -283,12 +285,12 @@ impl Button {
     }
 
     /// Round the button's corners by `px`. Applies to all visual states
-    /// (normal / hover / press) — they share one rect. The focus ring
-    /// stays rectangular for predictability; rounding the ring as well
-    /// would require either a stroked SDF or four arc segments per state.
-    /// Negative values are clamped to `0.0`.
+    /// (normal / hover / press) — they share one rect. The focus ring tracks
+    /// this radius (a rounded button gets a concentric rounded ring). Unset,
+    /// the button rounds to `theme.shape.radius_md`; pass `0.0` for a square
+    /// button. Negative values are clamped to `0.0`.
     pub fn radius(mut self, px: f32) -> Self {
-        self.radius = px.max(0.0);
+        self.radius = Some(px.max(0.0));
         self
     }
 
@@ -551,8 +553,10 @@ impl Widget for Button {
             }
         };
 
-        // Background
-        ctx.fill_rect_rounded(layout, bg, self.radius);
+        // Background. Unset radius rounds to the theme's standard-control
+        // radius; `.radius(px)` overrides (0.0 = square).
+        let radius = self.radius.unwrap_or(ctx.theme.shape.radius_md);
+        ctx.fill_rect_rounded(layout, bg, radius);
 
         // Label text (centered within the button)
         let label = self.label.get();
@@ -584,7 +588,7 @@ impl Widget for Button {
 
         if self.state.focused && !disabled && ctx.focus_visible() {
             let override_color = self.focus_ring_color.as_ref().map(|c| c.get());
-            ctx.paint_focus_ring(layout, override_color, self.radius);
+            ctx.paint_focus_ring(layout, override_color, radius);
         }
     }
 

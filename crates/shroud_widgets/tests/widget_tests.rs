@@ -717,7 +717,7 @@ fn button_radius_propagates_to_drawrect() {
 }
 
 #[test]
-fn button_default_radius_is_zero() {
+fn button_default_radius_reads_theme_shape() {
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(200.0).height(80.0));
     tree.add_child(root, Button::new("Plain"));
@@ -725,7 +725,8 @@ fn button_default_radius_is_zero() {
     let mut ctx = PaintContext::default();
     tree.paint(&mut ctx);
     assert_eq!(ctx.rects.len(), 1);
-    assert_eq!(ctx.rects[0].radius, 0.0);
+    // No explicit radius → rounds to the theme's standard-control radius.
+    assert_eq!(ctx.rects[0].radius, Theme::default().shape.radius_md);
 }
 
 // ── Container border (G1) ────────────────────────────────────────
@@ -1105,12 +1106,16 @@ fn paint_input(input: Input) -> PaintContext {
 }
 
 #[test]
-fn input_default_chrome_is_sharp_fill_plus_border() {
+fn input_default_chrome_reads_theme_shape_radius() {
     let ctx = paint_input(Input::new());
+    let r = Theme::default().shape.radius_sm;
     assert_eq!(ctx.rects.len(), 2, "bg fill + 1px border stroke");
-    assert_eq!(ctx.rects[0].radius, 0.0, "fill defaults to sharp corners");
+    assert_eq!(
+        ctx.rects[0].radius, r,
+        "fill rounds to theme small-control radius"
+    );
     assert_eq!(ctx.rects[0].border_width, 0.0, "rect[0] is a solid fill");
-    assert_eq!(ctx.rects[1].radius, 0.0, "border defaults to sharp corners");
+    assert_eq!(ctx.rects[1].radius, r, "border matches the fill radius");
     assert_eq!(ctx.rects[1].border_width, 1.0, "border is a 1px stroke");
 }
 

@@ -111,9 +111,10 @@ pub struct SecureInput {
     /// for an inline / search-bar look. Mirrors [`Input`]. [`borderless`]:
     /// Self::borderless
     border_visible: bool,
-    /// Corner radius (px) for the background fill and border stroke. `0.0` keeps
-    /// the historical sharp rectangle and short-circuits the SDF in the shader.
-    radius: f32,
+    /// Corner radius (px) for the background fill and border stroke. `None`
+    /// reads `theme.shape.radius_sm` at paint; a `.radius(px)` override sets
+    /// `Some(px)` (`0.0` keeps the sharp rectangle and short-circuits the SDF).
+    radius: Option<f32>,
     /// Horizontal text inset (px) between the border and the masked text, on
     /// each side. Default 8. Feeds the layout padding, the caret and the click
     /// hit-test. Maps to Tailwind `px-*`. Mirrors [`Input::padding_x`].
@@ -156,7 +157,7 @@ impl SecureInput {
             placeholder_color: None,
             border_color: None,
             border_visible: true,
-            radius: 0.0,
+            radius: None,
             pad_x: 8.0,
             pad_y: 8.0,
             min_height_override: None,
@@ -221,14 +222,15 @@ impl SecureInput {
         self
     }
 
-    /// Round the corners of the background fill and border by `px`. `0.0` (the
-    /// default) keeps the sharp rectangle. Symmetric with
+    /// Round the corners of the background fill and border by `px`. Unset, the
+    /// field rounds to `theme.shape.radius_sm`; pass `0.0` for a sharp
+    /// rectangle. Symmetric with
     /// [`Input::radius`](crate::Input::radius) /
     /// [`Container::radius`](crate::Container::radius). Negative values clamp to
     /// `0.0`; over-large values are clamped to half the shorter side in the
     /// renderer.
     pub fn radius(mut self, px: f32) -> Self {
-        self.radius = px.max(0.0);
+        self.radius = Some(px.max(0.0));
         self
     }
 
@@ -457,10 +459,12 @@ impl Widget for SecureInput {
             .placeholder_color
             .unwrap_or(ctx.theme.colors.input_placeholder);
         let bg = self.resolve_bg(&ctx.theme.colors);
+        // Corner radius: an explicit `.radius(px)` wins, else the theme's small
+        // control radius. `radius == 0.0` short-circuits the SDF (sharp rect).
+        let radius = self.radius.unwrap_or(ctx.theme.shape.radius_sm);
 
-        // Background fill. `radius == 0.0` short-circuits the SDF, so this is the
-        // historical sharp rect unless the app opted into rounded corners.
-        ctx.fill_rect_rounded(layout, bg, self.radius);
+        // Background fill.
+        ctx.fill_rect_rounded(layout, bg, radius);
 
         // Focus indicator: mirror `Input`. `border_focus` recolors the stroke
         // (theme `Border` mode + a visible border) and suppresses the ring;
@@ -482,7 +486,7 @@ impl Widget for SecureInput {
             } else {
                 self.resolve_border(&ctx.theme.colors)
             };
-            ctx.stroke_rect_rounded(layout, border, self.radius, 1.0);
+            ctx.stroke_rect_rounded(layout, border, radius, 1.0);
         }
 
         let text_x = layout.origin.x + self.pad_x;
@@ -606,7 +610,7 @@ impl Widget for SecureInput {
             // the field's corner radius, so a rounded input gets a rounded ring.
             // Suppressed when `Border` mode already recolored the border above.
             if focus_active && !border_focus {
-                ctx.paint_focus_ring(layout, self.focus_ring_color, self.radius);
+                ctx.paint_focus_ring(layout, self.focus_ring_color, radius);
             }
         }
     }
