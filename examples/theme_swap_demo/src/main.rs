@@ -14,7 +14,8 @@
 //! followed by the redraw any click already triggers is enough — no
 //! `tree.replace_root` or rebuild needed. Widgets that read theme
 //! tokens during paint (Button background, Input border, focus ring,
-//! the window clear color) flip in lockstep.
+//! the outline/divider border tokens, the window clear color) flip in
+//! lockstep.
 
 use shroud::app::{App, system_theme_signal};
 use shroud::core::Theme;
@@ -50,6 +51,9 @@ fn main() {
             Some(SystemTheme::Dark) | None => Theme::dark(),
         },
     });
+    // A second handle on the same reactive theme, so the showcase panel can
+    // pull `colors.outline` / `colors.divider` per paint and track live swaps.
+    let theme_for_tokens = theme_reactive.clone();
 
     App::new()
         .title("shroud \u{2014} theme swap demo (Phase 30)")
@@ -105,6 +109,36 @@ fn main() {
                     }),
                 );
             }
+
+            // Showcase the generic border tokens: an `outline`-stroked panel
+            // whose two sections are parted by a `divider` hairline. Both are
+            // re-read every paint, so flipping Light/Dark retints them live.
+            let outline = {
+                let t = theme_for_tokens.clone();
+                Reactive::derive(move || t.get().colors.outline)
+            };
+            let divider = {
+                let t = theme_for_tokens.clone();
+                Reactive::derive(move || t.get().colors.divider)
+            };
+            let panel = tree.add_child(root, Container::column().border(1.0, outline).radius(8.0));
+            let section_a = tree.add_child(
+                panel,
+                Container::column()
+                    .padding(12.0)
+                    .border_bottom(1.0, divider),
+            );
+            tree.add_child(
+                section_a,
+                TextWidget::new("colors.outline \u{2014} the panel's enclosing border")
+                    .font_size(13.0),
+            );
+            let section_b = tree.add_child(panel, Container::column().padding(12.0));
+            tree.add_child(
+                section_b,
+                TextWidget::new("colors.divider \u{2014} the hairline parting these sections")
+                    .font_size(13.0),
+            );
 
             tree.add_child(
                 root,

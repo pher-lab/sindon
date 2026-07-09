@@ -124,6 +124,19 @@ pub struct Colors {
     /// translucent so the text stays legible on top of it.
     pub selection_background: Color,
 
+    // Borders / separators (generic, non-input)
+    /// General-purpose border for panels, cards, and containers — the
+    /// `border border-gray-300` stroke that encloses a surface. Distinct from
+    /// [`input_border`](Self::input_border), which is tuned for form fields:
+    /// `outline` sits a step lower in contrast so inputs stay the most
+    /// prominent bordered element. Pair with `Container::border`.
+    pub outline: Color,
+    /// Low-emphasis separator between rows or sections — the hairline
+    /// `border-b` / `border-r` divider. The faintest border token, a step
+    /// below [`outline`](Self::outline). Pair with `Container::border_bottom`
+    /// (or the other single-side border builders).
+    pub divider: Color,
+
     // Semantic
     /// Error state.
     pub error: Color,
@@ -204,6 +217,11 @@ impl Theme {
                 // Translucent accent so glyphs stay legible on top.
                 selection_background: Color::rgba(0.4, 0.5, 0.9, 0.4),
 
+                // A step below input_border (0.30) so form fields stay the
+                // most prominent bordered element; divider a step below that.
+                outline: Color::rgb(0.25, 0.25, 0.3),
+                divider: Color::rgb(0.2, 0.2, 0.25),
+
                 error: Color::rgb(0.9, 0.3, 0.3),
                 warning: Color::rgb(0.9, 0.7, 0.2),
                 success: Color::rgb(0.3, 0.8, 0.4),
@@ -279,6 +297,11 @@ impl Theme {
                 input_placeholder: Color::rgb(0.6, 0.6, 0.65),
                 // Translucent accent so glyphs stay legible on top.
                 selection_background: Color::rgba(0.3, 0.5, 0.95, 0.3),
+
+                // Lighter than input_border (0.75) so form fields stay the
+                // most prominent bordered element; divider lighter still.
+                outline: Color::rgb(0.85, 0.85, 0.88),
+                divider: Color::rgb(0.9, 0.9, 0.92),
 
                 error: Color::rgb(0.85, 0.2, 0.2),
                 warning: Color::rgb(0.85, 0.6, 0.1),
@@ -402,6 +425,8 @@ impl Lerp for Colors {
             input_border_focused: self.input_border_focused.lerp(&to.input_border_focused, t),
             input_placeholder: self.input_placeholder.lerp(&to.input_placeholder, t),
             selection_background: self.selection_background.lerp(&to.selection_background, t),
+            outline: self.outline.lerp(&to.outline, t),
+            divider: self.divider.lerp(&to.divider, t),
             error: self.error.lerp(&to.error, t),
             warning: self.warning.lerp(&to.warning, t),
             success: self.success.lerp(&to.success, t),
@@ -494,6 +519,24 @@ mod tests {
             assert!(t.shape.radius_md >= t.shape.radius_sm);
             assert!(t.shape.radius_lg >= t.shape.radius_md);
         }
+    }
+
+    #[test]
+    fn built_in_themes_ship_generic_border_tokens() {
+        // Both themes carry outline/divider, and they form a monotonic
+        // emphasis hierarchy against input_border so a bordered form field
+        // always out-contrasts a panel edge, which out-contrasts a hairline
+        // divider. Contrast direction flips with theme: on the dark surface a
+        // lighter (higher) channel reads stronger; on the light surface a
+        // darker (lower) channel does. Compare on the green channel, which is
+        // monotonic in both built-in palettes.
+        let dark = Theme::dark().colors;
+        assert!(dark.input_border.g > dark.outline.g);
+        assert!(dark.outline.g > dark.divider.g);
+
+        let light = Theme::light().colors;
+        assert!(light.input_border.g < light.outline.g);
+        assert!(light.outline.g < light.divider.g);
     }
 
     #[test]
