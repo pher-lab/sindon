@@ -22,6 +22,9 @@ pub struct Checkbox {
     checked: bool,
     label: String,
     font_size: Option<f32>,
+    /// Corner radius of the check box. `None` rounds proportionally to the
+    /// box size; `Some(0.0)` gives square corners.
+    radius: Option<f32>,
     on_change: Option<ChangeHandler>,
     /// Hover / focus flags — a checkbox toggles on press rather than release,
     /// so the `pressed` flag of [`InteractionState`] goes unused here.
@@ -41,6 +44,7 @@ impl Checkbox {
             checked: false,
             label: label.into(),
             font_size: None,
+            radius: None,
             on_change: None,
             state: InteractionState::default(),
             check_color: None,
@@ -60,6 +64,14 @@ impl Checkbox {
     /// Set the font size.
     pub fn font_size(mut self, px: f32) -> Self {
         self.font_size = Some(px);
+        self
+    }
+
+    /// Override the corner radius of the check box, in pixels. Without this
+    /// call the corners round proportionally to the box size; pass `0.0` for
+    /// square corners.
+    pub fn radius(mut self, px: f32) -> Self {
+        self.radius = Some(px.max(0.0));
         self
     }
 
@@ -105,6 +117,13 @@ impl Checkbox {
     fn box_size(&self, font_size: f32) -> f32 {
         font_size + 2.0
     }
+
+    /// Corner radius for the box: the explicit override, or a proportional
+    /// default (~1/4 of the box side) that reads as gently rounded without
+    /// tipping into a pill.
+    fn box_radius(&self, box_size: f32) -> f32 {
+        self.radius.unwrap_or(box_size * 0.25)
+    }
 }
 
 impl Widget for Checkbox {
@@ -139,31 +158,24 @@ impl Widget for Checkbox {
         let box_y = layout.origin.y + (layout.size.height - box_size) / 2.0;
         let box_x = layout.origin.x;
         let box_rect = Rect::new(box_x, box_y, box_size, box_size);
+        let radius = self.box_radius(box_size);
 
-        // Box background
+        // Box background — same rounded SDF path as Container/Input frames.
         if self.checked {
-            ctx.fill_rect(box_rect, check_color);
+            ctx.fill_rect_rounded(box_rect, check_color, radius);
         } else {
-            ctx.fill_rect(box_rect, box_bg);
+            ctx.fill_rect_rounded(box_rect, box_bg, radius);
         }
 
-        // Box border (1px)
+        // Box border (1px), stroked as a rounded frame so it hugs the
+        // corners the fill just rounded instead of the old square 4-strip.
         let b = 1.0;
         let border_color = if self.checked {
             check_color
         } else {
             box_border
         };
-        ctx.fill_rect(Rect::new(box_x, box_y, box_size, b), border_color);
-        ctx.fill_rect(
-            Rect::new(box_x, box_y + box_size - b, box_size, b),
-            border_color,
-        );
-        ctx.fill_rect(Rect::new(box_x, box_y, b, box_size), border_color);
-        ctx.fill_rect(
-            Rect::new(box_x + box_size - b, box_y, b, box_size),
-            border_color,
-        );
+        ctx.stroke_rect_rounded(box_rect, border_color, radius, b);
 
         // Checkmark — a round-capped stroke over three points:
         //   p0 (upper-left)  →  p1 (vertex, lower)  →  p2 (upper-right).
