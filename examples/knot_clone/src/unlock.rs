@@ -103,13 +103,16 @@ pub fn build(tree: &mut WidgetTree) {
 
     // --- Submit ---
     // Reference: `bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800
-    // disabled:cursor-not-allowed ... text-white`. The disabled state recolors
-    // the fill to the *darker* blue-800 (not a half-alpha dim) and keeps the
-    // label white — so it needs both `disabled_background` and
-    // `disabled_text_color`. `.disabled(pw_empty)` also makes the button inert
-    // and drops it from the Tab order until a password is typed. No
-    // padding/height control on Button (gap G6); column align-stretch gives the
-    // full width.
+    // disabled:cursor-not-allowed text-white transition-colors`. The disabled
+    // state recolors the fill to the *darker* blue-800 (not a half-alpha dim)
+    // and keeps the label white — so it needs both `disabled_background` and
+    // `disabled_text_color`. The reference's `transition-colors` eases that
+    // recolor rather than snapping; `Button` now does the same by default
+    // (`disabled_transition`, 120 ms), so it comes for free here.
+    // `.disabled(pw_empty)` also makes the button inert and drops it from the
+    // Tab order until a password is typed — that behavioral switch stays
+    // instant, only the color eases. No padding/height control on Button (gap
+    // G6); column align-stretch gives the full width.
     tree.add_child(
         content,
         Button::new("Unlock")

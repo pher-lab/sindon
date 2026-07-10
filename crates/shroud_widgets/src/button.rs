@@ -1,5 +1,6 @@
 //! Button widget — clickable container with text label.
 
+use std::cell::Cell;
 use std::time::Duration;
 
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
@@ -16,6 +17,13 @@ use shroud_text::{TextAttrs, TextFamily};
 /// snapping. The pressed state is intentionally excluded (a press should
 /// read as instant). Override with [`Button::hover_transition`].
 const DEFAULT_HOVER_TRANSITION: Duration = Duration::from_millis(120);
+
+/// Default enabled↔disabled color-transition duration. The reference marks its
+/// submit `transition-colors`, so the disabled fill/label ease in rather than
+/// snap; matches the hover fade at 120 ms. Override with
+/// [`Button::disabled_transition`], or `Duration::ZERO` for the old instant
+/// swap.
+const DEFAULT_DISABLED_TRANSITION: Duration = Duration::from_millis(120);
 
 /// A clickable button with a text label.
 ///
@@ -54,6 +62,20 @@ pub struct Button {
     hover_anim: Option<Animated<f32>>,
     /// How long the hover fade takes; `Duration::ZERO` makes it instant.
     hover_transition: Duration,
+    /// Progress of the enabled→disabled color fade (0 = enabled, 1 = disabled).
+    /// The reference marks the submit `transition-colors`, so the disabled
+    /// fill/label ease in rather than snap. Retargeted from `paint` (not an
+    /// event handler) because `disabled` is a signal a form flips with no event
+    /// delivered here; interior-mutable so `&self` paint can drive it. The
+    /// animator's own duration carries the fade length — there is no separate
+    /// stored `Duration` the way hover keeps one, since hover creates its
+    /// animator lazily in `event` while this one is eager.
+    disabled_anim: Animated<f32>,
+    /// Whether `disabled_anim` has observed a `disabled` value yet. The first
+    /// paint *snaps* to the current state (a form that loads already-invalid
+    /// shows its submit greyed from the start, not fading in); every change
+    /// after that eases.
+    disabled_primed: Cell<bool>,
     /// Pointer / keyboard interaction flags (pressed, focused, and a logical
     /// hovered kept in step with `hover_anim`). Centralizes the
     /// disabled-clears-but-does-not-latch invariant — see [`InteractionState`].
@@ -118,6 +140,8 @@ impl Button {
             on_click_rect: None,
             hover_anim: None,
             hover_transition: DEFAULT_HOVER_TRANSITION,
+            disabled_anim: Animated::new(0.0, DEFAULT_DISABLED_TRANSITION, Easing::EaseInOut),
+            disabled_primed: Cell::new(false),
             state: InteractionState::default(),
             normal_bg: None,
             hover_bg: None,
@@ -151,6 +175,8 @@ impl Button {
             on_click_rect: None,
             hover_anim: None,
             hover_transition: DEFAULT_HOVER_TRANSITION,
+            disabled_anim: Animated::new(0.0, DEFAULT_DISABLED_TRANSITION, Easing::EaseInOut),
+            disabled_primed: Cell::new(false),
             state: InteractionState::default(),
             normal_bg: None,
             hover_bg: None,
@@ -242,6 +268,19 @@ impl Button {
     /// always instant.
     pub fn hover_transition(mut self, duration: Duration) -> Self {
         self.hover_transition = duration;
+        self
+    }
+
+    /// Set how long the enabled↔disabled color fade takes — the fill easing to
+    /// [`disabled_background`](Self::disabled_background) (or the default
+    /// half-alpha dim) and the label to [`disabled_text_color`](Self::disabled_text_color),
+    /// mirroring the reference's `transition-colors` on its submit button.
+    /// Defaults to a short fade (120 ms); pass [`Duration::ZERO`] for an instant
+    /// swap (the pre-animation behavior). The `disabled` flag's *behavioral*
+    /// effects — dropping from the Tab order and refusing `on_click` — always
+    /// switch instantly; only the color eases.
+    pub fn disabled_transition(mut self, duration: Duration) -> Self {
+        self.disabled_anim = Animated::new(0.0, duration, Easing::EaseInOut);
         self
     }
 
@@ -503,26 +542,40 @@ impl Widget for Button {
 
         let disabled = self.disabled.get();
 
-        // Hover fade progress, read once. `get()` votes for another frame
-        // while the fade is in flight; pressed pins it to 0 (the press color
-        // is used directly, reading as instant). A disabled button ignores
-        // both — it must read inert regardless of a stale hover animation.
-        let hover_t = if self.state.pressed || disabled {
+        // Enabled→disabled color fade (0 = enabled, 1 = disabled). The first
+        // paint snaps to the current state — a form that loads already-invalid
+        // shows its submit greyed from the start rather than fading in — while
+        // every change after that eases (the reference marks the submit
+        // `transition-colors`). Retargeting lives here, not in `event`, because
+        // `disabled` is a signal a form flips with no event delivered to the
+        // button; `Animated::{snap,set}` are `&self` so `&self` paint can drive
+        // them. `set` restarts the interpolation, so guard on the live target
+        // to avoid re-triggering every frame while the value holds.
+        let want = if disabled { 1.0 } else { 0.0 };
+        if !self.disabled_primed.get() {
+            self.disabled_anim.snap(want);
+            self.disabled_primed.set(true);
+        } else if self.disabled_anim.target() != want {
+            self.disabled_anim.set(want);
+        }
+        let disabled_t = self.disabled_anim.get();
+
+        // Hover fade progress, read once. `get()` votes for another frame while
+        // the fade is in flight; pressed pins it to 0 (the press color is used
+        // directly, reading as instant). Disabled does *not* pin it here — the
+        // enabled appearance must hold its live hover value so the disabled fade
+        // eases from it (hover→disabled as one motion, matching the reference),
+        // and a settled disabled state short-circuits past hover below anyway.
+        let hover_t = if self.state.pressed {
             0.0
         } else {
             self.hover_anim.as_ref().map_or(0.0, |a| a.get())
         };
 
-        // Background. Endpoints short-circuit so a settled state paints its
-        // exact color (float lerp isn't bit-exact at t==1). Disabled wins over
-        // every state: the explicit `disabled_bg`, else the normal fill dimmed
-        // to half alpha.
-        let bg = if disabled {
-            self.disabled_bg.as_ref().map(|c| c.get()).unwrap_or(Color {
-                a: normal.a * 0.5,
-                ..normal
-            })
-        } else if self.state.pressed {
+        // The "enabled" background — normal / hover / pressed blend, exactly as
+        // before. Endpoints short-circuit so a settled state paints its exact
+        // color (float lerp isn't bit-exact at t==1).
+        let enabled_bg = if self.state.pressed {
             press
         } else if hover_t >= 1.0 {
             hover
@@ -531,26 +584,46 @@ impl Widget for Button {
         } else {
             normal.lerp(&hover, hover_t)
         };
-
-        // Label color: while disabled, the explicit `disabled_text_color` if
-        // set (a crisp label over a recolored fill), else the base label dimmed
-        // to half alpha to match the default `disabled_bg`. Otherwise fades
-        // toward `hover_text_color` on the same curve when one is set (a
-        // text-only link that darkens on hover), else the base color throughout.
-        let text_color = if disabled {
-            self.disabled_text_color
-                .as_ref()
-                .map(|c| c.get())
-                .unwrap_or(Color {
-                    a: base_text.a * 0.5,
-                    ..base_text
-                })
+        // The "disabled" background: the explicit `disabled_bg`, else the normal
+        // fill dimmed to half alpha.
+        let disabled_bg = self.disabled_bg.as_ref().map(|c| c.get()).unwrap_or(Color {
+            a: normal.a * 0.5,
+            ..normal
+        });
+        // Cross-fade by the disabled progress; endpoints short-circuit.
+        let bg = if disabled_t <= 0.0 {
+            enabled_bg
+        } else if disabled_t >= 1.0 {
+            disabled_bg
         } else {
-            match self.hover_text_color.as_ref().map(|c| c.get()) {
-                Some(hover_text) if hover_t >= 1.0 => hover_text,
-                Some(hover_text) if hover_t > 0.0 => base_text.lerp(&hover_text, hover_t),
-                _ => base_text,
-            }
+            enabled_bg.lerp(&disabled_bg, disabled_t)
+        };
+
+        // Label color, mirroring the background cross-fade. The "enabled" label
+        // fades toward `hover_text_color` on the hover curve when one is set (a
+        // text-only link that darkens on hover), else stays the base color. The
+        // "disabled" label is the explicit `disabled_text_color` (a crisp label
+        // over a recolored fill) else the base dimmed to half alpha. Then the
+        // two cross-fade on the same disabled progress as the background.
+        let enabled_text = match self.hover_text_color.as_ref().map(|c| c.get()) {
+            Some(hover_text) if hover_t >= 1.0 => hover_text,
+            Some(hover_text) if hover_t > 0.0 => base_text.lerp(&hover_text, hover_t),
+            _ => base_text,
+        };
+        let disabled_text = self
+            .disabled_text_color
+            .as_ref()
+            .map(|c| c.get())
+            .unwrap_or(Color {
+                a: base_text.a * 0.5,
+                ..base_text
+            });
+        let text_color = if disabled_t <= 0.0 {
+            enabled_text
+        } else if disabled_t >= 1.0 {
+            disabled_text
+        } else {
+            enabled_text.lerp(&disabled_text, disabled_t)
         };
 
         // Background. Unset radius rounds to the theme's standard-control

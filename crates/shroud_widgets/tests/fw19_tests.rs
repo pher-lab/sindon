@@ -15,6 +15,7 @@ use shroud_widgets::tree::WidgetTree;
 use shroud_widgets::*;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 // ── G4: Container asymmetric padding ──────────────────────────────
 
@@ -224,6 +225,110 @@ fn disabled_button_halves_background_alpha() {
     assert!(
         (bg_alpha(true) - 0.5).abs() < 1e-6,
         "disabled bg dims to half alpha"
+    );
+}
+
+// A button constructed already-disabled snaps to the disabled fill on its very
+// first paint — a form that loads already-invalid shows its submit greyed from
+// the start rather than animating the dim in on mount.
+#[test]
+fn disabled_from_construction_does_not_fade_in() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(120.0).height(60.0));
+    tree.add_child(
+        root,
+        Button::new("Go")
+            .background(Color::rgb(0.1, 0.4, 0.9))
+            .disabled(true),
+    );
+    tree.compute_layout(300.0, 200.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert!(
+        (ctx.rects[0].color.a - 0.5).abs() < 1e-6,
+        "first paint snaps to the disabled fill, got alpha {}",
+        ctx.rects[0].color.a
+    );
+}
+
+// Flipping the disabled signal *eases* rather than snaps: with the default fade,
+// the frame right after the flip still paints essentially the enabled (opaque)
+// fill — the 120 ms transition has only just begun — instead of jumping to the
+// half-alpha disabled fill. Mirrors the reference's `transition-colors`.
+#[test]
+fn disabled_change_eases_not_snaps() {
+    let gate = Signal::new(false);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(120.0).height(60.0));
+    tree.add_child(
+        root,
+        Button::new("Go")
+            .background(Color::rgb(0.1, 0.4, 0.9))
+            .disabled(gate),
+    );
+    tree.compute_layout(300.0, 200.0);
+
+    // Frame 1, enabled: primes the fade to 0 and paints an opaque fill.
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert!(
+        (ctx.rects[0].color.a - 1.0).abs() < 1e-6,
+        "enabled paints opaque"
+    );
+
+    // Flip to disabled and paint again immediately: the fade has barely
+    // advanced, so the fill is still ~opaque — it has *not* snapped to 0.5.
+    gate.set(true);
+    let mut ctx2 = PaintContext::default();
+    tree.paint(&mut ctx2);
+    assert!(
+        ctx2.rects[0].color.a > 0.9,
+        "disabled fade eases from the enabled fill, got alpha {}",
+        ctx2.rects[0].color.a
+    );
+}
+
+// `disabled_transition(ZERO)` restores the pre-animation instant swap: the frame
+// right after the flip paints the fully-disabled half-alpha fill, no in-between.
+#[test]
+fn disabled_transition_zero_snaps() {
+    let gate = Signal::new(false);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(120.0).height(60.0));
+    tree.add_child(
+        root,
+        Button::new("Go")
+            .background(Color::rgb(0.1, 0.4, 0.9))
+            .disabled(gate)
+            .disabled_transition(Duration::ZERO),
+    );
+    tree.compute_layout(300.0, 200.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+
+    gate.set(true);
+    let mut ctx2 = PaintContext::default();
+    tree.paint(&mut ctx2);
+    assert!(
+        (ctx2.rects[0].color.a - 0.5).abs() < 1e-6,
+        "ZERO transition swaps instantly to half alpha, got {}",
+        ctx2.rects[0].color.a
+    );
+}
+
+// The disabled *behavior* — dropping out of the Tab order — switches instantly
+// regardless of the color fade still being in flight.
+#[test]
+fn disabled_focusable_switches_instantly_during_fade() {
+    let gate = Signal::new(false);
+    let button = Button::new("Go").disabled(gate);
+    assert!(button.focusable(), "enabled button is focusable");
+    gate.set(true);
+    assert!(
+        !button.focusable(),
+        "focusable() flips the instant disabled is set, not after the fade"
     );
 }
 
