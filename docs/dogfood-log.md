@@ -196,7 +196,11 @@
   真因確定: サーフェスが sRGB 形式 ∴ GPU は blend の前にデスティネーションを **linear light へ復号**する。結果、グリフの**カバレッジ α が linear 輝度の重み**として使われる(物理的には正しく、知覚的には誤り)。`#fff` 背景に `#111` 文字・カバレッジ 0.5 のエッジは sRGB **188**(あるべき 136)に着地 = エッジが常に背景側へ逃げる → 線が痩せ、本体との段差が急になりジャギーが立つ。Dark(`#1e1e1e` 背景 / `#e5e5e5` 文字)は逆にエッジが文字側へ寄る(169 vs 130)ので**太って滑らかに見えていた**。ブラウザ / Skia / GDI はいずれも **sRGB 符号化値の上で合成**する。
   対応: サーフェスを**非 sRGB 形式**に切替(`find(|f| f.is_srgb())` → `find(|f| !f.is_srgb())`)し、`RECT_SHADER` / `TEXT_SHADER` から [[fix-srgb-double-encode]] の `srgb_to_linear()` を撤去して `in.color` を素通し。GPU が復号も再符号化もしないので **blend が sRGB 空間**で走る。不透明ピクセルの出力値は従来と**完全に同一**、変わるのは半透明の混ざり方だけ。∴ scrim / hover フェードも参照元の CSS と一致する方向に揃う。
   `IMAGE_SHADER` のみ非対称: 画像 / カラー絵文字アトラスは `Rgba8UnormSrgb` の**まま維持**(sampler が linear で復号してから bilinear + mip 間フィルタするのが縮小時に正しく、`build_mip_chain` もそれ前提)。∴ texel は linear で届く → **tint 乗算は linear のまま**行い、出力直前に一度だけ `linear_to_srgb()` で符号化。
-  副次: `LoadOp::Clear` に渡す `theme.colors.background`(sRGB 値)が、sRGB ターゲットでは linear とみなされ再符号化されて**明るく塗られていた**はず。非 sRGB 化でクリア値は素通しになり是正される。knot_clone は root に全面背景 rect を敷く ∴ 不可視。背景 rect を持たない example(hello_world / counter)で地の色が変わる可能性 = **未確認**。
+  副次(**実測で確定**): `LoadOp::Clear` に渡す `theme.colors.background` は sRGB 値だが、sRGB ターゲットでは wgpu がこれを **linear とみなして再符号化**していた ∴ 窓の地が本来より明るく塗られていた。非 sRGB 化でクリア値は素通しになり是正。
+  検証方法 = `hello_world` を一時的に「左半分=素通し(クリア色が出る)/右半分=同じトークンで塗った rect」に改造し、`Theme::dark()`(background `rgb(0.08, 0.08, 0.12)`)で継ぎ目を見る。**同一フレーム内の相対比較**なので [[feedback-screenshot-color-hdr]] の HDR 問題を回避できる(左右が等しいかだけを問う)。GDI `CopyFromScreen` + `GetPixel` で実測:
+  - **修正前(HEAD~1)**: clear = `(80, 80, 97)` / rect = `(20, 20, 31)` → **継ぎ目あり**。`linear_to_srgb(0.08)*255 = 79.9`、`linear_to_srgb(0.12)*255 = 97.2` と**完全一致** ∴ 再符号化されていたことが確定。
+  - **修正後(HEAD)**: clear = rect = `(20, 20, 31)` → **継ぎ目なし**。`0.08*255 = 20.4`、`0.12*255 = 30.6` で sRGB バイト表現どおり。
+  ∴ 背景 rect を敷く画面(knot / knot_clone)では元から不可視だったが、敷かない example では地の色が **80 → 20** と正しく暗くなる。プローブ用の改造は計測後に revert 済(commit していない)。
   テスト: 追加ゼロ(GPU 出力の色は unit test で押さえられない)。`fmt --all --check` / `clippy --workspace --all-targets` / 全 workspace test 緑([[feedback-prepush-fmt-check]])。WGSL はランタイム検証 ∴ knot_clone 実起動でシェーダコンパイル通過を確認。
   **実機 OK(2026-07-10 ユーザ確認: Light 解消。Dark は「若干痩せたが、こんなもん」= sRGB 合成へ寄せた理屈どおりの挙動として受容)。stem darkening は入れず — Dark の細りが実用上気にならなかったため、必要になってから。**
 - **✅ (小・遡及記録 2026-07-07) `Button::hover_text_color` — 透明ボタン(リンク)の hover 文字色 = 完了 (2026-07-01, commit `35ac369`)**
