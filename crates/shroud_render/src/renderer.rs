@@ -307,12 +307,25 @@ impl Renderer {
             .expect("failed to create GPU device");
 
         let surface_caps = surface.get_capabilities(&adapter);
+        // Composite in sRGB space, not linear light — so pick a *non*-sRGB
+        // surface and let the shaders emit sRGB bytes directly.
+        //
+        // An `_SRGB` surface makes the GPU decode the destination to linear
+        // before blending. A glyph's coverage alpha then acts as a linear-light
+        // weight, which is physically correct and perceptually wrong: a 50%
+        // covered edge pixel of near-black text on white lands at sRGB 188, not
+        // the 136 the eye expects, so dark-on-light text bleeds its edges into
+        // the background and reads thin and jagged. Light-on-dark text gains
+        // those pixels instead and fattens. Browsers, Skia and GDI all blend on
+        // the sRGB-encoded values; matching them costs nothing and keeps the
+        // rest of the alpha compositing (scrims, hover fades) consistent with
+        // the CSS these UIs are ported from.
         let surface_format = surface_caps
             .formats
             .iter()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .copied()
-            .unwrap_or(surface_caps.formats[0]);
+            .unwrap_or_else(|| surface_caps.formats[0].remove_srgb_suffix());
 
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -660,11 +673,11 @@ impl Renderer {
             mip_level_count: 1 + mips.len() as u32,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            // sRGB so the shader sees linear-light values when sampling.
-            // The render target is also sRGB, so the final write
-            // re-encodes linearly composited results back to sRGB. This
-            // matches what the rect/text path does implicitly via the
-            // surface format.
+            // sRGB so the sampler decodes and filters (bilinear, and across mip
+            // levels) in linear light, which is what correct minification needs
+            // and what `build_mip_chain` assumes. The shader therefore receives
+            // linear values and re-encodes them for the non-sRGB surface — see
+            // `IMAGE_SHADER`.
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
@@ -1400,17 +1413,10 @@ fn sdf_rounded_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
     return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-// sRGB-encoded color (the literal hex bytes the app supplies) -> linear light.
-// The surface is an sRGB format, so the GPU re-encodes our output on write;
-// passing sRGB values straight through double-encodes and washes everything
-// out. Decode here so the round-trip is identity. Matches the CPU
-// `srgb_to_linear` used for image mip building.
-fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
-    let low = c / 12.92;
-    let high = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
-    return select(high, low, c <= vec3<f32>(0.04045));
-}
-
+// `in.color` is already sRGB-encoded (the literal hex bytes the app supplies)
+// and the surface is a non-sRGB format, so the GPU writes what we return
+// verbatim and blends on those same encoded values. Pass the color through.
+// See `Renderer::new` for why the surface is not `_SRGB`.
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Soft drop shadow: a blurred silhouette of the (optionally rounded)
@@ -1421,13 +1427,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (in.blur > 0.0) {
         let sd = sdf_rounded_rect(in.local_pos, in.half_size, in.radius);
         let a = 1.0 - smoothstep(0.0, in.blur, sd);
-        return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a * a);
+        return vec4<f32>(in.color.rgb, in.color.a * a);
     }
     // Fast path: an axis-aligned solid fill needs neither the SDF nor a
     // stroke band. A sharp-cornered *border* (radius 0, border > 0) still
     // takes the SDF path below so its outline gets antialiased edges.
     if (in.radius <= 0.0 && in.border_width <= 0.0) {
-        return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
+        return in.color;
     }
     let d = sdf_rounded_rect(in.local_pos, in.half_size, in.radius);
     // Antialiased outer edge: 1 px transition. clamp(0.5 - d) gives full
@@ -1442,7 +1448,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let inner = clamp(0.5 - (d + in.border_width), 0.0, 1.0);
         alpha = alpha - inner;
     }
-    return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a * alpha);
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }
 "#;
 
@@ -1473,18 +1479,15 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// See the rect shader: decode the sRGB glyph color to linear so the sRGB
-// surface re-encode is identity (no double-encode wash).
-fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
-    let low = c / 12.92;
-    let high = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
-    return select(high, low, c <= vec3<f32>(0.04045));
-}
-
+// The atlas holds the rasterizer's coverage mask. Emitting the glyph color
+// sRGB-encoded means the hardware blend mixes coverage against the *encoded*
+// destination, so a half-covered edge pixel lands halfway between text and
+// background perceptually. See `Renderer::new`: this is the whole reason the
+// surface is not an `_SRGB` format.
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let alpha = textureSample(t_atlas, s_atlas, in.uv).r;
-    return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a * alpha);
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }
 "#;
 
@@ -1515,19 +1518,28 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// See the rect shader. The texel is already linear (sampled from an sRGB
-// texture), so only the sRGB tint color needs decoding; for the common white
-// tint (incl. color-emoji glyphs) this is identity.
+// The image/color-glyph atlas stays an `_SRGB` texture so the sampler decodes
+// and *filters* in linear light, which is what correct minification wants. So
+// `texel.rgb` arrives linear while the surface now expects sRGB: tint in linear
+// (for the common white tint, incl. color-emoji glyphs, that is identity) and
+// encode once on the way out. See `Renderer::new`.
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let low = c / 12.92;
     let high = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
     return select(high, low, c <= vec3<f32>(0.04045));
 }
 
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let low = c * 12.92;
+    let high = 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(high, low, c <= vec3<f32>(0.0031308));
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let texel = textureSample(t_image, s_image, in.uv);
-    return texel * vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
+    let tinted = texel.rgb * srgb_to_linear(in.color.rgb);
+    return vec4<f32>(linear_to_srgb(tinted), texel.a * in.color.a);
 }
 "#;
 

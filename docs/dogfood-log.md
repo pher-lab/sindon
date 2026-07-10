@@ -191,6 +191,14 @@
   設計判断: 「`SansSerif` が指す実体」の再定義に一本化。generic family は fontdb の `query` 経路が `set_sans_serif_family` を尊重する([font/system.rs:374-380])ので widget を触らず全 UI に効く。`Monospace`(コードスパン)/ `Named`(アイコンフォント)は不変で既定だけ remap。解決できない名前は従来動作に degrade ∴ 投機的に呼んでも壊れない。
   テスト: font_loading +1 — fixture の PUA アイコングリフ(システムフォント非依存)で「remap 後の**無指定**テキスト == `Named` 明示」を advance 一致で判別。fmt / clippy(-D warnings)/ doc(-D warnings)/ build 全緑([[feedback-prepush-fmt-check]])。
   **実機 OK(2026-07-10 ユーザ確認: かなり綺麗・混在解消。[[feedback-screenshot-color-hdr]] ∴ 見た目はユーザの目が正)。**
+- **✅ FW-30 [fw] P2 — Light テーマの文字だけ「ほっそり・ギザギザ」で読みにくい = 完了 (2026-07-10, 実機 OK)**
+  出所: FW-29 landed 直後のユーザ報告 — 「Light だと文字が読みにくく、痩せてギザついて見える。Dark はそうでもない」。この **light/dark 非対称**が真因の指紋だった。
+  真因確定: サーフェスが sRGB 形式 ∴ GPU は blend の前にデスティネーションを **linear light へ復号**する。結果、グリフの**カバレッジ α が linear 輝度の重み**として使われる(物理的には正しく、知覚的には誤り)。`#fff` 背景に `#111` 文字・カバレッジ 0.5 のエッジは sRGB **188**(あるべき 136)に着地 = エッジが常に背景側へ逃げる → 線が痩せ、本体との段差が急になりジャギーが立つ。Dark(`#1e1e1e` 背景 / `#e5e5e5` 文字)は逆にエッジが文字側へ寄る(169 vs 130)ので**太って滑らかに見えていた**。ブラウザ / Skia / GDI はいずれも **sRGB 符号化値の上で合成**する。
+  対応: サーフェスを**非 sRGB 形式**に切替(`find(|f| f.is_srgb())` → `find(|f| !f.is_srgb())`)し、`RECT_SHADER` / `TEXT_SHADER` から [[fix-srgb-double-encode]] の `srgb_to_linear()` を撤去して `in.color` を素通し。GPU が復号も再符号化もしないので **blend が sRGB 空間**で走る。不透明ピクセルの出力値は従来と**完全に同一**、変わるのは半透明の混ざり方だけ。∴ scrim / hover フェードも参照元の CSS と一致する方向に揃う。
+  `IMAGE_SHADER` のみ非対称: 画像 / カラー絵文字アトラスは `Rgba8UnormSrgb` の**まま維持**(sampler が linear で復号してから bilinear + mip 間フィルタするのが縮小時に正しく、`build_mip_chain` もそれ前提)。∴ texel は linear で届く → **tint 乗算は linear のまま**行い、出力直前に一度だけ `linear_to_srgb()` で符号化。
+  副次: `LoadOp::Clear` に渡す `theme.colors.background`(sRGB 値)が、sRGB ターゲットでは linear とみなされ再符号化されて**明るく塗られていた**はず。非 sRGB 化でクリア値は素通しになり是正される。knot_clone は root に全面背景 rect を敷く ∴ 不可視。背景 rect を持たない example(hello_world / counter)で地の色が変わる可能性 = **未確認**。
+  テスト: 追加ゼロ(GPU 出力の色は unit test で押さえられない)。`fmt --all --check` / `clippy --workspace --all-targets` / 全 workspace test 緑([[feedback-prepush-fmt-check]])。WGSL はランタイム検証 ∴ knot_clone 実起動でシェーダコンパイル通過を確認。
+  **実機 OK(2026-07-10 ユーザ確認: Light 解消。Dark は「若干痩せたが、こんなもん」= sRGB 合成へ寄せた理屈どおりの挙動として受容)。stem darkening は入れず — Dark の細りが実用上気にならなかったため、必要になってから。**
 - **✅ (小・遡及記録 2026-07-07) `Button::hover_text_color` — 透明ボタン(リンク)の hover 文字色 = 完了 (2026-07-01, commit `35ac369`)**
   出所: 同じ Knot UI 再現演習。透明 fill のリンク(unlock「Forgot password?」等)が React の `hover:text-*`(文字色だけ濃くなる)を表現できず、背景 hover しか無い Button では「青い箱に化ける or hover 反応ゼロ」だった footgun の解消。背景 hover と同じカーブで `text_color`→指定色にフェード(未指定なら不変・既存 Button 不変)。FW 番号は振らず(G-gap でなく footgun 派生の小追加)。**当時 dogfood-log にも [knot-ui-repro-gaps.md] にも記録漏れ → 台帳リコンサイル(2026-07-07)で遡及記載**。使用: unlock/recovery のリンク・エラーバナー `×`・タグチップ `×`。
 
