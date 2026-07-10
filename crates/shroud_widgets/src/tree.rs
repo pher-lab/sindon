@@ -60,6 +60,18 @@ pub struct WidgetTree {
     layout: LayoutEngine,
     /// Index of the widget currently under the cursor (for MouseEnter/Leave).
     hovered: Option<usize>,
+    /// Last pointer position seen by [`Self::dispatch_event`], in viewport
+    /// coordinates. The hover chain is otherwise only ever recomputed from a
+    /// live `MouseMove`; this remembers where the cursor is so
+    /// [`Self::resync_hover`] can re-resolve it after the tree changes
+    /// underneath a stationary cursor. `None` until the first pointer event.
+    last_pointer_pos: Option<Point>,
+    /// Set when a layer pops, consumed by [`Self::resync_hover`] on the next
+    /// frame. Popping can expose a widget directly under a cursor that never
+    /// moves afterwards (dismissing a menu by clicking a button behind it),
+    /// and without a resync that widget stays un-hovered until the user
+    /// jiggles the mouse.
+    hover_dirty: bool,
     /// Widget that has captured the pointer (e.g. an `Input` mid drag-select).
     /// While `Some`, `MouseMove` / `MouseUp` are routed directly to it,
     /// bypassing hit-testing, so the drag keeps extending past its rect. Set
@@ -245,6 +257,8 @@ impl WidgetTree {
             root: None,
             layout: LayoutEngine::new(),
             hovered: None,
+            last_pointer_pos: None,
+            hover_dirty: false,
             pointer_capture: None,
             focus: FocusManager::new(),
             pending_initial_focus: None,
@@ -379,6 +393,7 @@ impl WidgetTree {
         let entry = self.layers.pop()?;
         let root = entry.root;
         self.remove(root);
+        self.hover_dirty = true;
         Some(root)
     }
 
@@ -395,6 +410,7 @@ impl WidgetTree {
         };
         self.layers.remove(pos);
         self.remove(root);
+        self.hover_dirty = true;
         true
     }
 
@@ -1264,6 +1280,14 @@ impl WidgetTree {
         event: &WidgetEvent,
         event_ctx: &mut EventContext,
     ) -> EventResult {
+        // Remember where the cursor is, in viewport space (the shift into the
+        // target subtree's frame happens further down). `resync_hover` replays
+        // this position when a layer pop changes what sits under a cursor that
+        // is not moving, since nothing else recomputes the hover chain.
+        if let Some(pos) = event_position(event) {
+            self.last_pointer_pos = Some(pos);
+        }
+
         // Pick the subtree that owns this event: the topmost *interactive*
         // layer if any (a click-through tooltip overlay on top is skipped),
         // otherwise the main root. `offset` translates viewport coords into
@@ -1851,6 +1875,73 @@ impl WidgetTree {
                 self.emit_to(idx, &WidgetEvent::MouseLeave, event_ctx);
             }
         }
+    }
+
+    /// Re-resolve the hover chain against the last known cursor position,
+    /// emitting the `MouseLeave` / `MouseEnter` a real `MouseMove` would have.
+    /// Returns `true` when the hover chain actually changed.
+    ///
+    /// A no-op unless a layer popped since the last call. `hovered` is
+    /// normally only ever updated from a live `MouseMove`, which leaves a hole:
+    /// dismissing a menu re-exposes whatever sits under the cursor, but if the
+    /// cursor does not then move, nothing tells that widget it is hovered. It
+    /// is most visible when the dismiss *is* the click on another button — the
+    /// outside-click path swallows that press, so the button under the pointer
+    /// receives neither the click nor a hover until the mouse jiggles.
+    ///
+    /// The mirror case on push is deliberately not handled here: opening a
+    /// layer clears hover (see the `PushLayer` arm of `apply_commands`) and
+    /// leaves it cleared, so a context menu that pops up under the cursor does
+    /// not pre-highlight the item it happens to land on — matching native menus
+    /// on Windows and macOS.
+    ///
+    /// Call once per frame *after* layout, so the hit-test sees fresh
+    /// geometry: a handler that popped the layer may also have rebuilt the
+    /// tree beneath it (choosing a dropdown item that reorders the list), and
+    /// those nodes have no resolved rect until the layout pass runs. Skipped
+    /// while the pointer is captured — a drag owns the pointer and must not be
+    /// interrupted by a hover change — and before the first pointer event of
+    /// the session, when the cursor's position is simply unknown.
+    pub fn resync_hover(&mut self, event_ctx: &mut EventContext) -> bool {
+        if !std::mem::take(&mut self.hover_dirty) {
+            return false;
+        }
+        if self.pointer_capture.is_some() {
+            return false;
+        }
+        let Some(pos) = self.last_pointer_pos else {
+            return false;
+        };
+
+        let before = self.hovered;
+        // Same routing rule as `dispatch_event`: an interactive layer still
+        // standing owns the pointer, so hover is resolved inside it (in its
+        // local frame) and the cursor counts as hovering nothing when it sits
+        // outside that layer's rect. Copy the entry's fields out to end the
+        // borrow before the `&mut self` calls below.
+        let layer = self
+            .topmost_interactive_layer()
+            .map(|l| (l.root, l.offset, l.measured_size));
+        match layer {
+            Some((root, offset, size)) => {
+                let rect = Rect::new(offset.0, offset.1, size.width, size.height);
+                if rect.contains(pos) {
+                    let local = Point::new(pos.x - offset.0, pos.y - offset.1);
+                    self.update_hover_in(root, local, event_ctx);
+                } else {
+                    self.clear_hover(event_ctx);
+                }
+            }
+            None => match self.root {
+                Some(root) => self.update_hover_in(root, pos, event_ctx),
+                None => self.clear_hover(event_ctx),
+            },
+        }
+
+        // `MouseEnter` handlers enqueue commands like any other handler
+        // (a hoverable row that opens a tooltip layer, say).
+        self.drain_commands(event_ctx);
+        self.hovered != before
     }
 
     /// Collect `idx` and all its ancestors, leaf first. Returns an

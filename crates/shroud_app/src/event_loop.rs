@@ -1350,6 +1350,24 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     &paint_ctx.theme,
                 );
 
+                // A layer that popped since the last frame may have uncovered a
+                // widget sitting under a cursor that never moves again — the
+                // button whose click dismissed the menu, typically. Replay the
+                // hover hit-test now that this frame's geometry is resolved, so
+                // the paint below already carries the hover state. When the
+                // chain changes, its handlers may have moved the tree (a hover
+                // that opens a tooltip layer), so lay out once more before
+                // painting; this costs a second pass only on the rare frame
+                // where a pop actually changed what is hovered.
+                if tree.resync_hover(&mut self.event_ctx) {
+                    tree.compute_layout_with_measure(
+                        size.0 as f32,
+                        size.1 as f32,
+                        &mut paint_ctx.text_engine,
+                        &paint_ctx.theme,
+                    );
+                }
+
                 paint_ctx.clear();
                 tree.paint(paint_ctx);
 

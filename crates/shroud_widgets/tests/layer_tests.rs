@@ -194,6 +194,222 @@ fn noninteractive_layer_push_preserves_trigger_hover() {
     assert_eq!(exited.get(), 0, "trigger must not receive a spurious leave");
 }
 
+// ── pop re-resolves hover under a stationary cursor ───────────────────
+//
+// The other half of G15. Push emits the trigger's MouseLeave and leaves
+// `hovered` null; nothing ever re-resolves it, because the hover chain is
+// only recomputed from a live `MouseMove`. So dismissing a layer by clicking
+// a button behind it left that button un-hovered — the dismiss swallows the
+// press (by design), and no move follows, so the button lit up only once the
+// user jiggled the mouse. `resync_hover` replays the hit-test at the last
+// known cursor position once per frame after a pop.
+
+/// Main root with a `trigger` (opens a centered popover) at (0,0)-(50,50)
+/// and a second hoverable `other` button at (0,60)-(50,110), both well
+/// clear of the centered layer's rect. Returns the probes as
+/// (tree, trigger, other, other_entered, other_pressed).
+#[allow(clippy::type_complexity)]
+fn tree_with_trigger_and_other() -> (WidgetTree, usize, usize, Rc<Cell<u32>>, Rc<Cell<u32>>) {
+    let entered = Rc::new(Cell::new(0u32));
+    let pressed = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let main = tree.set_root(Container::column().width(800.0).height(600.0));
+    let trigger = tree.add_child(
+        main,
+        Container::column()
+            .width(50.0)
+            .height(50.0)
+            .hoverable()
+            .on_press(|_pos, ctx| {
+                ctx.push_layer(
+                    LayerOptions::popover(),
+                    Container::column().width(120.0).height(80.0),
+                    |_t, _root| {},
+                );
+            }),
+    );
+    let other = {
+        let e = entered.clone();
+        let p = pressed.clone();
+        tree.add_child(
+            main,
+            Container::column()
+                .width(50.0)
+                .height(50.0)
+                .hoverable()
+                .on_hover_enter(move |_rect, _ctx| e.set(e.get() + 1))
+                .on_press(move |_pos, _ctx| p.set(p.get() + 1)),
+        )
+    };
+
+    measured_layout(&mut tree, 800.0, 600.0);
+    (tree, trigger, other, entered, pressed)
+}
+
+/// Emulate one frame of the event loop's post-layout resync.
+fn frame_resync(tree: &mut WidgetTree) -> bool {
+    let mut ctx = EventContext::new();
+    let changed = tree.resync_hover(&mut ctx);
+    measured_layout(tree, 800.0, 600.0);
+    changed
+}
+
+#[test]
+fn outside_click_dismiss_resyncs_hover_onto_the_button_under_the_cursor() {
+    let (mut tree, trigger, other, entered, pressed) = tree_with_trigger_and_other();
+
+    // Open the popover from the trigger; push clears hover (G15).
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseMove {
+            position: Point::new(25.0, 25.0),
+        },
+    );
+    assert_eq!(tree.hovered(), Some(trigger));
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            position: Point::new(25.0, 25.0),
+            button: MouseButton::Left,
+        },
+    );
+    assert_eq!(tree.layer_count(), 1, "popover is up");
+    assert_eq!(tree.hovered(), None, "push cleared hover");
+
+    // Travel to `other`. The layer owns the pointer, so a move outside its
+    // rect only clears hover — `other` is not hovered while the layer is up.
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseMove {
+            position: Point::new(25.0, 85.0),
+        },
+    );
+    assert_eq!(tree.hovered(), None, "layer owns the pointer");
+    assert_eq!(entered.get(), 0, "no hover leaks through an open layer");
+
+    // Click `other` to dismiss. The press is swallowed by the outside-click
+    // path — that contract stays — and the pop alone does not re-resolve
+    // hover, since no `MouseMove` follows.
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            position: Point::new(25.0, 85.0),
+            button: MouseButton::Left,
+        },
+    );
+    assert_eq!(tree.layer_count(), 0, "outside click dismissed the layer");
+    assert_eq!(
+        pressed.get(),
+        0,
+        "dismiss click is swallowed, not delivered"
+    );
+    assert_eq!(
+        tree.hovered(),
+        None,
+        "hover still stale right after the pop"
+    );
+
+    // The fix: the next frame's resync sees the cursor over `other`.
+    assert!(frame_resync(&mut tree), "hover chain changed");
+    assert_eq!(tree.hovered(), Some(other), "cursor is over `other`");
+    assert_eq!(entered.get(), 1, "`other` lit up without a mouse move");
+}
+
+#[test]
+fn escape_dismiss_resyncs_hover_too() {
+    let (mut tree, _trigger, other, entered, _pressed) = tree_with_trigger_and_other();
+
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            position: Point::new(25.0, 25.0),
+            button: MouseButton::Left,
+        },
+    );
+    // Park the cursor over `other` while the layer is up, then dismiss with
+    // the keyboard — the pointer never moves again.
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseMove {
+            position: Point::new(25.0, 85.0),
+        },
+    );
+    dispatch(
+        &mut tree,
+        WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Escape),
+        },
+    );
+    assert_eq!(tree.layer_count(), 0, "Escape dismissed the layer");
+
+    assert!(frame_resync(&mut tree));
+    assert_eq!(tree.hovered(), Some(other));
+    assert_eq!(entered.get(), 1, "`other` lit up after a keyboard dismiss");
+}
+
+#[test]
+fn pop_with_cursor_over_dead_space_hovers_nothing_interactive() {
+    let (mut tree, _trigger, other, entered, _pressed) = tree_with_trigger_and_other();
+
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            position: Point::new(25.0, 25.0),
+            button: MouseButton::Left,
+        },
+    );
+    // Dismiss by clicking empty background, far from either button.
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            position: Point::new(700.0, 500.0),
+            button: MouseButton::Left,
+        },
+    );
+    assert_eq!(tree.layer_count(), 0);
+
+    frame_resync(&mut tree);
+    assert_ne!(
+        tree.hovered(),
+        Some(other),
+        "cursor is nowhere near `other`"
+    );
+    assert_eq!(entered.get(), 0, "no phantom hover on dismiss");
+}
+
+#[test]
+fn resync_hover_is_inert_without_a_pop() {
+    let (mut tree, trigger, _other, _entered, _pressed) = tree_with_trigger_and_other();
+
+    // No pop yet: nothing to re-resolve, even with a live hover chain.
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseMove {
+            position: Point::new(25.0, 25.0),
+        },
+    );
+    assert!(!frame_resync(&mut tree), "no pop → no work");
+    assert_eq!(tree.hovered(), Some(trigger), "hover chain left alone");
+
+    // And a pop that happens before the pointer has ever been seen (boot-time
+    // dismiss, keyboard-only session) has no position to replay.
+    let mut fresh = WidgetTree::new();
+    fresh.set_root(Container::column().width(800.0).height(600.0));
+    let layer = fresh.push_layer(
+        LayerOptions::popover(),
+        Container::column().width(120.0).height(80.0),
+    );
+    measured_layout(&mut fresh, 800.0, 600.0);
+    assert!(fresh.pop_layer(layer));
+    let mut ctx = EventContext::new();
+    assert!(
+        !fresh.resync_hover(&mut ctx),
+        "cursor position unknown → no hover invented"
+    );
+    assert_eq!(fresh.hovered(), None);
+}
+
 // ── basic push/pop ────────────────────────────────────────────────
 
 #[test]

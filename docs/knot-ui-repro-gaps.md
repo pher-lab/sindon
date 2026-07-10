@@ -311,12 +311,16 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   （`exited==1`/`hovered==None`）/ 非 interactive（tooltip）push は hover 維持（`hovered==Some(trigger)`/
   `exited==0`）。shroud_widgets 全 test 緑・fmt/clippy クリーン。**実機 OK（2026-07-06 ユーザ確認 —
   メニュー開閉で trigger のホバー灰が固定しないこと確認）。**
-- **副次の既知挙動（実害極小・未修正）**: 「pop 側の非対称」。①メニューを開いている間は layer が入力を
-  独占するので**メニュー外の hover は出ない**（＝正・input priority）。②メニューを**別ボタンのクリックで
-  閉じた**とき、カーソル下の widget は**次にマウスを動かすまで hover 表示されない**（pop 後に hover を
-  カーソル位置から再評価していないため）。次 move で自己修復し、Web/多くの native と同じ慣習挙動 ∴
-  「バグ」でなく acceptable として記録（fix するなら pop 各経路で last-cursor から `update_hover_in` 再評価。
-  push と違い pop 時 main tree の layout は有効なので実装は容易、ただし ROI 低）。
+- **副次の非対称（かつて acceptable と記録 → ✅ FW-31、2026-07-10 で解消）**: 「pop 側の非対称」。
+  ①メニューを開いている間は layer が入力を独占するので**メニュー外の hover は出ない**（＝正・input
+  priority、今も不変）。②メニューを**別ボタンのクリックで閉じた**とき、カーソル下の widget は**次に
+  マウスを動かすまで hover 表示されない**。次 move で自己修復するため当初は acceptable と記録したが、
+  実使用で繰り返し気になる（dismiss クリックは outside-click 経路が握り潰す ∴ 押した感触も hover も
+  無いまま何も起きない、に見える）としてユーザ判断で修正。**当時の実装スケッチ「pop 各経路で
+  last-cursor から `update_hover_in` 再評価。pop 時 main tree の layout は有効なので容易」は半分外れ**
+  だった — pop と同じ drain で `rebuild_children` が走る経路（dropdown の項目選択でリストが並び替わる）
+  があり、その新ノードには次の layout まで rect が無い。∴ 各 pop 経路ではなく **layout 後のフレーム
+  1 箇所**に `WidgetTree::resync_hover` を置いた。FW-31 参照。
 - 演習で炙った framework 実バグの**第5号**（G13/G14/G17/G19 に続く）。影響範囲は「クリックで開く
   menu/dropdown」trigger 全般。
 
