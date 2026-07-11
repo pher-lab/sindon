@@ -386,6 +386,27 @@ fn line_bounds(s: &str, offset: usize) -> (usize, usize) {
     (lo, hi)
 }
 
+/// Combine the fixed anchor unit `a` with the unit `d` under the drag cursor
+/// into a `(selection_anchor, caret)` pair for a word / line drag-select. The
+/// anchor unit is always kept wholly selected — as the drag passes it, the
+/// anchor flips to the *far* edge of the anchor unit so the unit never shrinks —
+/// and the caret rides the far edge of the cursor unit (the moving side). Units
+/// are half-open `[lo, hi)` byte ranges from [`word_bounds`] / [`line_bounds`].
+fn union_drag_units(a: (usize, usize), d: (usize, usize)) -> (usize, usize) {
+    let (a_lo, a_hi) = a;
+    let (d_lo, d_hi) = d;
+    if d_lo >= a_hi {
+        // Cursor unit is at or past the anchor: select forward to its far edge.
+        (a_lo, d_hi)
+    } else if d_hi <= a_lo {
+        // Cursor unit is before the anchor: select backward, anchor flips right.
+        (a_hi, d_lo)
+    } else {
+        // Overlapping (usually the same unit): union both, caret at the far end.
+        (a_lo.min(d_lo), a_hi.max(d_hi))
+    }
+}
+
 /// Clamp `v` to the inclusive `[min, max]` range when either bound is set.
 /// `None` bounds are unbounded on that side. Used by numeric-mode editing.
 fn clamp_opt(v: i64, min: Option<i64>, max: Option<i64>) -> i64 {
@@ -433,10 +454,20 @@ pub struct Input {
     /// then cycles back to 1), promoting the pending hit to a word (2) or whole
     /// line (3) select; a press that lands too late or too far starts fresh at 1.
     last_click: Cell<Option<(Instant, Point, u8)>>,
-    /// Granularity the next deferred hit resolves to, set on press from the
-    /// multi-click count and consumed at paint to expand the caret offset to the
-    /// surrounding word ([`word_bounds`]) or logical line ([`line_bounds`]).
+    /// Granularity the current pointer gesture resolves to, set on press from the
+    /// multi-click count and read at paint to expand the caret offset to the
+    /// surrounding word ([`word_bounds`]) or logical line ([`line_bounds`]). Held
+    /// (not consumed) for the whole gesture so a drag after a double- / triple-
+    /// click keeps snapping to whole words / lines; reset to `Caret` when the
+    /// gesture ends (MouseUp / FocusLost) or the next press overwrites it.
     pending_select: Cell<SelectUnit>,
+    /// Caret offset where the active word / line drag started, captured on the
+    /// initiating (non-extending) press and used to re-derive the *fixed* anchor
+    /// unit on every drag step. `None` outside a word / line drag. Keeping the
+    /// origin (rather than the expanded range) lets each step recompute the
+    /// anchor unit with the same [`word_bounds`] / [`line_bounds`] the cursor
+    /// side uses, so the anchor word stays wholly selected as the drag passes it.
+    drag_origin: Cell<Option<usize>>,
     /// Optional external binding. When `Some`, every paint and event
     /// rebases `value` from the signal if they differ, and every edit
     /// writes the fresh buffer back.
@@ -639,6 +670,7 @@ impl Input {
             selection_anchor: Cell::new(None),
             pending_hit: Cell::new(None),
             pending_select: Cell::new(SelectUnit::Caret),
+            drag_origin: Cell::new(None),
             selecting: Cell::new(false),
             last_click: Cell::new(None),
             source: None,
@@ -1834,19 +1866,43 @@ impl Widget for Input {
                     &self.attrs,
                 )
             };
-            match self.pending_select.replace(SelectUnit::Caret) {
+            // Held for the whole gesture (not consumed) so a drag after a
+            // double- / triple-click keeps snapping to whole units.
+            match self.pending_select.get() {
                 // Double- / triple-click: expand the resolved caret to the
-                // surrounding word or whole logical line.
+                // surrounding word or whole logical line. On a drag (`extend`)
+                // the gesture snaps by whole units — the word / line the drag
+                // started on stays wholly selected as the anchor, and selection
+                // grows unit-by-unit to the one under the cursor.
                 unit @ (SelectUnit::Word | SelectUnit::Line) => {
-                    let (lo, hi) = {
-                        let v = self.value.borrow();
-                        match unit {
-                            SelectUnit::Word => word_bounds(&v, offset),
-                            _ => line_bounds(&v, offset),
-                        }
+                    let expand = |v: &str, o: usize| match unit {
+                        SelectUnit::Word => word_bounds(v, o),
+                        _ => line_bounds(v, o),
                     };
-                    self.selection_anchor.set(Some(lo));
-                    self.cursor.set(hi);
+                    let (d_lo, d_hi) = {
+                        let v = self.value.borrow();
+                        expand(&v, offset)
+                    };
+                    if extend {
+                        // Re-derive the fixed anchor unit from the gesture's
+                        // origin (falling back to the unit under the cursor for a
+                        // stray extend with no origin, e.g. Shift+double-click).
+                        let (a_lo, a_hi) = self.drag_origin.get().map_or((d_lo, d_hi), |origin| {
+                            let v = self.value.borrow();
+                            expand(&v, origin)
+                        });
+                        // Union the anchor unit with the cursor unit, keeping the
+                        // caret on the far (moving) side so Shift+arrow after the
+                        // drag continues from where the pointer left off.
+                        let (anchor, caret) = union_drag_units((a_lo, a_hi), (d_lo, d_hi));
+                        self.selection_anchor.set(Some(anchor));
+                        self.cursor.set(caret);
+                    } else {
+                        // Initiating press: this unit becomes the drag anchor.
+                        self.drag_origin.set(Some(offset));
+                        self.selection_anchor.set(Some(d_lo));
+                        self.cursor.set(d_hi);
+                    }
                 }
                 SelectUnit::Caret => {
                     if extend {
@@ -2285,6 +2341,10 @@ impl Widget for Input {
                 // extending. Consume only when we were actually dragging, so a
                 // release that wasn't ours doesn't shadow another handler.
                 let was_selecting = self.selecting.replace(false);
+                // The gesture is over: drop the held snap unit and its anchor so
+                // a later plain drag can't reuse a stale word / line origin.
+                self.pending_select.set(SelectUnit::Caret);
+                self.drag_origin.set(None);
                 if was_selecting {
                     ctx.release_pointer();
                     EventResult::Consumed
@@ -2334,6 +2394,7 @@ impl Widget for Input {
                 self.preedit.clear();
                 self.preedit_cursor = None;
                 self.pending_select.set(SelectUnit::Caret);
+                self.drag_origin.set(None);
                 self.desired_x.set(None);
                 if self.numeric {
                     self.canonicalize_numeric_buffer();
@@ -2700,7 +2761,47 @@ impl Widget for Input {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_bounds, word_bounds};
+    use super::{line_bounds, union_drag_units, word_bounds};
+
+    // --- word / line drag-select (union_drag_units) ---------------------
+    // Anchor unit is "Note" = [9, 13) in "ノートNote"; katakana "ノート" = [0, 9).
+
+    #[test]
+    fn drag_within_anchor_unit_keeps_it_whole() {
+        // Dragging inside the double-clicked word never shrinks it.
+        assert_eq!(union_drag_units((9, 13), (9, 13)), (9, 13));
+    }
+
+    #[test]
+    fn drag_before_anchor_flips_anchor_to_far_edge() {
+        // Double-click "Note" then drag left into "ノート": both stay selected,
+        // the anchor flips to Note's right edge and the caret leads at the start.
+        // This is the exact case that used to drop "Note" from the selection.
+        assert_eq!(union_drag_units((9, 13), (0, 9)), (13, 0));
+    }
+
+    #[test]
+    fn drag_after_anchor_extends_to_cursor_far_edge() {
+        // Double-click "ノート" then drag right into "Note": select forward
+        // through the whole cursor word.
+        assert_eq!(union_drag_units((0, 9), (9, 13)), (0, 13));
+    }
+
+    #[test]
+    fn drag_partway_into_a_word_still_grabs_the_whole_word() {
+        // The cursor unit is a full word range (word_bounds already expanded it),
+        // so a drag that lands mid-word still selects to the word edge, never
+        // splitting it — the second half of the reported glitch.
+        // Anchor "world" = [6, 11), cursor unit "hello" = [0, 5) in "hello world".
+        assert_eq!(union_drag_units((6, 11), (0, 5)), (11, 0));
+    }
+
+    #[test]
+    fn drag_across_a_gap_bridges_both_units() {
+        // Non-adjacent units (whitespace between) select contiguously across it.
+        // Anchor "a" = [0, 1), cursor "b" = [4, 5) in "a   b".
+        assert_eq!(union_drag_units((0, 1), (4, 5)), (0, 5));
+    }
 
     #[test]
     fn word_bounds_grabs_word_from_middle() {
