@@ -48,10 +48,7 @@ fn build() -> Field {
     let sel = Signal::new(None);
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(W).height(H));
-    let idx = tree.add_child(
-        root,
-        Input::new().with_value(TEXT).selection_signal(sel),
-    );
+    let idx = tree.add_child(root, Input::new().with_value(TEXT).selection_signal(sel));
 
     let mut engine = TextEngine::new();
     let theme = Theme::default();
