@@ -1777,11 +1777,20 @@ impl Widget for Input {
         };
 
         // IME preedit: while composing (focused + non-empty preedit), splice the
-        // uncommitted composition text into the buffer *for display only* at the
-        // caret. The real `value` is untouched until the IME commits. All the
-        // shaping below (content height, caret geometry, glyphs) runs on this
-        // display string so the composition is visible and the caret tracks it;
-        // the committed text is what later lands in `value` via CharInput.
+        // uncommitted composition text into the buffer *for display only*. The
+        // real `value` is untouched until the IME commits. All the shaping below
+        // (content height, caret geometry, glyphs) runs on this display string
+        // so the composition is visible and the caret tracks it; the committed
+        // text is what later lands in `value` via CharInput.
+        //
+        // When composing over a selection, show the preedit *in place of* the
+        // selection: elide `[lo, hi)` and splice the composition at `lo`, so the
+        // selected text visually gives way to what's being typed instead of
+        // sitting next to the composition until commit. Nothing here mutates
+        // `value` or the selection range — the real replacement still happens at
+        // commit, when CharInput runs `delete_selection()` over the same range,
+        // so the final result is identical. With no selection this collapses to
+        // a plain splice at the caret.
         //
         // `composed_caret` is the byte offset of the displayed caret within the
         // composed string (the IME's own cursor inside the preedit, defaulting
@@ -1793,14 +1802,20 @@ impl Widget for Input {
         let mut preedit_span: Option<(usize, usize)> = None;
         if composing {
             let v = self.value.borrow();
-            let cur = self.cursor.get().min(v.len());
-            let mut s = String::with_capacity(v.len() + self.preedit.len());
-            s.push_str(&v[..cur]);
+            let (lo, hi) = match self.selection_range() {
+                Some((l, h)) => (l.min(v.len()), h.min(v.len())),
+                None => {
+                    let cur = self.cursor.get().min(v.len());
+                    (cur, cur)
+                }
+            };
+            let mut s = String::with_capacity(v.len() - (hi - lo) + self.preedit.len());
+            s.push_str(&v[..lo]);
             s.push_str(&self.preedit);
-            s.push_str(&v[cur..]);
-            let span = (cur, cur + self.preedit.len());
+            s.push_str(&v[hi..]);
+            let span = (lo, lo + self.preedit.len());
             composed_caret = match self.preedit_cursor {
-                Some((cs, _ce)) => cur + cs.min(self.preedit.len()),
+                Some((cs, _ce)) => lo + cs.min(self.preedit.len()),
                 None => span.1,
             };
             preedit_span = Some(span);

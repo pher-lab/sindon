@@ -13,7 +13,7 @@
 use shroud_core::{Point, Rect, Theme};
 use shroud_reactive::Signal;
 use shroud_text::TextEngine;
-use shroud_widgets::event::{EventContext, MouseButton, WidgetEvent};
+use shroud_widgets::event::{EventContext, Key, Modifiers, MouseButton, WidgetEvent};
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::tree::WidgetTree;
 use shroud_widgets::{Container, Input};
@@ -68,6 +68,97 @@ fn preedit(
             cursor,
         },
         ev,
+    );
+}
+
+/// Build a focused single-line `Input` seeded with `text` (via `with_value`),
+/// with a warm paint after the focusing click so the caret geometry resolves.
+/// Returns the child index so tests can select before composing.
+fn seeded_focused_input(text: &str) -> (WidgetTree, usize, EventContext) {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(W).height(H));
+    let idx = tree.add_child(root, Input::new().with_value(text));
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(W, H, &mut engine, &theme);
+    let rect = tree.layout_rect(idx);
+
+    let mut ev = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    let _ = paint(&tree);
+    (tree, idx, ev)
+}
+
+/// Select the whole buffer (Ctrl+A), resetting modifiers after so a following
+/// preedit / CharInput isn't read as a chord.
+fn select_all(tree: &mut WidgetTree, ev: &mut EventContext) {
+    ev.modifiers = Modifiers::CTRL;
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Character('a'),
+        },
+        ev,
+    );
+    ev.modifiers = Modifiers::NONE;
+}
+
+#[test]
+fn preedit_replaces_the_selection_in_the_display() {
+    // Select the whole buffer, then start composing over it. The composition
+    // must show *in place of* the selection — the display collapses to just the
+    // preedit rather than the selected text sitting next to it until commit.
+    // Proven by glyph count: "hello" fully selected + preedit "X" must render
+    // one glyph (X), not six (helloX).
+    let (mut tree, idx, mut ev) = seeded_focused_input("hello");
+    select_all(&mut tree, &mut ev);
+    assert!(
+        tree.widget_as::<Input>(idx).unwrap().has_selection(),
+        "Ctrl+A should have selected the buffer"
+    );
+
+    preedit(&mut tree, &mut ev, "X", None);
+    let ctx = paint(&tree);
+    assert_eq!(
+        ctx.glyphs.len(),
+        1,
+        "composing over a full selection must display only the preedit, \
+         got {} glyphs",
+        ctx.glyphs.len()
+    );
+}
+
+#[test]
+fn preedit_over_selection_does_not_touch_the_value_until_commit() {
+    // The in-place replacement is display-only: while composing over a
+    // selection the bound value is still the *original* text, and the real
+    // replacement only lands when the IME commits (clearing preedit + a
+    // CharInput burst — exactly what `translate_ime(Ime::Commit)` produces).
+    let value = Signal::new("hello".to_string());
+    let (mut tree, _rect, mut ev) = focused_input(Some(value));
+    select_all(&mut tree, &mut ev);
+
+    preedit(&mut tree, &mut ev, "X", None);
+    let _ = paint(&tree);
+    assert_eq!(
+        value.get_clone(),
+        "hello",
+        "composing over a selection must not mutate the bound value yet"
+    );
+
+    // Commit.
+    preedit(&mut tree, &mut ev, "", None);
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'X' }, &mut ev);
+    assert_eq!(
+        value.get_clone(),
+        "X",
+        "committing over a selection must replace it, leaving just the commit"
     );
 }
 

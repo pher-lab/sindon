@@ -218,6 +218,12 @@
   対応: ① `pending_select` を**ジェスチャ全体で保持**(resolve では `.get()` のみ・消費しない)し、MouseUp / FocusLost / 次の press で `Caret` に戻す。② 新フィールド `drag_origin`(ジェスチャ開始 caret offset)を初回 press で記録し、drag ステップ毎に `word_bounds` / `line_bounds` で**固定アンカー単位を再導出**。③ 純関数 `union_drag_units(anchor_unit, cursor_unit) -> (selection_anchor, caret)` でアンカー単位を常に丸ごと含めつつ cursor 単位の遠端まで張る(アンカーを通過したら anchor 側が反対エッジへ**反転**して単位が縮まないようにする)。トリプルクリック→ドラッグの行単位も同じ経路で自動的に正しくなる。
   テスト: `union_drag_units` の純 unit test 5 本(input.rs) + 実 event→paint→resolve を通す統合 test 3 本(`input_word_drag_tests.rs`: 左ドラッグで両単語保持 = 修正前 `Some((0,9))` を捕捉 / 右ドラッグは単語で snap / 離した後の素の click は文字単位に戻る)。修正を stash して統合 test が**赤くなる**ことも確認済み。widget crate 全 test(unit 79 + 統合)緑、`fmt --all --check` / `clippy -p shroud_widgets --tests` クリーン([[feedback-prepush-fmt-check]] [[feedback-test-translation-layer]])。
   **実機 OK(2026-07-11 ユーザ確認 —「今はきれいに動いてくれます」。`ノートNote` でダブルクリック後の左ドラッグで両単語が保持される)。** 修正 commit `43e5c2f`。
+- **✅ FW-33 [fw] P2 — 選択したまま日本語を打つと確定まで選択テキストが居座る = 完了 (2026-07-12, 実機 OK)**
+  出所: ユーザ報告 — 「文字を選択しながら日本語を打つと、確定するまで微妙な感じになる。打った仮の状態で置換はできないか」。
+  真因確定: 選択ハイライト自体は composing 中 [suppress 済](../crates/shroud_widgets/src/input.rs) だが、preedit を表示スプライスする位置が **選択の active 端(カレット)固定**だった([input.rs](../crates/shroud_widgets/src/input.rs) の合成が `value[..cursor] + preedit + value[cursor..]`)。∴ 選択中の語を打ち消さずそのまま残し、その隣に未確定文字列が生える → 確定した瞬間に `delete_selection()` が走って旧テキストが消える、という二段見え。ネイティブ/ブラウザの「打ち始めた瞬間に選択が仮状態で置き換わる」挙動と乖離していた。
+  対応: composing 中に選択があれば選択範囲 `[lo, hi)` を**表示から畳んで** preedit を `lo` に挿す(`value[..lo] + preedit + value[hi..]`)。カレットと IME candidate-window 位置も `lo` 基準に。**表示のみの変更で `value` も選択レンジも不変** ∴ 実際の置換は従来どおり確定時の `CharInput → delete_selection()` が同じ `[lo, hi)` を消し最終結果は同一(zeroize/secret 不変条件・commit 経路も無傷)。選択が無ければ従来のカレット位置スプライスに縮退。
+  テスト: `input_preedit_spike.rs` +2(全選択 + preedit `X` の描画グリフが `helloX`=6 でなく `X`=1 になる表示置換の証明 / 合成中は bound value が `hello` のまま・確定後に `X` になる非前倒しの担保)。preedit spike 7 + widget_tests 292 緑、`fmt --all --check` / `clippy -p shroud_widgets --all-targets` クリーン([[feedback-prepush-fmt-check]] [[feedback-test-translation-layer]])。
+  **実機 OK(2026-07-12 ユーザ確認 —「完璧です、うまくいってます」)。**
 - **✅ (小・遡及記録 2026-07-07) `Button::hover_text_color` — 透明ボタン(リンク)の hover 文字色 = 完了 (2026-07-01, commit `35ac369`)**
   出所: 同じ Knot UI 再現演習。透明 fill のリンク(unlock「Forgot password?」等)が React の `hover:text-*`(文字色だけ濃くなる)を表現できず、背景 hover しか無い Button では「青い箱に化ける or hover 反応ゼロ」だった footgun の解消。背景 hover と同じカーブで `text_color`→指定色にフェード(未指定なら不変・既存 Button 不変)。FW 番号は振らず(G-gap でなく footgun 派生の小追加)。**当時 dogfood-log にも [knot-ui-repro-gaps.md] にも記録漏れ → 台帳リコンサイル(2026-07-07)で遡及記載**。使用: unlock/recovery のリンク・エラーバナー `×`・タグチップ `×`。
 
@@ -253,13 +259,13 @@
 
 - [x] 初回 setup(master pw 設定 2回 Enter)+ recovery key を実際に PDF 保存
 - [x] lock → unlock を1日数回(auto-lock も含めて自然に)
-- [ ] 長いノート(数千字)を編集 — viewport スクロール・scroll-to-caret の体感
+- [x] 長いノート(数千字)を編集 — viewport スクロール・scroll-to-caret の体感
 - [x] markdown 編集中の smart keymap(list 継続・空行 exit・quote)
-- [ ] live split preview を常用してみる
+- [x] live split preview を常用してみる
 - [x] find/replace(Ctrl+H)を実タスクで使う
-- [ ] tag を実際に運用(付ける・autocomplete・sidebar filter で絞る)
+- [x] tag を実際に運用(付ける・autocomplete・sidebar filter で絞る)
 - [x] wikilink `[[...]]` でノート間を行き来 + backlinks panel
-- [ ] 画像を D&D / クリップボード貼り付けで実挿入
+- [x] 画像を D&D / クリップボード貼り付けで実挿入
 - [x] full-text search(Ctrl+F)で過去ノートを探す
 - [x] note 複製(右クリック)・trash → restore → 完全削除
 - [x] .md import / export を実データで
