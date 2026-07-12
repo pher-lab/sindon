@@ -2675,13 +2675,19 @@ impl Widget for Input {
                             None => false,
                         };
                         if !handled {
-                            // Insert a newline at the cursor; on_submit is
-                            // intentionally inert in multi-line mode so the field
-                            // behaves like a textarea. A newline is its own
-                            // discrete undo step — it doesn't merge with the
-                            // typing on either side.
-                            let cursor = self.cursor.get();
+                            // Insert a newline at the cursor, replacing any
+                            // active selection first — typing over a selection
+                            // replaces it, and Enter is no exception (otherwise
+                            // the selected text survives and the newline just
+                            // piles up next to it). on_submit is intentionally
+                            // inert in multi-line mode so the field behaves like
+                            // a textarea. The replace + newline are one discrete
+                            // undo step — it doesn't merge with the typing on
+                            // either side. `begin_edit` snapshots the pre-delete
+                            // state (selection intact) so undo restores it.
                             self.begin_edit(EditKind::Insert, false);
+                            self.delete_selection();
+                            let cursor = self.cursor.get();
                             self.value.borrow_mut().insert(cursor, '\n');
                             self.cursor.set(cursor + 1);
                             self.desired_x.set(None);

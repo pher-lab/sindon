@@ -7295,6 +7295,50 @@ fn typing_replaces_selection() {
     assert!(!input.has_selection(), "insert collapses the selection");
 }
 
+/// Enter over a selection in multi-line mode replaces the selection with the
+/// newline — like typing any other character. It must not leave the selected
+/// text in place with the newline piled on next to it (the FW-34 bug: pressing
+/// Enter on a fully-selected buffer kept the text and only stacked newlines).
+#[test]
+fn enter_replaces_selection_in_multiline() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let idx = tree.add_child(root, Input::new().multiline().lines(3).with_value("note"));
+    tree.compute_layout(400.0, 100.0);
+    let mut ctx = EventContext::new();
+    focus_input(&mut tree, idx, &mut ctx);
+
+    // Select all, then Enter: "note" is gone, replaced by a single newline.
+    dispatch_key(&mut tree, Key::Character('a'), Modifiers::CTRL, &mut ctx);
+    dispatch_key(
+        &mut tree,
+        Key::Named(NamedKey::Enter),
+        Modifiers::NONE,
+        &mut ctx,
+    );
+    let input = tree.widget_as::<Input>(idx).unwrap();
+    assert_eq!(input.value_clone(), "\n");
+    assert!(
+        !input.has_selection(),
+        "the replace collapses the selection"
+    );
+
+    // A second Enter (no selection now) just adds another newline — the
+    // no-selection path is unchanged.
+    dispatch_key(
+        &mut tree,
+        Key::Named(NamedKey::Enter),
+        Modifiers::NONE,
+        &mut ctx,
+    );
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "\n\n");
+
+    // The replace is one discrete undo step: Ctrl+Z brings back "note" whole.
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    dispatch_key(&mut tree, Key::Character('z'), Modifiers::CTRL, &mut ctx);
+    assert_eq!(tree.widget_as::<Input>(idx).unwrap().value_clone(), "note");
+}
+
 #[test]
 fn backspace_deletes_selection_as_a_unit() {
     let (mut tree, idx, mut ctx) = selection_input("hello");

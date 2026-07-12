@@ -224,6 +224,12 @@
   対応: composing 中に選択があれば選択範囲 `[lo, hi)` を**表示から畳んで** preedit を `lo` に挿す(`value[..lo] + preedit + value[hi..]`)。カレットと IME candidate-window 位置も `lo` 基準に。**表示のみの変更で `value` も選択レンジも不変** ∴ 実際の置換は従来どおり確定時の `CharInput → delete_selection()` が同じ `[lo, hi)` を消し最終結果は同一(zeroize/secret 不変条件・commit 経路も無傷)。選択が無ければ従来のカレット位置スプライスに縮退。
   テスト: `input_preedit_spike.rs` +2(全選択 + preedit `X` の描画グリフが `helloX`=6 でなく `X`=1 になる表示置換の証明 / 合成中は bound value が `hello` のまま・確定後に `X` になる非前倒しの担保)。preedit spike 7 + widget_tests 292 緑、`fmt --all --check` / `clippy -p shroud_widgets --all-targets` クリーン([[feedback-prepush-fmt-check]] [[feedback-test-translation-layer]])。
   **実機 OK(2026-07-12 ユーザ確認 —「完璧です、うまくいってます」)。**
+- **✅ FW-34 [fw] P2 — 選択したまま Enter を押すと選択が消えず改行だけ積み上がる = 完了 (2026-07-12, 実機 OK)**
+  出所: ユーザ報告 —「`note` を全選択した状態で Enter をただカチカチすると、`note` が居座ったまま改行だけ縦に伸びていく。他の操作は一切していない。違和感がある」。
+  真因確定: multiline の Enter 改行挿入経路([input.rs](../crates/shroud_widgets/src/input.rs) の `NamedKey::Enter` 分岐)が **選択を消さずに** カレット位置へ `\n` を挿していた。文字入力側(`CharInput`)は `had_selection` を見て `delete_selection()` してから挿入するのに、Enter の改行挿入だけそれを欠落。コメントは「選択があれば下の改行挿入に fall through」と書いてあったが、その fall through 先が置換していなかった取りこぼし。∴ 全選択 + Enter 連打で旧テキストが残り改行だけスタックする。FW-33(選択中の IME 打鍵置換)と同じ「選択があるときの挿入は置換であるべき」原則の、非 IME・Enter 版の穴。
+  対応: 改行挿入の直前に `delete_selection()` を追加。`begin_edit(Insert, 非coalesce)` → `delete_selection()` → `\n` 挿入 → `commit_edit` の順で **選択の置換 + 改行を 1 つの discrete undo ステップ**に(`begin_edit` が削除前のスナップショット=選択込みを取るので undo で丸ごと復活)。選択が無ければ `delete_selection()` は no-op で従来どおり。
+  テスト: `widget_tests.rs` +1(`enter_replaces_selection_in_multiline`: 全選択→Enter で `"\n"`・選択なしの2回目 Enter は `"\n\n"` で無選択経路が不変・Ctrl+Z 2回で `"note"` が丸ごと戻る=1ステップ検証)。selection 系 16 本と widget crate 全 test 緑、`fmt --all --check` / `clippy -p shroud_widgets --all-targets` クリーン([[feedback-prepush-fmt-check]] [[feedback-test-translation-layer]])。
+  **実機 OK(2026-07-12 ユーザ確認 —「問題なさそうです」)。**
 - **✅ (小・遡及記録 2026-07-07) `Button::hover_text_color` — 透明ボタン(リンク)の hover 文字色 = 完了 (2026-07-01, commit `35ac369`)**
   出所: 同じ Knot UI 再現演習。透明 fill のリンク(unlock「Forgot password?」等)が React の `hover:text-*`(文字色だけ濃くなる)を表現できず、背景 hover しか無い Button では「青い箱に化ける or hover 反応ゼロ」だった footgun の解消。背景 hover と同じカーブで `text_color`→指定色にフェード(未指定なら不変・既存 Button 不変)。FW 番号は振らず(G-gap でなく footgun 派生の小追加)。**当時 dogfood-log にも [knot-ui-repro-gaps.md] にも記録漏れ → 台帳リコンサイル(2026-07-07)で遡及記載**。使用: unlock/recovery のリンク・エラーバナー `×`・タグチップ `×`。
 
