@@ -542,9 +542,20 @@ FW-18（drop-shadow G18 の shadow 半分）** として graduate 済み。
 - ~~**G15** capturing layer の hover 固定~~ → **解消（FW-23、2026-07-06）** = interactive layer push 前に
   `clear_hover` で live chain へ `MouseLeave`（framework 実バグ第5号）
 - **小・番号なし（2026-07-07 の台帳リコンサイルで明示化 — これまで G5 の `<details>` や slice 所見に
-  埋没していて「持ち越し」として追えていなかった）**:
-  - **`Container::min_width` 無し** — context menu `min-w-[140px]` を固定 `width(140)` で代用（main_screen.rs）。
-  - **`MenuItem` に disabled 状態が無い** — actions の "Export all notes"（`disabled:opacity-40`）が常時 enabled（main_screen.rs）。
+  埋没していて「持ち越し」として追えていなかった）** → **①② 解消（2026-07-12）／③ 棚上げ**:
+  - ~~**`Container::min_width` 無し** — context menu `min-w-[140px]` を固定 `width(140)` で代用。~~ →
+    **解消（2026-07-12）**: `Container::min_width(px)` / 対称で `min_height(px)` を追加（`FlexStyle::min_width`
+    の薄いラッパ）。clone の context menu を `width(140)`→`min_width(140)` に置換（長い行で広がり 140 未満に
+    ならない真の `min-w-*` 挙動に）。
+  - ~~**`MenuItem` に disabled 状態が無い** — actions の "Export all notes"（`disabled:opacity-40`）が常時 enabled。~~ →
+    **解消（2026-07-12）**: `MenuItem::disabled(impl Into<Reactive<bool>>)` を追加。Button と同じ
+    `InteractionState` 規律（latching は塞ぐ／clearing は通す）で activation を握り、hover 抑止 + ラベルα半減
+    （`disabled:opacity-40` 近似）。clone の "Export all notes" を React と同条件 `disabled(NOTES.is_empty())`
+    に配線（ダミーは非空ゆえ enabled 表示＝React と一致）。テスト3本（never-fires / reactive gate / label dim）。
   - **grid レイアウトプリミティブ無し** — backup の `grid-cols-2` を 2×`grow(1.0)` 列で近似（modals.rs）。
+    → **棚上げ（クローズではない）**。近似で見た目は成立しており、CSS grid を framework に入れる強い動機が
+    今のところ clone のこの1箇所だけ ＝ ROI が薄い。番号（FW-）を振ると能動 backlog に昇格して着手圧が
+    生まれるため、あえて振らず「実需が出たら再訪」として据え置く（[[feedback-roadmap-hygiene]]）。
+    2×grow 近似は忠実再現をほぼ妨げないと slice 4 所見でも記録済み。
 
 <!-- 以降、追加演習があれば追記 -->

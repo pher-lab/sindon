@@ -67,12 +67,12 @@
 //!     The capturing layer swallows the `MouseLeave`, so the gear/⋮ keep their
 //!     hover fill until hovered again.
 //!
-//! Minor: `MenuItem` has no disabled state (the "Export all notes" row is
-//! `disabled:opacity-40` when there are no notes); `Container` exposes no
-//! `min_width` (`min-w-[140px]` faked with a fixed `width`); `Button` defaults
-//! its hover/press fill to *primary* when only `background` is set (the
-//! transparent `×` flashed blue until both fills were pinned transparent — now
-//! it also darkens its glyph on hover via the new `Button::hover_text_color`).
+//! Minor: `Button` defaults its hover/press fill to *primary* when only
+//! `background` is set (the transparent `×` flashed blue until both fills were
+//! pinned transparent — now it also darkens its glyph on hover via the new
+//! `Button::hover_text_color`). (The former "`MenuItem` has no disabled state"
+//! and "`Container` has no `min_width`" notes are resolved — see
+//! [`MenuItem::disabled`] and [`Container::min_width`].)
 
 use shroud::core::{Color, Point, Rect};
 use shroud::layout::Justify;
@@ -854,9 +854,10 @@ fn settings_text_row(
 }
 
 /// The ⋮ actions dropdown: Import / Export all notes / Restore welcome note.
-/// `w-48`. Export-all is `disabled:opacity-40` when there are no notes, but
-/// [`MenuItem`] has no disabled state (minor gap), so it always renders enabled
-/// here. Labels are the React `sidebar.*` i18n strings verbatim.
+/// `w-48`. Export-all is `disabled:opacity-40` when there are no notes — wired
+/// to the same `notes.length === 0` condition via [`MenuItem::disabled`]
+/// (enabled here because the dummy list is non-empty, exactly as React). Labels
+/// are the React `sidebar.*` i18n strings verbatim.
 fn open_actions_menu(trigger: Rect, ctx: &mut EventContext) {
     let panel = Container::column()
         .width(192.0) // w-48
@@ -868,7 +869,9 @@ fn open_actions_menu(trigger: Rect, ctx: &mut EventContext) {
         tree.add_child(root, MenuItem::new("Import", |c| c.pop_top_layer()));
         tree.add_child(
             root,
-            MenuItem::new("Export all notes", |c| c.pop_top_layer()),
+            // `disabled:opacity-40 when notes.length === 0` — enabled here since
+            // the dummy list is non-empty (`NOTES.is_empty()` is false).
+            MenuItem::new("Export all notes", |c| c.pop_top_layer()).disabled(NOTES.is_empty()),
         );
         popover_divider(tree, root);
         tree.add_child(
@@ -884,7 +887,7 @@ fn open_actions_menu(trigger: Rect, ctx: &mut EventContext) {
 /// anchored straight at the cursor.
 fn open_note_context_menu(pos: Point, pinned: bool, ctx: &mut EventContext) {
     let menu = Container::column()
-        .width(140.0) // min-w-[140px] (no min_width builder → fixed width)
+        .min_width(140.0) // min-w-[140px] — widens for a long row, never below 140
         .padding(4.0) // py-1
         .background(tokens::pick(tokens::white(), tokens::gray_800()))
         .radius(8.0)

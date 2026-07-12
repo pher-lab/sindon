@@ -527,6 +527,24 @@ impl Container {
         self
     }
 
+    /// Set a minimum width — the node never shrinks below `px` but still grows
+    /// with its content (CSS `min-width`). The idiom behind Tailwind
+    /// `min-w-[..]`: a context menu at `min-w-[140px]` that widens for a long
+    /// row but never collapses narrower. Prefer this over a fixed
+    /// [`Container::width`] when the content should be free to exceed the floor.
+    pub fn min_width(mut self, px: f32) -> Self {
+        self.style = self.style.min_width(px);
+        self
+    }
+
+    /// Set a minimum height — the node never shrinks below `px` but still grows
+    /// with its content (CSS `min-height`). The pixel counterpart to
+    /// [`Container::min_height_vh`].
+    pub fn min_height(mut self, px: f32) -> Self {
+        self.style = self.style.min_height(px);
+        self
+    }
+
     /// Clamp the container's width — the node grows up to `px` and no further.
     ///
     /// For a centered card, prefer a definite [`Container::width`] plus

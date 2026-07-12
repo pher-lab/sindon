@@ -9,6 +9,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use shroud_core::{Color, Point, Theme};
+use shroud_reactive::Signal;
 use shroud_text::TextEngine;
 use shroud_widgets::event::{EventContext, MouseButton, WidgetEvent};
 use shroud_widgets::tree::WidgetTree;
@@ -254,4 +255,94 @@ fn menu_item_drag_off_cancels_click() {
     left_mouse_up(&mut tree, r.origin.x + 200.0, r.origin.y + 200.0);
 
     assert_eq!(fired.get(), 0, "drag-off cancels MenuItem activation");
+}
+
+#[test]
+fn disabled_menu_item_never_fires() {
+    // A disabled row (Tailwind `disabled:opacity-40`) swallows activation: a
+    // full press → release cycle must not call the handler.
+    let fired = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let captured = Rc::clone(&fired);
+    let item = tree.set_root(
+        MenuItem::new("Export all notes", move |_ctx| {
+            captured.set(captured.get() + 1);
+        })
+        .disabled(true),
+    );
+    measured_layout(&mut tree, 200.0, 60.0);
+
+    let r = tree.layout_rect(item);
+    dispatch(&mut tree, WidgetEvent::MouseEnter);
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseMove {
+            position: Point::new(r.origin.x + 5.0, r.origin.y + 5.0),
+        },
+    );
+    left_mouse_down(&mut tree, r.origin.x + 5.0, r.origin.y + 5.0);
+    left_mouse_up(&mut tree, r.origin.x + 5.0, r.origin.y + 5.0);
+
+    assert_eq!(fired.get(), 0, "disabled MenuItem never fires on_click");
+}
+
+#[test]
+fn menu_item_disabled_reactively_gates_click() {
+    // The gate is a `Signal` the menu binds to app state — flipping it with no
+    // event delivered must change whether the next click fires.
+    let fired = Rc::new(Cell::new(0u32));
+    let disabled = Signal::new(false);
+
+    let mut tree = WidgetTree::new();
+    let captured = Rc::clone(&fired);
+    let item = tree.set_root(
+        MenuItem::new("Export all notes", move |_ctx| {
+            captured.set(captured.get() + 1);
+        })
+        .disabled(disabled),
+    );
+    measured_layout(&mut tree, 200.0, 60.0);
+
+    let r = tree.layout_rect(item);
+    dispatch(&mut tree, WidgetEvent::MouseEnter);
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseMove {
+            position: Point::new(r.origin.x + 5.0, r.origin.y + 5.0),
+        },
+    );
+    // Enabled: fires.
+    left_mouse_down(&mut tree, r.origin.x + 5.0, r.origin.y + 5.0);
+    left_mouse_up(&mut tree, r.origin.x + 5.0, r.origin.y + 5.0);
+    assert_eq!(fired.get(), 1, "enabled MenuItem fires");
+
+    // Disabled reactively (no event) → the same click no longer fires.
+    disabled.set(true);
+    left_mouse_down(&mut tree, r.origin.x + 5.0, r.origin.y + 5.0);
+    left_mouse_up(&mut tree, r.origin.x + 5.0, r.origin.y + 5.0);
+    assert_eq!(fired.get(), 1, "disabled MenuItem stops firing");
+}
+
+#[test]
+fn disabled_menu_item_dims_the_label() {
+    // The visible half of the gap: `disabled:opacity-40` dims the label. Compare
+    // the painted glyph alpha enabled vs disabled — disabled should be ~half.
+    fn max_label_alpha(disabled: bool) -> f32 {
+        let mut tree = WidgetTree::new();
+        let item = MenuItem::new("Export all notes", |_ctx| {});
+        tree.set_root(if disabled { item.disabled(true) } else { item });
+        measured_layout(&mut tree, 200.0, 60.0);
+        let mut ctx = shroud_widgets::paint::PaintContext::default();
+        tree.paint(&mut ctx);
+        ctx.glyphs.iter().map(|g| g.color.a).fold(0.0_f32, f32::max)
+    }
+
+    let enabled_a = max_label_alpha(false);
+    let disabled_a = max_label_alpha(true);
+    assert!(enabled_a > 0.0, "enabled label should paint glyphs");
+    assert!(
+        (disabled_a - enabled_a * 0.5).abs() < 1e-3,
+        "disabled label should paint at half alpha: enabled={enabled_a}, disabled={disabled_a}"
+    );
 }

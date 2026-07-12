@@ -42,6 +42,11 @@ pub struct MenuItem {
     label: String,
     on_click: Option<MenuClickHandler>,
     text_color: Option<Reactive<Color>>,
+    /// Gate the row inert (Tailwind `disabled:opacity-40`). Reactive so a menu
+    /// can bind it to app state (e.g. "Export all notes" off while the note
+    /// list is empty) with no event to flip it. Dims the label and swallows
+    /// activation — the clearing discipline lives in [`InteractionState`].
+    disabled: Reactive<bool>,
     /// Hover / press flags — a menu row is not individually focusable, so the
     /// `focused` flag of [`InteractionState`] goes unused here.
     state: InteractionState,
@@ -59,6 +64,7 @@ impl MenuItem {
             label: label.into(),
             on_click: Some(Box::new(on_click)),
             text_color: None,
+            disabled: Reactive::Static(false),
             state: InteractionState::default(),
         }
     }
@@ -67,6 +73,16 @@ impl MenuItem {
     /// Useful for destructive rows (e.g. red "Delete").
     pub fn text_color(mut self, color: impl Into<Reactive<Color>>) -> Self {
         self.text_color = Some(color.into());
+        self
+    }
+
+    /// Gate the row on a disabled state (reactive), matching Tailwind
+    /// `disabled:opacity-40`: the label dims to half alpha, hover is suppressed,
+    /// and clicks no longer fire the handler. Accepts a literal `bool` or a
+    /// `Signal<bool>` the menu binds to app state. The `InteractionState`
+    /// discipline still lets a row disabled mid-press clear its latch cleanly.
+    pub fn disabled(mut self, v: impl Into<Reactive<bool>>) -> Self {
+        self.disabled = v.into();
         self
     }
 }
@@ -114,13 +130,25 @@ impl Widget for MenuItem {
         let hover_bg = ctx.theme.hover.bg;
         let default_text = ctx.theme.colors.on_surface;
         let font_size = ctx.theme.typography.body.font_size;
-        let text_color = self
+        let disabled = self.disabled.get();
+        let mut text_color = self
             .text_color
             .as_ref()
             .map(|c| c.get())
             .unwrap_or(default_text);
+        // Greyed-out label (Tailwind `disabled:opacity-40`); half-alpha reads on
+        // any surface, matching `Button`'s default disabled dim.
+        if disabled {
+            text_color = Color {
+                a: text_color.a * 0.5,
+                ..text_color
+            };
+        }
 
-        let bg = if self.state.hovered {
+        // Suppress the hover fill while disabled — a row disabled while the
+        // pointer sits on it keeps `hovered` (no event flips a reactive signal),
+        // so gate on `disabled` too rather than relying on the flag alone.
+        let bg = if self.state.hovered && !disabled {
             hover_bg
         } else {
             Color::TRANSPARENT
@@ -153,28 +181,19 @@ impl Widget for MenuItem {
     }
 
     fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
-        // A menu row has no disabled state, so pass `false` throughout; the
-        // flag discipline lives in [`InteractionState`].
+        let disabled = self.disabled.get();
         match event {
-            WidgetEvent::MouseEnter => {
-                self.state.enter(false);
-                EventResult::Consumed
-            }
+            // Clearing transitions run even while disabled (see
+            // [`InteractionState`]) so a row disabled mid-hover/press does not
+            // strand a stale flag that resurfaces on re-enable.
             WidgetEvent::MouseLeave => {
                 self.state.leave();
-                EventResult::Consumed
-            }
-            WidgetEvent::MouseDown {
-                button: MouseButton::Left,
-                ..
-            } => {
-                self.state.press(false);
                 EventResult::Consumed
             }
             WidgetEvent::MouseUp {
                 button: MouseButton::Left,
                 ..
-            } => match self.state.release(false) {
+            } => match self.state.release(disabled) {
                 Release::Fire => {
                     if let Some(handler) = &mut self.on_click {
                         handler(ctx);
@@ -184,6 +203,19 @@ impl Widget for MenuItem {
                 Release::Cancelled => EventResult::Consumed,
                 Release::Idle => EventResult::Ignored,
             },
+            // Latching transitions (enter / press) are inert while disabled.
+            _ if disabled => EventResult::Ignored,
+            WidgetEvent::MouseEnter => {
+                self.state.enter(disabled);
+                EventResult::Consumed
+            }
+            WidgetEvent::MouseDown {
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.state.press(disabled);
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
