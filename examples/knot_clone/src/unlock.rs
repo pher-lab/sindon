@@ -97,7 +97,16 @@ pub fn build(tree: &mut WidgetTree) {
             .radius(8.0)
             .padding_x(16.0)
             .min_height(48.0)
-            .on_length_change(move |n| pw_empty.set(n == 0)),
+            .on_length_change(move |n| pw_empty.set(n == 0))
+            // Reference behavior: typing the password and pressing Enter submits
+            // the form, same as clicking Unlock. Mirror the button's
+            // `disabled={!password}` gate — an Enter on an empty field is inert,
+            // so you can't skip past the lock with a blank password.
+            .on_submit(|pw, ctx| {
+                if !pw.is_empty() {
+                    ctx.replace_screen(crate::main_screen::build);
+                }
+            }),
     );
     tree.focus_initially(input_idx);
 
