@@ -361,6 +361,12 @@ pub struct TextEngine {
     font_system: FontSystem,
     swash_cache: SwashCache,
     shape_cache: ShapeCache,
+    /// Full buffer shapes performed since the last
+    /// [`take_shape_stats`](Self::take_shape_stats) drain, and the time spent
+    /// in them. Always-on (two counter bumps per shape); read per frame by the
+    /// app layer when perf logging is enabled.
+    shape_count: u32,
+    shape_ns: u64,
 }
 
 impl Default for TextEngine {
@@ -376,7 +382,21 @@ impl TextEngine {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
             shape_cache: ShapeCache::new(),
+            shape_count: 0,
+            shape_ns: 0,
         }
+    }
+
+    /// Drain the full-shape counters accumulated since the last call:
+    /// `(count, nanoseconds)` across every cosmic buffer build — cache misses,
+    /// the composing / editing single-shapes, and standalone caret / hit-test
+    /// shapes alike. Cache *hits* don't count (nothing was shaped). This is
+    /// the measurement hook behind the frame perf log (`SHROUD_PERF`).
+    pub fn take_shape_stats(&mut self) -> (u32, u64) {
+        let stats = (self.shape_count, self.shape_ns);
+        self.shape_count = 0;
+        self.shape_ns = 0;
+        stats
     }
 
     /// Drop every cached shaping result.
@@ -550,6 +570,7 @@ impl TextEngine {
         max_width: Option<f32>,
         attrs: &TextAttrs,
     ) -> Buffer {
+        let t0 = std::time::Instant::now();
         let metrics = Metrics::new(font_size, line_height);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         buffer.set_size(&mut self.font_system, max_width, None);
@@ -561,6 +582,8 @@ impl TextEngine {
             None,
         );
         buffer.shape_until_scroll(&mut self.font_system, false);
+        self.shape_count += 1;
+        self.shape_ns += t0.elapsed().as_nanos() as u64;
         buffer
     }
 
@@ -619,6 +642,7 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> Buffer {
+        let t0 = std::time::Instant::now();
         let metrics = Metrics::new(font_size, line_height);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         buffer.set_size(&mut self.font_system, max_width, None);
@@ -647,6 +671,8 @@ impl TextEngine {
             None,
         );
         buffer.shape_until_scroll(&mut self.font_system, false);
+        self.shape_count += 1;
+        self.shape_ns += t0.elapsed().as_nanos() as u64;
         buffer
     }
 

@@ -680,6 +680,12 @@ impl App {
             last_ime_cursor_area: None,
             last_ime_allowed: None,
             fonts_loaded: false,
+            perf_log: std::env::var("SHROUD_PERF")
+                .ok()
+                .and_then(|path| std::fs::File::create(path).ok())
+                .map(std::io::BufWriter::new),
+            perf_input: None,
+            perf_start: Instant::now(),
         };
 
         event_loop.run_app(&mut handler).expect("event loop error");
@@ -889,6 +895,19 @@ struct ShroudEventLoop {
     /// `resumed` can fire more than once (suspend/resume); without this guard
     /// each resume would re-register the same faces and bloat the font db.
     fonts_loaded: bool,
+    /// Frame perf log, enabled by setting `SHROUD_PERF=<file path>` in the
+    /// environment: one line per painted frame with phase timings (layout /
+    /// paint / gpu), the frame's full-shape count/time from the text engine,
+    /// and — when the frame follows an input event — the input→present
+    /// latency. `None` (the normal case) costs nothing but the check.
+    perf_log: Option<std::io::BufWriter<std::fs::File>>,
+    /// Arrival time + short description of the oldest input event not yet
+    /// answered by a painted frame, for the perf log's `input=` column.
+    /// First-wins until a frame drains it, so a burst of IME events reports
+    /// the worst latency of the batch. Only written when `perf_log` is on.
+    perf_input: Option<(Instant, String)>,
+    /// Session start, for the perf log's timestamp column.
+    perf_start: Instant,
 }
 
 impl ShroudEventLoop {
@@ -1211,6 +1230,9 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                if self.perf_log.is_some() && self.perf_input.is_none() {
+                    self.perf_input = Some((Instant::now(), "key".to_string()));
+                }
 
                 match &event.logical_key {
                     // Character input → CharInput event (or KeyDown when a
@@ -1269,6 +1291,17 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             // splat the final `Commit` through the existing `CharInput`
             // path. See `translate_ime` for the full mapping.
             WindowEvent::Ime(ime) => {
+                if self.perf_log.is_some() && self.perf_input.is_none() {
+                    // Length only — the perf log must never carry preedit or
+                    // committed text (it may be the user's plaintext).
+                    let desc = match &ime {
+                        Ime::Preedit(s, _) => format!("preedit({})", s.chars().count()),
+                        Ime::Commit(s) => format!("commit({})", s.chars().count()),
+                        Ime::Enabled => "ime-on".to_string(),
+                        Ime::Disabled => "ime-off".to_string(),
+                    };
+                    self.perf_input = Some((Instant::now(), desc));
+                }
                 if let Some(tree) = &mut self.tree {
                     for event in translate_ime(&ime) {
                         tree.dispatch_event(&event, &mut self.event_ctx);
@@ -1297,6 +1330,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 if self.renderer.is_none() || self.tree.is_none() || self.paint_ctx.is_none() {
                     return;
                 }
+                let perf_frame_start = Instant::now();
 
                 // Clear last frame's animation votes. Any in-flight
                 // `Animated` value read during this frame's layout/paint
@@ -1307,6 +1341,10 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 let size = self.renderer.as_ref().unwrap().surface_size();
                 let tree = self.tree.as_mut().unwrap();
                 let paint_ctx = self.paint_ctx.as_mut().unwrap();
+
+                // Reset the shape tally so the perf log's `shapes=` column
+                // counts this frame only. Cheap; runs even with logging off.
+                let _ = paint_ctx.text_engine.take_shape_stats();
 
                 // Pull the latest theme value from the reactive source
                 // before laying out / painting. For `App::theme(Theme)`
@@ -1343,6 +1381,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 // Layout pass — widgets report intrinsic size via their
                 // `measure()` so `.center()` / gap / grow work without a
                 // fixed-width wrapper around leaves.
+                let perf_layout_start = Instant::now();
                 tree.compute_layout_with_measure(
                     size.0 as f32,
                     size.1 as f32,
@@ -1368,8 +1407,11 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     );
                 }
 
+                let perf_layout_end = Instant::now();
+
                 paint_ctx.clear();
                 tree.paint(paint_ctx);
+                let perf_paint_end = Instant::now();
 
                 let current_ime_area = paint_ctx.ime_cursor_area();
 
@@ -1385,6 +1427,37 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     Ok(()) => {}
                     Err(e) => {
                         log::error!("Render error: {:?}", e);
+                    }
+                }
+
+                // One perf-log line per painted frame (`SHROUD_PERF`). `gpu`
+                // covers encode + submit + present, so vsync waits land there;
+                // `input=` reports event-arrival → present latency for the
+                // first frame after an input event. Text never appears here —
+                // only lengths and timings.
+                if self.perf_log.is_some() {
+                    let perf_gpu_end = Instant::now();
+                    let (shapes, shape_ns) = paint_ctx.text_engine.take_shape_stats();
+                    let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1e3;
+                    let input = match self.perf_input.take() {
+                        Some((t, desc)) => format!(" input={desc}@{:.1}ms", ms(t, perf_gpu_end)),
+                        None => String::new(),
+                    };
+                    if let Some(log) = self.perf_log.as_mut() {
+                        use std::io::Write;
+                        let _ = writeln!(
+                            log,
+                            "[{:9.1}] frame={:5.1} layout={:5.1} paint={:5.1} gpu={:5.1} shapes={} shape_ms={:.1}{}",
+                            ms(self.perf_start, perf_gpu_end),
+                            ms(perf_frame_start, perf_gpu_end),
+                            ms(perf_layout_start, perf_layout_end),
+                            ms(perf_layout_end, perf_paint_end),
+                            ms(perf_paint_end, perf_gpu_end),
+                            shapes,
+                            shape_ns as f64 / 1e6,
+                            input
+                        );
+                        let _ = log.flush();
                     }
                 }
 
