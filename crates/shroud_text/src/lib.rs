@@ -4,7 +4,15 @@
 //! - Text shaping (string → positioned glyphs)
 //! - Glyph rasterization (glyph → alpha mask)
 //!
-//! For secure text, `SecureTextBuffer` zeroizes internal buffers on drop.
+//! ## Secret residue
+//!
+//! Shaping runs through a vendored fork of cosmic-text (`third_party/cosmic-text`)
+//! whose `BufferLine` holds its text in a `Zeroizing<String>` — the one owned
+//! plaintext copy cosmic-text keeps, since shaped glyphs carry only byte offsets.
+//! It is wiped when the shaped buffer is dropped, so any text shaped through the
+//! engine — including `SecureText`'s transient reveal — leaves no un-zeroed
+//! plaintext residue on the heap. Verified end-to-end by `tests/cosmic_residue.rs`
+//! (`final_residue == 0`), which is compiled and run on the Windows CI job.
 
 mod attrs;
 mod engine;

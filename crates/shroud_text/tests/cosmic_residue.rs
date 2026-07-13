@@ -8,8 +8,10 @@
 //! canary, before/during/after the secret is exposed to cosmic-text.
 //!
 //! This test only runs on Windows (uses VirtualQueryEx + ReadProcessMemory).
-//! It does not assert a specific residue count — it prints findings so we
-//! can decide whether a cosmic-text fork is warranted.
+//! It is a hard gate: once the secret and its shaped buffer are dropped, zero
+//! canary copies may remain on the heap (`final_residue == 0`). This holds
+//! because shaping goes through shroud's vendored fork of cosmic-text, whose
+//! `BufferLine` zeroizes its plaintext on drop (see `third_party/cosmic-text`).
 
 #![cfg(windows)]
 
@@ -255,17 +257,30 @@ fn cosmic_text_residue_after_drop() {
         after_drop.bytes_scanned as f64 / (1024.0 * 1024.0)
     );
 
-    // Sanity: shape must have produced a detectable copy somewhere.
+    // Sanity: while the secret is live we must be able to find its canary,
+    // otherwise the scanner is broken and the `final_residue == 0` gate below
+    // would be a false pass. (The live copy is the `SecureString` itself;
+    // cosmic-text's own line buffer is already wiped by the time we scan here,
+    // since its `Buffer` is dropped inside `shape_text`.)
     assert!(
         initial_copies >= 1,
-        "shape did not produce a detectable canary copy (baseline={}, live={}); \
-         scanner may be broken",
+        "scanner found no canary while the secret was live (baseline={}, live={}); \
+         scanner may be broken — a residue==0 result cannot be trusted",
         baseline.matches,
         live.matches
     );
 
-    // We do NOT assert final_residue == 0. This test is informational —
-    // the verdict drives whether we need to fork cosmic-text or apply
-    // alternative mitigations. The CI gate (if we add one later) can
-    // assert e.g. `final_residue <= 1` once we know the actual ceiling.
+    // The gate: once the secret and the shaped buffer are dropped, not one byte
+    // of plaintext may survive on the heap. This holds because shroud vendors a
+    // fork of cosmic-text whose `BufferLine` zeroizes its text on drop (see
+    // `third_party/cosmic-text` and shroud_text's crate docs). Before the fork
+    // this was reproducibly +1 (one un-zeroed copy per shape); the fork drives
+    // it to 0. Regressing the fork — or routing a secret through an un-forked
+    // cosmic-text — trips this assert.
+    assert_eq!(
+        final_residue, 0,
+        "plaintext residue survived secret drop: {final_residue} canary copies \
+         still on the heap (expected 0). The cosmic-text fork's drop-zeroize may \
+         have regressed.",
+    );
 }
