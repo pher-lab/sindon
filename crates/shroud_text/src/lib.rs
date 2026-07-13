@@ -19,7 +19,9 @@ mod engine;
 mod span;
 
 pub use attrs::{FontStyle, FontWeight, TextAttrs, TextFamily};
-pub use engine::{DecorationLine, GlyphImage, ShapedGlyph, ShapedText, SpanBox, TextEngine};
+pub use engine::{
+    ComposedBlock, DecorationLine, GlyphImage, ShapedGlyph, ShapedText, SpanBox, TextEngine,
+};
 pub use span::{TextDecoration, TextSpan};
 
 // Re-export cosmic-text types that consumers need

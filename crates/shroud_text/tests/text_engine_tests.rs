@@ -1208,3 +1208,83 @@ fn offset_at_point_attrs_matches_the_default_for_default_attrs() {
         assert_eq!(base, via_attrs, "default-attrs offset must match at x={x}");
     }
 }
+
+// ── ComposedBlock (IME composing fast path) ──────────────────────────────
+//
+// `shape_composing` folds the glyphs, caret, and preedit underline that a
+// composing `Input` used to get from three separate shapes into one. These
+// tests pin it to be behavior-preserving: for each representative text it must
+// reproduce, exactly, what `shape_text_attrs` (glyphs + height),
+// `caret_at_offset_attrs` (caret), and `selection_rects_attrs` (underline)
+// return on their own.
+
+#[test]
+fn shape_composing_matches_the_three_separate_shapes() {
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (18.0, 18.0 * 1.3);
+    let attrs = TextAttrs::default();
+
+    // Plain ASCII, multi-hard-line, a soft-wrapping long line, CJK, a caret at
+    // the very end, and a hard-newline interior boundary — the cases the caret
+    // fallback and the wrap-affinity path care about.
+    let cases: &[(&str, Option<f32>)] = &[
+        ("hello world", None),
+        ("first line\nsecond line", None),
+        (
+            "the quick brown fox jumps over the lazy dog again and again",
+            Some(120.0),
+        ),
+        ("\u{65E5}\u{672C}\u{8A9E}\u{306E}\u{5165}\u{529B}", None), // 日本語の入力
+        ("mixed \u{304B}\u{306A} text\nand a second row", Some(90.0)),
+    ];
+
+    for (text, wrap) in cases {
+        let text = *text;
+        let wrap = *wrap;
+
+        // The separate reference shapes.
+        let ref_shaped = engine.shape_text_attrs(text, fs, lh, wrap, &attrs);
+
+        // Try a caret at every char boundary, and an underline over every
+        // boundary-aligned range, so the fold is checked exhaustively per text.
+        let boundaries: Vec<usize> = (0..=text.len())
+            .filter(|&i| text.is_char_boundary(i))
+            .collect();
+
+        for &caret in &boundaries {
+            for w in boundaries.windows(2) {
+                let (ps, pe) = (w[0], w[1]);
+                let ref_caret = engine.caret_at_offset_attrs(text, caret, fs, lh, wrap, &attrs);
+                let ref_underline =
+                    engine.selection_rects_attrs(text, ps, pe, fs, lh, wrap, &attrs);
+
+                let block = engine.shape_composing(text, fs, lh, wrap, &attrs, caret, (ps, pe));
+
+                assert_eq!(
+                    block.caret, ref_caret,
+                    "caret mismatch at offset {caret} in {text:?} (wrap {wrap:?})"
+                );
+                assert_eq!(
+                    block.underline, ref_underline,
+                    "underline mismatch for range {ps}..{pe} in {text:?} (wrap {wrap:?})"
+                );
+                assert_eq!(
+                    block.shaped.glyphs.len(),
+                    ref_shaped.glyphs.len(),
+                    "glyph count mismatch in {text:?} (wrap {wrap:?})"
+                );
+                for (a, b) in block.shaped.glyphs.iter().zip(&ref_shaped.glyphs) {
+                    assert_eq!(
+                        (a.x, a.y),
+                        (b.x, b.y),
+                        "glyph position mismatch in {text:?} (wrap {wrap:?})"
+                    );
+                }
+                assert_eq!(
+                    block.shaped.height, ref_shaped.height,
+                    "content height mismatch in {text:?} (wrap {wrap:?})"
+                );
+            }
+        }
+    }
+}

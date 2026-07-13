@@ -1822,6 +1822,25 @@ impl Widget for Input {
             composed_text = Some(s);
         }
 
+        // Shape the composed (preedit-spliced) string exactly once and reuse the
+        // result for the content height, the caret, the glyphs, and the preedit
+        // underline below. Composing used to shape this whole string three times
+        // per keystroke — and never hit the shape cache, since each preedit
+        // update is a unique string — so on a long note the re-shaping dominated
+        // the frame. `ComposedBlock` folds all three into one shape.
+        let composed_block = match (composed_text.as_deref(), preedit_span) {
+            (Some(ct), Some((ps, pe))) => Some(ctx.text_engine.shape_composing(
+                ct,
+                font_size,
+                line_height,
+                wrap_width,
+                &self.attrs,
+                composed_caret,
+                (ps, pe),
+            )),
+            _ => None,
+        };
+
         // Multi-line internal viewport: shape the buffer once to learn its
         // content height, clamp the stored scroll offset against it, and (after
         // the hit-test below resolves any click) scroll so a just-moved caret
@@ -1839,10 +1858,8 @@ impl Widget for Input {
         if self.multiline {
             let content_h = if value_is_empty {
                 line_height
-            } else if let Some(ct) = composed_text.as_deref() {
-                ctx.text_engine
-                    .shape_text_attrs(ct, font_size, line_height, wrap_width, &self.attrs)
-                    .height
+            } else if let Some(block) = composed_block.as_ref() {
+                block.shaped.height
             } else {
                 let v = self.value.borrow();
                 ctx.text_engine
@@ -2016,15 +2033,8 @@ impl Widget for Input {
         // than the end of the previous one. While composing, it's measured
         // against the composed (preedit-spliced) string at `composed_caret`.
         let caret_xy = if self.focused {
-            if let Some(ct) = composed_text.as_deref() {
-                Some(ctx.text_engine.caret_at_offset_attrs(
-                    ct,
-                    composed_caret,
-                    font_size,
-                    line_height,
-                    wrap_width,
-                    &self.attrs,
-                ))
+            if let Some(block) = composed_block.as_ref() {
+                Some(block.caret)
             } else if value_is_empty {
                 Some((0.0, 0.0))
             } else {
@@ -2147,36 +2157,35 @@ impl Widget for Input {
                     }
                 }
             } else {
-                // While composing, shape the preedit-spliced display string
-                // plainly. The highlighter is intentionally bypassed mid-
-                // composition (its color comes back the moment the IME commits)
-                // — it tiles `value`, whose byte layout the preedit splice has
-                // shifted, so reusing it here would miscolor. With a highlighter
-                // and no composition, render through the rich path: tile the
-                // buffer into color-only spans and shape them. Color-only spans
-                // shape identically to the plain buffer (see
-                // `build_highlight_spans`), so the caret math lines up with these
-                // glyphs. Otherwise the plain path is used unchanged.
-                let shaped = if let Some(ct) = composed_text.as_deref() {
-                    ctx.text_engine.shape_text_attrs(
-                        ct,
-                        font_size,
-                        line_height,
-                        wrap_width,
-                        &self.attrs,
-                    )
+                // While composing, reuse the single `ComposedBlock` shape — its
+                // glyphs already match the caret and underline computed above.
+                // The highlighter is intentionally bypassed mid-composition (its
+                // color comes back the moment the IME commits) — it tiles
+                // `value`, whose byte layout the preedit splice has shifted, so
+                // reusing it here would miscolor. With a highlighter and no
+                // composition, render through the rich path: tile the buffer into
+                // color-only spans and shape them. Color-only spans shape
+                // identically to the plain buffer (see `build_highlight_spans`),
+                // so the caret math lines up with these glyphs. Otherwise the
+                // plain path is used unchanged.
+                let owned_shaped;
+                let shaped = if let Some(block) = composed_block.as_ref() {
+                    &block.shaped
                 } else if let Some(hl) = self.highlighter.as_ref() {
                     let spans = build_highlight_spans(&value, hl(&value), &self.attrs);
-                    ctx.text_engine
-                        .shape_rich(&spans, font_size, line_height, wrap_width)
+                    owned_shaped =
+                        ctx.text_engine
+                            .shape_rich(&spans, font_size, line_height, wrap_width);
+                    &owned_shaped
                 } else {
-                    ctx.text_engine.shape_text_attrs(
+                    owned_shaped = ctx.text_engine.shape_text_attrs(
                         &value,
                         font_size,
                         line_height,
                         wrap_width,
                         &self.attrs,
-                    )
+                    );
+                    &owned_shaped
                 };
 
                 for glyph in &shaped.glyphs {
@@ -2199,17 +2208,8 @@ impl Widget for Input {
         // get one rect per visual line the preedit spans; the underline sits at
         // the bottom of each. Inside the multi-line clip/offset, so it scrolls
         // with the glyphs.
-        if let (Some(ct), Some((ps, pe))) = (composed_text.as_deref(), preedit_span) {
-            let rects = ctx.text_engine.selection_rects_attrs(
-                ct,
-                ps,
-                pe,
-                font_size,
-                line_height,
-                wrap_width,
-                &self.attrs,
-            );
-            for r in rects {
+        if let Some(block) = composed_block.as_ref() {
+            for r in &block.underline {
                 ctx.fill_rect(
                     Rect::new(
                         text_x + r.origin.x,

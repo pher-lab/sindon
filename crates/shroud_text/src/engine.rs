@@ -87,6 +87,27 @@ pub struct ShapedText {
     pub decoration_lines: Vec<DecorationLine>,
 }
 
+/// Everything the IME-composition paint path needs from a single shaping of the
+/// preedit-spliced display string, produced by
+/// [`shape_composing`](TextEngine::shape_composing).
+///
+/// A composing `Input` used to shape the whole (potentially long) note three
+/// times per preedit update — once for glyphs, once for the caret, once for the
+/// preedit underline — and every keystroke produces a unique string that never
+/// hits the shape cache, so the cost grew with note length. Deriving all three
+/// from one buffer collapses that to a single shape.
+#[derive(Debug, Clone)]
+pub struct ComposedBlock {
+    /// Positioned glyphs and the block's total width/height.
+    pub shaped: ShapedText,
+    /// Block-relative caret position at the requested offset, matching
+    /// [`caret_at_offset_attrs`](TextEngine::caret_at_offset_attrs).
+    pub caret: (f32, f32),
+    /// Block-relative underline rects for the preedit run, one per visual line
+    /// it spans, matching [`selection_rects_attrs`](TextEngine::selection_rects_attrs).
+    pub underline: Vec<Rect>,
+}
+
 /// A rasterized glyph image.
 ///
 /// Most glyphs are single-channel **alpha masks** (`is_color == false`): one
@@ -1071,28 +1092,170 @@ impl TextEngine {
         if text.is_empty() {
             return (0.0, 0.0);
         }
+        // Shape the block once, then read the caret off it. The composing paint
+        // path reuses the same `caret_from_buffer` on a buffer it already holds,
+        // so the two callers stay bit-for-bit identical.
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_size(&mut self.font_system, max_width, None);
+        buffer.set_text(
+            &mut self.font_system,
+            text,
+            &attrs.as_cosmic(),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        self.caret_from_buffer(
+            &buffer,
+            text,
+            offset,
+            font_size,
+            line_height,
+            max_width,
+            attrs,
+        )
+    }
+
+    /// Caret `(x, y)` at byte `offset` derived from an **already-shaped**
+    /// `buffer` over `text`. Factored out of
+    /// [`caret_at_offset_attrs`](Self::caret_at_offset_attrs) so the IME
+    /// composing path can share one shaping across glyphs, caret, and underline.
+    ///
+    /// Mirrors the original three-branch logic exactly:
+    /// * `off < len` with a glyph at `off` → the leading edge of that glyph,
+    ///   read via the same `highlight([off, next))` the standalone path used, so
+    ///   soft-wrap affinity (caret at the *start of the next row*) is preserved.
+    /// * `off == len` → the end of the last visual row, taken straight off this
+    ///   buffer's final run (identical to `cursor_position(text)` since the
+    ///   prefix is the whole string), with **no extra shape**.
+    /// * `off < len` but no glyph at `off` (the caret sits before a hard `\n`) →
+    ///   the rare fallback that shapes the shorter prefix `text[..off]`.
+    #[allow(clippy::too_many_arguments)]
+    fn caret_from_buffer(
+        &mut self,
+        buffer: &Buffer,
+        text: &str,
+        offset: usize,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> (f32, f32) {
+        if text.is_empty() {
+            return (0.0, 0.0);
+        }
         let off = offset.min(text.len());
         if off < text.len() {
-            // The caret sits at the left edge of the glyph that begins at `off`.
-            // `selection_rects` shapes the full block and uses cosmic-text's
-            // cursor model, so it resolves the wrap-boundary affinity correctly
-            // (the glyph at `off` belongs to the next visual row). One char of
-            // range is enough to get that glyph's leading edge.
             let mut next = off + 1;
             while next < text.len() && !text.is_char_boundary(next) {
                 next += 1;
             }
-            if let Some(r) = self
-                .selection_rects_attrs(text, off, next, font_size, line_height, max_width, attrs)
-                .first()
-            {
-                return (r.origin.x, r.origin.y);
+            let (lo_line, lo_idx) = offset_to_line_index(text, off);
+            let (hi_line, hi_idx) = offset_to_line_index(text, next);
+            let cursor_lo = Cursor::new(lo_line, lo_idx);
+            let cursor_hi = Cursor::new(hi_line, hi_idx);
+            for run in buffer.layout_runs() {
+                if let Some((x, w)) = run.highlight(cursor_lo, cursor_hi) {
+                    if w > 0.0 {
+                        return (x, run.line_top);
+                    }
+                }
+            }
+            // No positive-width glyph at `off` (a hard `\n`): fall back to the
+            // end of the prefix's last line via a shape of the shorter prefix.
+            return self.cursor_position_attrs(
+                &text[..off],
+                font_size,
+                line_height,
+                max_width,
+                attrs,
+            );
+        }
+        // `off == len`: end of the last visual row. `cursor_position(text)`
+        // walks every run keeping the last one's `(line_w, line_top)`; the
+        // shared buffer holds exactly those runs, so read them directly.
+        let mut cursor_x = 0.0;
+        let mut cursor_y = 0.0;
+        for run in buffer.layout_runs() {
+            cursor_x = run.line_w;
+            cursor_y = run.line_top;
+        }
+        (cursor_x, cursor_y)
+    }
+
+    /// Shape the IME-composition display string **once** and return the glyphs,
+    /// the caret at `caret_offset`, and the underline rects for the preedit
+    /// `underline` range — everything a composing [`Input`] paints. See
+    /// [`ComposedBlock`]. Uncached by design: each keystroke's composed string
+    /// is unique, so caching would only churn the LRU with transient entries.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shape_composing(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+        caret_offset: usize,
+        underline_range: (usize, usize),
+    ) -> ComposedBlock {
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_size(&mut self.font_system, max_width, None);
+        buffer.set_text(
+            &mut self.font_system,
+            text,
+            &attrs.as_cosmic(),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+
+        // Glyphs (mirrors `shape_text_attrs_uncached`).
+        let mut glyphs = Vec::new();
+        let mut total_width: f32 = 0.0;
+        let mut total_height: f32 = 0.0;
+        for run in buffer.layout_runs() {
+            total_width = total_width.max(run.line_w);
+            total_height = run.line_top + run.line_height;
+            let baseline = stable_baseline(run.line_top, run.line_height, font_size);
+            for glyph in run.glyphs.iter() {
+                let physical = glyph.physical((0.0, baseline), 1.0);
+                glyphs.push(ShapedGlyph {
+                    cache_key: physical.cache_key,
+                    x: physical.x,
+                    y: physical.y,
+                    color: None,
+                });
             }
         }
-        // End of text, or the next char carries no glyph (a hard `\n`): the end
-        // of the prefix's last line is the right answer, and prefix shaping
-        // gives it without a wrap-boundary ambiguity.
-        self.cursor_position_attrs(&text[..off], font_size, line_height, max_width, attrs)
+        let shaped = ShapedText {
+            glyphs,
+            width: total_width,
+            height: total_height,
+            span_boxes: Vec::new(),
+            decoration_lines: Vec::new(),
+        };
+
+        // Preedit underline (mirrors the non-trailing body of
+        // `selection_rects_impl`) and caret — both off the same buffer.
+        let underline = highlight_rects(&buffer, text, underline_range.0, underline_range.1);
+        let caret = self.caret_from_buffer(
+            &buffer,
+            text,
+            caret_offset,
+            font_size,
+            line_height,
+            max_width,
+            attrs,
+        );
+
+        ComposedBlock {
+            shaped,
+            caret,
+            underline,
+        }
     }
 
     /// Rasterize a glyph into an atlas-ready bitmap.
@@ -1152,6 +1315,33 @@ fn offset_to_line_index(text: &str, offset: usize) -> (usize, usize) {
         None => offset,
     };
     (line, index)
+}
+
+/// Selection/underline rects for the cursor range `[start, end)` over an
+/// **already-shaped** `buffer`. This is the non-trailing body of
+/// [`TextEngine::selection_rects_attrs`] factored out so a caller that already
+/// holds a shaped buffer (the IME composing path) can get the rects without
+/// re-shaping. Keeping the two in lockstep is what lets the composing underline
+/// match the standalone one exactly.
+fn highlight_rects(buffer: &Buffer, text: &str, start: usize, end: usize) -> Vec<Rect> {
+    if text.is_empty() || start >= end {
+        return Vec::new();
+    }
+    let lo = start.min(text.len());
+    let hi = end.min(text.len());
+    let (lo_line, lo_idx) = offset_to_line_index(text, lo);
+    let (hi_line, hi_idx) = offset_to_line_index(text, hi);
+    let cursor_lo = Cursor::new(lo_line, lo_idx);
+    let cursor_hi = Cursor::new(hi_line, hi_idx);
+    let mut rects = Vec::new();
+    for run in buffer.layout_runs() {
+        if let Some((x, w)) = run.highlight(cursor_lo, cursor_hi) {
+            if w > 0.0 {
+                rects.push(Rect::new(x, run.line_top, w, run.line_height));
+            }
+        }
+    }
+    rects
 }
 
 /// Inverse of [`offset_to_line_index`]: resolve a cosmic-text
