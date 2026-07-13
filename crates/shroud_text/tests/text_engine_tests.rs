@@ -1288,3 +1288,213 @@ fn shape_composing_matches_the_three_separate_shapes() {
         }
     }
 }
+
+// ── EditBuffer (focused editing single-shape path) ────────────────────────
+//
+// `shape_edit_plain` / `shape_edit_rich` fold the glyphs, content height,
+// caret, selection, and click hit-tests a focused (non-composing) `Input`
+// used to get from separate shapes into one buffer. These tests pin every
+// derived query to reproduce, exactly, what the standalone engine methods
+// return on their own.
+
+#[test]
+fn edit_buffer_plain_matches_the_separate_shapes() {
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (18.0, 18.0 * 1.3);
+    let attrs = TextAttrs::default();
+
+    let cases: &[(&str, Option<f32>)] = &[
+        ("", None),
+        ("hello world", None),
+        ("first line\nsecond line", None),
+        ("a\n\nb", None), // empty interior line
+        (
+            "the quick brown fox jumps over the lazy dog again and again",
+            Some(120.0),
+        ),
+        ("\u{65E5}\u{672C}\u{8A9E}\u{306E}\u{5165}\u{529B}", None), // 日本語の入力
+        ("mixed \u{304B}\u{306A} text\nand a second row", Some(90.0)),
+        ("trailing newline\n", None),
+    ];
+
+    for (text, wrap) in cases {
+        let (text, wrap) = (*text, *wrap);
+        let edit = engine.shape_edit_plain(text, fs, lh, wrap, &attrs);
+
+        // Glyphs + block extent.
+        let ref_shaped = engine.shape_text_attrs(text, fs, lh, wrap, &attrs);
+        assert_eq!(
+            edit.shaped().glyphs.len(),
+            ref_shaped.glyphs.len(),
+            "glyph count mismatch in {text:?} (wrap {wrap:?})"
+        );
+        for (a, b) in edit.shaped().glyphs.iter().zip(&ref_shaped.glyphs) {
+            assert_eq!(
+                (a.x, a.y),
+                (b.x, b.y),
+                "glyph position mismatch in {text:?} (wrap {wrap:?})"
+            );
+        }
+        assert_eq!(
+            (edit.shaped().width, edit.shaped().height),
+            (ref_shaped.width, ref_shaped.height),
+            "block extent mismatch in {text:?} (wrap {wrap:?})"
+        );
+
+        let boundaries: Vec<usize> = (0..=text.len())
+            .filter(|&i| text.is_char_boundary(i))
+            .collect();
+
+        // Caret at every char boundary.
+        for &off in &boundaries {
+            let want = engine.caret_at_offset_attrs(text, off, fs, lh, wrap, &attrs);
+            let got = engine.edit_caret(&edit, text, off, fs, lh, wrap, &attrs);
+            assert_eq!(
+                got, want,
+                "caret mismatch at offset {off} in {text:?} (wrap {wrap:?})"
+            );
+        }
+
+        // Trailing-sliver selection over every boundary-aligned range.
+        for (i, &lo) in boundaries.iter().enumerate() {
+            for &hi in &boundaries[i..] {
+                let want =
+                    engine.selection_rects_with_trailing_attrs(text, lo, hi, fs, lh, wrap, &attrs);
+                let got = edit.selection_rects_with_trailing(text, lo, hi, fs);
+                assert_eq!(
+                    got, want,
+                    "selection mismatch for {lo}..{hi} in {text:?} (wrap {wrap:?})"
+                );
+            }
+        }
+
+        // Click hit-tests on a grid across (and past) the block.
+        let grid_w = ref_shaped.width.max(fs) + 12.0;
+        let grid_h = ref_shaped.height.max(lh) + 12.0;
+        let mut y = -6.0;
+        while y < grid_h {
+            let mut x = -6.0;
+            while x < grid_w {
+                let want = engine.offset_at_point_attrs(text, x, y, fs, lh, wrap, &attrs);
+                let got = edit.hit(text, x, y);
+                assert_eq!(
+                    got, want,
+                    "hit mismatch at ({x}, {y}) in {text:?} (wrap {wrap:?})"
+                );
+                x += 9.0;
+            }
+            y += lh / 2.0;
+        }
+    }
+}
+
+#[test]
+fn edit_buffer_rich_matches_rich_glyphs_and_plain_geometry() {
+    // A focused field with a live highlighter shapes color-only spans. The
+    // highlighter invariant (see `build_highlight_spans`) is that color-only
+    // spans shape to the identical layout as the plain value — which is what
+    // lets the rich `EditBuffer` answer caret / hit / selection queries that
+    // agree with the plain-attrs standalone methods, while its glyphs carry
+    // the standalone rich shape's colors.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (18.0, 18.0 * 1.3);
+    let attrs = TextAttrs::default();
+    let wrap = Some(110.0);
+
+    let (p1, p2, p3, p4) = (
+        "alpha ",
+        "bold and",
+        "\nkana \u{304B}\u{306A}",
+        " tail that wraps onward",
+    );
+    let text = format!("{p1}{p2}{p3}{p4}");
+    let red = Color::rgb(0.9, 0.3, 0.2);
+    let blue = Color::rgb(0.2, 0.4, 0.9);
+    let spans = [
+        TextSpan::new(p1),
+        TextSpan::new(p2).color(red),
+        TextSpan::new(p3).color(blue),
+        TextSpan::new(p4),
+    ];
+
+    let edit = engine.shape_edit_rich(&spans, fs, lh, wrap);
+
+    // Glyphs (colors included), span boxes, and decorations match the
+    // standalone rich shape.
+    let ref_rich = engine.shape_rich(&spans, fs, lh, wrap);
+    assert_eq!(edit.shaped().glyphs.len(), ref_rich.glyphs.len());
+    for (a, b) in edit.shaped().glyphs.iter().zip(&ref_rich.glyphs) {
+        assert_eq!((a.x, a.y), (b.x, b.y), "rich glyph position mismatch");
+        assert_eq!(a.color, b.color, "rich glyph color mismatch");
+    }
+    assert_eq!(edit.shaped().span_boxes, ref_rich.span_boxes);
+    assert_eq!(edit.shaped().decoration_lines, ref_rich.decoration_lines);
+    assert_eq!(
+        (edit.shaped().width, edit.shaped().height),
+        (ref_rich.width, ref_rich.height)
+    );
+
+    // Caret / selection / hit agree with the *plain* standalone methods.
+    let boundaries: Vec<usize> = (0..=text.len())
+        .filter(|&i| text.is_char_boundary(i))
+        .collect();
+    for &off in &boundaries {
+        let want = engine.caret_at_offset_attrs(&text, off, fs, lh, wrap, &attrs);
+        let got = engine.edit_caret(&edit, &text, off, fs, lh, wrap, &attrs);
+        assert_eq!(got, want, "rich caret mismatch at offset {off}");
+    }
+    for (i, &lo) in boundaries.iter().enumerate() {
+        for &hi in &boundaries[i..] {
+            let want =
+                engine.selection_rects_with_trailing_attrs(&text, lo, hi, fs, lh, wrap, &attrs);
+            let got = edit.selection_rects_with_trailing(&text, lo, hi, fs);
+            assert_eq!(got, want, "rich selection mismatch for {lo}..{hi}");
+        }
+    }
+    let mut y = -6.0;
+    while y < ref_rich.height + 12.0 {
+        let mut x = -6.0;
+        while x < ref_rich.width.max(fs) + 12.0 {
+            let want = engine.offset_at_point_attrs(&text, x, y, fs, lh, wrap, &attrs);
+            let got = edit.hit(&text, x, y);
+            assert_eq!(got, want, "rich hit mismatch at ({x}, {y})");
+            x += 9.0;
+        }
+        y += lh / 2.0;
+    }
+}
+
+#[test]
+fn caret_at_line_end_matches_the_prefix_shape_answer() {
+    // A caret whose offset points at a `\n` has no glyph to highlight;
+    // `caret_from_buffer` answers it from the full buffer's rows. Pin that to
+    // the historical ground truth — shape the prefix `text[..off]` and read
+    // the end of its last run (`cursor_position_attrs`) — for every newline,
+    // including empty lines, a leading newline, and a soft-wrapped line whose
+    // hard break lands mid-paragraph.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (18.0, 18.0 * 1.3);
+    let attrs = TextAttrs::default();
+
+    let cases: &[(&str, Option<f32>)] = &[
+        ("first line\nsecond", None),
+        ("a\n\nb\n", None),
+        ("\nleading", None),
+        ("wrap wrap wrap wrap wrap\nnext", Some(60.0)),
+        ("\u{65E5}\u{672C}\u{8A9E}\n\u{304B}\u{306A}", None),
+    ];
+    for (text, wrap) in cases {
+        let (text, wrap) = (*text, *wrap);
+        for (off, b) in text.bytes().enumerate() {
+            if b != b'\n' {
+                continue;
+            }
+            let want = engine.cursor_position_attrs(&text[..off], fs, lh, wrap, &attrs);
+            let got = engine.caret_at_offset_attrs(text, off, fs, lh, wrap, &attrs);
+            assert_eq!(
+                got, want,
+                "caret at \\n offset {off} in {text:?} (wrap {wrap:?})"
+            );
+        }
+    }
+}

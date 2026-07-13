@@ -20,7 +20,8 @@ mod span;
 
 pub use attrs::{FontStyle, FontWeight, TextAttrs, TextFamily};
 pub use engine::{
-    ComposedBlock, DecorationLine, GlyphImage, ShapedGlyph, ShapedText, SpanBox, TextEngine,
+    ComposedBlock, DecorationLine, EditBuffer, GlyphImage, ShapedGlyph, ShapedText, SpanBox,
+    TextEngine,
 };
 pub use span::{TextDecoration, TextSpan};
 

@@ -1848,6 +1848,35 @@ impl Widget for Input {
         // While composing, the (non-empty) preedit means there is always
         // something to draw, so the placeholder path is suppressed.
         let value_is_empty = self.value.borrow().is_empty() && !composing;
+
+        // Focused, non-composing: shape the value exactly once per frame into
+        // an `EditBuffer` and derive the content height, glyphs, caret,
+        // selection, and click hit-tests from it below — the editing twin of
+        // `ComposedBlock` above. This used to be up to three separate full
+        // shapes per keystroke (content height and glyphs miss the cache on
+        // every edit — under a highlighter on *different* keys — and the caret
+        // never consulted it). Unfocused fields stay on the cached shape paths:
+        // their text is stable across frames, so cache hits make repaints
+        // nearly free, which a per-frame uncached shape would forfeit.
+        let edit_buffer = if self.focused && !composing && !value_is_empty {
+            let v = self.value.borrow();
+            Some(if let Some(hl) = self.highlighter.as_ref() {
+                let spans = build_highlight_spans(&v, hl(&v), &self.attrs);
+                ctx.text_engine
+                    .shape_edit_rich(&spans, font_size, line_height, wrap_width)
+            } else {
+                ctx.text_engine.shape_edit_plain(
+                    &v,
+                    font_size,
+                    line_height,
+                    wrap_width,
+                    &self.attrs,
+                )
+            })
+        } else {
+            None
+        };
+
         let viewport_h = (layout.size.height - 2.0 * self.pad_y).max(0.0);
         // `displayed` is the eased offset the text is actually drawn at; the
         // logical target lives in `scroll_anim`. Hit-testing, the offset push,
@@ -1860,6 +1889,8 @@ impl Widget for Input {
                 line_height
             } else if let Some(block) = composed_block.as_ref() {
                 block.shaped.height
+            } else if let Some(edit) = edit_buffer.as_ref() {
+                edit.shaped().height
             } else {
                 let v = self.value.borrow();
                 ctx.text_engine
@@ -1888,15 +1919,21 @@ impl Widget for Input {
             let rel_y = pos.y - text_y + displayed;
             let offset = {
                 let v = self.value.borrow();
-                ctx.text_engine.offset_at_point_attrs(
-                    &v,
-                    rel_x,
-                    rel_y,
-                    font_size,
-                    line_height,
-                    wrap_width,
-                    &self.attrs,
-                )
+                // The click always lands on the frame's `EditBuffer` when one
+                // exists; the engine path remains for the edges without one
+                // (e.g. a click routed here mid-composition).
+                match edit_buffer.as_ref() {
+                    Some(edit) => edit.hit(&v, rel_x, rel_y),
+                    None => ctx.text_engine.offset_at_point_attrs(
+                        &v,
+                        rel_x,
+                        rel_y,
+                        font_size,
+                        line_height,
+                        wrap_width,
+                        &self.attrs,
+                    ),
+                }
             };
             // Held for the whole gesture (not consumed) so a drag after a
             // double- / triple-click keeps snapping to whole units.
@@ -1971,46 +2008,63 @@ impl Widget for Input {
                 let cursor = self.cursor.get();
                 let (cx, cy) = {
                     let v = self.value.borrow();
-                    ctx.text_engine.caret_at_offset_attrs(
-                        &v,
-                        cursor,
-                        font_size,
-                        line_height,
-                        wrap_width,
-                        &self.attrs,
-                    )
+                    match edit_buffer.as_ref() {
+                        Some(edit) => ctx.text_engine.edit_caret(
+                            edit,
+                            &v,
+                            cursor,
+                            font_size,
+                            line_height,
+                            wrap_width,
+                            &self.attrs,
+                        ),
+                        None => ctx.text_engine.caret_at_offset_attrs(
+                            &v,
+                            cursor,
+                            font_size,
+                            line_height,
+                            wrap_width,
+                            &self.attrs,
+                        ),
+                    }
                 };
                 let target_x = self.desired_x.get().unwrap_or(cx);
                 self.desired_x.set(Some(target_x));
                 let new_cursor = if down {
                     // One visual row down at the sticky column. A `y` past the
-                    // last row makes `offset_at_point` return the buffer end —
+                    // last row makes the hit-test return the buffer end —
                     // exactly the wanted "ArrowDown on the last line jumps to
                     // end" behavior.
                     let v = self.value.borrow();
-                    ctx.text_engine.offset_at_point_attrs(
-                        &v,
-                        target_x,
-                        cy + line_height,
-                        font_size,
-                        line_height,
-                        wrap_width,
-                        &self.attrs,
-                    )
+                    match edit_buffer.as_ref() {
+                        Some(edit) => edit.hit(&v, target_x, cy + line_height),
+                        None => ctx.text_engine.offset_at_point_attrs(
+                            &v,
+                            target_x,
+                            cy + line_height,
+                            font_size,
+                            line_height,
+                            wrap_width,
+                            &self.attrs,
+                        ),
+                    }
                 } else if cy < line_height {
                     // Already on the first visual row: ArrowUp jumps to start.
                     0
                 } else {
                     let v = self.value.borrow();
-                    ctx.text_engine.offset_at_point_attrs(
-                        &v,
-                        target_x,
-                        cy - line_height,
-                        font_size,
-                        line_height,
-                        wrap_width,
-                        &self.attrs,
-                    )
+                    match edit_buffer.as_ref() {
+                        Some(edit) => edit.hit(&v, target_x, cy - line_height),
+                        None => ctx.text_engine.offset_at_point_attrs(
+                            &v,
+                            target_x,
+                            cy - line_height,
+                            font_size,
+                            line_height,
+                            wrap_width,
+                            &self.attrs,
+                        ),
+                    }
                 };
                 if new_cursor == cursor {
                     // No progress (already at the top/bottom edge): stop so a
@@ -2040,14 +2094,25 @@ impl Widget for Input {
             } else {
                 let cursor = self.cursor.get();
                 let v = self.value.borrow();
-                Some(ctx.text_engine.caret_at_offset_attrs(
-                    &v,
-                    cursor,
-                    font_size,
-                    line_height,
-                    wrap_width,
-                    &self.attrs,
-                ))
+                Some(match edit_buffer.as_ref() {
+                    Some(edit) => ctx.text_engine.edit_caret(
+                        edit,
+                        &v,
+                        cursor,
+                        font_size,
+                        line_height,
+                        wrap_width,
+                        &self.attrs,
+                    ),
+                    None => ctx.text_engine.caret_at_offset_attrs(
+                        &v,
+                        cursor,
+                        font_size,
+                        line_height,
+                        wrap_width,
+                        &self.attrs,
+                    ),
+                })
             }
         } else {
             None
@@ -2110,15 +2175,18 @@ impl Widget for Input {
                     // sliver past each non-final row's last glyph so the
                     // included line breaks are visible (FW-6). Shaped with the
                     // field's attrs so the highlight tracks a bold value.
-                    ctx.text_engine.selection_rects_with_trailing_attrs(
-                        &v,
-                        lo,
-                        hi,
-                        font_size,
-                        line_height,
-                        wrap_width,
-                        &self.attrs,
-                    )
+                    match edit_buffer.as_ref() {
+                        Some(edit) => edit.selection_rects_with_trailing(&v, lo, hi, font_size),
+                        None => ctx.text_engine.selection_rects_with_trailing_attrs(
+                            &v,
+                            lo,
+                            hi,
+                            font_size,
+                            line_height,
+                            wrap_width,
+                            &self.attrs,
+                        ),
+                    }
                 };
                 for r in rects {
                     ctx.fill_rect(
@@ -2162,15 +2230,19 @@ impl Widget for Input {
                 // The highlighter is intentionally bypassed mid-composition (its
                 // color comes back the moment the IME commits) — it tiles
                 // `value`, whose byte layout the preedit splice has shifted, so
-                // reusing it here would miscolor. With a highlighter and no
-                // composition, render through the rich path: tile the buffer into
-                // color-only spans and shape them. Color-only spans shape
-                // identically to the plain buffer (see `build_highlight_spans`),
-                // so the caret math lines up with these glyphs. Otherwise the
-                // plain path is used unchanged.
+                // reusing it here would miscolor. A focused field reuses the
+                // frame's single `EditBuffer` shape, which already went through
+                // the highlighter (rich) or plain path as appropriate. The
+                // remaining (unfocused) cases render through the cached paths:
+                // with a highlighter, tile the buffer into color-only spans and
+                // shape them — color-only spans shape identically to the plain
+                // buffer (see `build_highlight_spans`), so the caret math lines
+                // up with these glyphs — otherwise plain.
                 let owned_shaped;
                 let shaped = if let Some(block) = composed_block.as_ref() {
                     &block.shaped
+                } else if let Some(edit) = edit_buffer.as_ref() {
+                    edit.shaped()
                 } else if let Some(hl) = self.highlighter.as_ref() {
                     let spans = build_highlight_spans(&value, hl(&value), &self.attrs);
                     owned_shaped =

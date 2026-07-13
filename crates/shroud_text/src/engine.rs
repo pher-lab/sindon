@@ -108,6 +108,74 @@ pub struct ComposedBlock {
     pub underline: Vec<Rect>,
 }
 
+/// A shaped, queryable buffer for the focused (non-composing) editing path,
+/// produced by [`shape_edit_plain`](TextEngine::shape_edit_plain) /
+/// [`shape_edit_rich`](TextEngine::shape_edit_rich).
+///
+/// The focused paint used to shape the whole (potentially long) value up to
+/// three times per keystroke: the content height misses the cache on every
+/// edit, the glyphs miss it *separately* under a highlighter (their rich key
+/// differs from the plain one), and the caret never consulted the cache at
+/// all. Like [`ComposedBlock`] did for the IME path, deriving the content
+/// height, glyphs, caret, selection rects, and click hit-tests from one buffer
+/// collapses that to a single shape per frame.
+///
+/// Unlike `ComposedBlock`, the derived queries are methods rather than
+/// precomputed fields: the caret and selection move *during* paint (deferred
+/// click / arrow-move resolution), so they must be readable after the buffer
+/// is shaped. Uncached by design — each keystroke's value is unique, so
+/// caching would only churn the LRU — and transient: drop it at the end of the
+/// frame that shaped it (the vendored cosmic-text zeroizes the buffer's text
+/// on drop).
+pub struct EditBuffer {
+    buffer: Buffer,
+    shaped: ShapedText,
+}
+
+impl EditBuffer {
+    /// Positioned glyphs and the block's total width/height, matching what
+    /// [`shape_text_attrs`](TextEngine::shape_text_attrs) (plain) or
+    /// [`shape_rich`](TextEngine::shape_rich) (rich) returns for the same
+    /// inputs.
+    pub fn shaped(&self) -> &ShapedText {
+        &self.shaped
+    }
+
+    /// Byte offset of the insertion point nearest block-local `(x, y)`,
+    /// matching [`offset_at_point_attrs`](TextEngine::offset_at_point_attrs).
+    /// `text` must be the string this buffer was shaped from (for a rich
+    /// buffer, the concatenation of its span texts).
+    pub fn hit(&self, text: &str, x: f32, y: f32) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+        match self.buffer.hit(x.max(0.0), y.max(0.0)) {
+            Some(cursor) => line_index_to_offset(text, cursor.line, cursor.index),
+            None => text.len(),
+        }
+    }
+
+    /// Selection rects for `[start, end)` including the FW-6 trailing sliver
+    /// on rows whose selection continues past their last glyph, matching
+    /// [`selection_rects_with_trailing_attrs`](TextEngine::selection_rects_with_trailing_attrs).
+    /// `text` must be the string this buffer was shaped from.
+    pub fn selection_rects_with_trailing(
+        &self,
+        text: &str,
+        start: usize,
+        end: usize,
+        font_size: f32,
+    ) -> Vec<Rect> {
+        selection_rects_in_buffer(
+            &self.buffer,
+            text,
+            start,
+            end,
+            Some(font_size * TRAILING_SELECTION_EM),
+        )
+    }
+}
+
 /// A rasterized glyph image.
 ///
 /// Most glyphs are single-channel **alpha masks** (`is_color == false`): one
@@ -470,6 +538,32 @@ impl TextEngine {
         )
     }
 
+    /// Build a shaped cosmic-text buffer for plain `text` under the given
+    /// metrics / wrap / attrs — the single construction point every plain-text
+    /// query (`shape_*`, caret, hit-test, selection) goes through, so they all
+    /// see the identical wrap configuration by construction.
+    fn build_plain_buffer(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> Buffer {
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_size(&mut self.font_system, max_width, None);
+        buffer.set_text(
+            &mut self.font_system,
+            text,
+            &attrs.as_cosmic(),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer
+    }
+
     /// Shape into positioned glyphs without consulting or populating the cache.
     /// The cached [`shape_text_attrs`](Self::shape_text_attrs) is a thin wrapper
     /// over this.
@@ -481,54 +575,8 @@ impl TextEngine {
         max_width: Option<f32>,
         attrs: &TextAttrs,
     ) -> ShapedText {
-        let metrics = Metrics::new(font_size, line_height);
-        let mut buffer = Buffer::new(&mut self.font_system, metrics);
-
-        buffer.set_size(&mut self.font_system, max_width, None);
-        buffer.set_text(
-            &mut self.font_system,
-            text,
-            &attrs.as_cosmic(),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut self.font_system, false);
-
-        let mut glyphs = Vec::new();
-        let mut total_width: f32 = 0.0;
-        let mut total_height: f32 = 0.0;
-
-        for run in buffer.layout_runs() {
-            total_width = total_width.max(run.line_w);
-            total_height = run.line_top + run.line_height;
-
-            // Place glyphs on a *script-independent* baseline rather than
-            // cosmic-text's `run.line_y`. cosmic centers the baseline using the
-            // line's actual fonts' ascent/descent, so a line's baseline jumps
-            // when its script mix changes — ASCII-only `[a]` and CJK-containing
-            // `[あ]` resolve different fallback fonts and so landed on different
-            // baselines (the brackets in `[a]` sat visibly lower). See
-            // [`stable_baseline`]. The downstream renderer subtracts
-            // `image.top` from `glyph.y`, so this is still a baseline Y.
-            let baseline = stable_baseline(run.line_top, run.line_height, font_size);
-            for glyph in run.glyphs.iter() {
-                let physical = glyph.physical((0.0, baseline), 1.0);
-                glyphs.push(ShapedGlyph {
-                    cache_key: physical.cache_key,
-                    x: physical.x,
-                    y: physical.y,
-                    color: None,
-                });
-            }
-        }
-
-        ShapedText {
-            glyphs,
-            width: total_width,
-            height: total_height,
-            span_boxes: Vec::new(),
-            decoration_lines: Vec::new(),
-        }
+        let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
+        extract_shaped_plain(&buffer, font_size)
     }
 
     /// Shape an inline rich-text run made of `spans`.
@@ -562,15 +610,15 @@ impl TextEngine {
         shaped
     }
 
-    /// Shape a rich run without consulting or populating the cache. The cached
-    /// [`shape_rich`](Self::shape_rich) is a thin wrapper over this.
-    fn shape_rich_uncached(
+    /// Build a shaped cosmic-text buffer for a rich span run — the rich twin
+    /// of [`build_plain_buffer`](Self::build_plain_buffer).
+    fn build_rich_buffer(
         &mut self,
         spans: &[TextSpan],
         font_size: f32,
         line_height: f32,
         max_width: Option<f32>,
-    ) -> ShapedText {
+    ) -> Buffer {
         let metrics = Metrics::new(font_size, line_height);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         buffer.set_size(&mut self.font_system, max_width, None);
@@ -599,84 +647,20 @@ impl TextEngine {
             None,
         );
         buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer
+    }
 
-        let mut glyphs = Vec::new();
-        let mut span_boxes: Vec<SpanBox> = Vec::new();
-        let mut decoration_lines: Vec<DecorationLine> = Vec::new();
-        let mut total_width: f32 = 0.0;
-        let mut total_height: f32 = 0.0;
-
-        for run in buffer.layout_runs() {
-            total_width = total_width.max(run.line_w);
-            total_height = run.line_top + run.line_height;
-            // Script-independent baseline, replacing cosmic-text's `run.line_y`
-            // (see the plain path and [`stable_baseline`]). Used both to place
-            // glyphs and to anchor decoration lines, so under/strike-through
-            // track the repositioned glyphs.
-            let baseline = stable_baseline(run.line_top, run.line_height, font_size);
-            // Accumulate the horizontal extent of consecutive glyphs sharing a
-            // metadata (= span index) on this line. A group is flushed whenever
-            // the span changes and at end-of-line, so each span gets one box
-            // (and any decoration line) per visual line it occupies.
-            let mut group: Option<(usize, f32, f32)> = None; // (span, min_x, max_x)
-            for glyph in run.glyphs.iter() {
-                let color = glyph.color_opt.map(cosmic_to_shroud);
-                let physical = glyph.physical((0.0, baseline), 1.0);
-                glyphs.push(ShapedGlyph {
-                    cache_key: physical.cache_key,
-                    x: physical.x,
-                    y: physical.y,
-                    color,
-                });
-
-                let x0 = glyph.x;
-                let x1 = glyph.x + glyph.w;
-                match group {
-                    Some((m, min, max)) if m == glyph.metadata => {
-                        group = Some((m, min.min(x0), max.max(x1)));
-                    }
-                    _ => {
-                        if let Some((m, min, max)) = group.take() {
-                            flush_group(
-                                &mut span_boxes,
-                                &mut decoration_lines,
-                                spans,
-                                m,
-                                min,
-                                max,
-                                run.line_top,
-                                run.line_height,
-                                baseline,
-                                font_size,
-                            );
-                        }
-                        group = Some((glyph.metadata, x0, x1));
-                    }
-                }
-            }
-            if let Some((m, min, max)) = group.take() {
-                flush_group(
-                    &mut span_boxes,
-                    &mut decoration_lines,
-                    spans,
-                    m,
-                    min,
-                    max,
-                    run.line_top,
-                    run.line_height,
-                    baseline,
-                    font_size,
-                );
-            }
-        }
-
-        ShapedText {
-            glyphs,
-            width: total_width,
-            height: total_height,
-            span_boxes,
-            decoration_lines,
-        }
+    /// Shape a rich run without consulting or populating the cache. The cached
+    /// [`shape_rich`](Self::shape_rich) is a thin wrapper over this.
+    fn shape_rich_uncached(
+        &mut self,
+        spans: &[TextSpan],
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> ShapedText {
+        let buffer = self.build_rich_buffer(spans, font_size, line_height, max_width);
+        extract_shaped_rich(&buffer, spans, font_size)
     }
 
     /// Compute the visual position of the cursor sitting at the *end* of
@@ -728,17 +712,8 @@ impl TextEngine {
             return (0.0, 0.0);
         }
 
-        let metrics = Metrics::new(font_size, line_height);
-        let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_size(&mut self.font_system, max_width, None);
-        buffer.set_text(
-            &mut self.font_system,
-            text_before_cursor,
-            &attrs.as_cosmic(),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        let buffer =
+            self.build_plain_buffer(text_before_cursor, font_size, line_height, max_width, attrs);
 
         // cosmic-text 0.18 yields one run per visual line — including a
         // zero-width run for an empty BufferLine produced by a trailing
@@ -810,17 +785,7 @@ impl TextEngine {
         if text.is_empty() {
             return 0;
         }
-        let metrics = Metrics::new(font_size, line_height);
-        let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_size(&mut self.font_system, max_width, None);
-        buffer.set_text(
-            &mut self.font_system,
-            text,
-            &attrs.as_cosmic(),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
 
         let hx = x.max(0.0);
         let hy = y.max(0.0);
@@ -963,86 +928,12 @@ impl TextEngine {
         attrs: &TextAttrs,
         trailing: bool,
     ) -> Vec<Rect> {
-        /// Trailing-sliver width as a fraction of the font size — roughly a
-        /// space advance, enough to read as "the break is selected" without
-        /// looking like a stray glyph.
-        const TRAILING_SELECTION_EM: f32 = 0.33;
-
         if text.is_empty() || start >= end {
             return Vec::new();
         }
-        let lo = start.min(text.len());
-        let hi = end.min(text.len());
-        let metrics = Metrics::new(font_size, line_height);
-        let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_size(&mut self.font_system, max_width, None);
-        buffer.set_text(
-            &mut self.font_system,
-            text,
-            &attrs.as_cosmic(),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut self.font_system, false);
-
-        let (lo_line, lo_idx) = offset_to_line_index(text, lo);
-        let (hi_line, hi_idx) = offset_to_line_index(text, hi);
-        let cursor_lo = Cursor::new(lo_line, lo_idx);
-        let cursor_hi = Cursor::new(hi_line, hi_idx);
-
-        // Byte offset where each `\n`-delimited line starts, indexed by the
-        // cosmic-text buffer line index (`run.line_i`). Lets us map a run's
-        // per-line glyph byte ranges back into global offsets for the
-        // trailing-sliver test. Only needed when `trailing` is set.
-        let line_starts: Vec<usize> = if trailing {
-            let mut v = vec![0usize];
-            v.extend(
-                text.bytes()
-                    .enumerate()
-                    .filter(|(_, b)| *b == b'\n')
-                    .map(|(i, _)| i + 1),
-            );
-            v
-        } else {
-            Vec::new()
-        };
-        let sliver_w = font_size * TRAILING_SELECTION_EM;
-
-        let mut rects = Vec::new();
-        for run in buffer.layout_runs() {
-            // `highlight` returns the pixel span of this run's glyphs whose
-            // cursor falls within [lo, hi]. A run with no intersecting glyphs
-            // (e.g. a blank line between the endpoints) yields None.
-            if let Some((x, w)) = run.highlight(cursor_lo, cursor_hi) {
-                if w > 0.0 {
-                    rects.push(Rect::new(x, run.line_top, w, run.line_height));
-                }
-            }
-
-            // Trailing sliver: when the selection reaches past this visual
-            // row's last glyph, the line break / soft-wrap joint after it is
-            // selected, so draw a small block at the row's right edge. The
-            // glyph byte ranges are line-relative, so rebase through
-            // `line_starts[run.line_i]` to compare against the global
-            // [lo, hi). An empty run (blank line) ends at the line start and
-            // anchors the sliver at the left edge.
-            if trailing {
-                let line_start = line_starts.get(run.line_i).copied().unwrap_or(0);
-                let (row_end_global, row_right_x) = match run.glyphs.last() {
-                    Some(g) => (line_start + g.end, g.x + g.w),
-                    None => (line_start, 0.0),
-                };
-                if lo <= row_end_global && row_end_global < hi {
-                    rects.push(Rect::new(
-                        row_right_x,
-                        run.line_top,
-                        sliver_w,
-                        run.line_height,
-                    ));
-                }
-            }
-        }
-        rects
+        let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
+        let sliver_w = trailing.then_some(font_size * TRAILING_SELECTION_EM);
+        selection_rects_in_buffer(&buffer, text, start, end, sliver_w)
     }
 
     /// Block-relative `(x, y)` of the caret at byte `offset` into `text`,
@@ -1092,20 +983,10 @@ impl TextEngine {
         if text.is_empty() {
             return (0.0, 0.0);
         }
-        // Shape the block once, then read the caret off it. The composing paint
-        // path reuses the same `caret_from_buffer` on a buffer it already holds,
-        // so the two callers stay bit-for-bit identical.
-        let metrics = Metrics::new(font_size, line_height);
-        let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_size(&mut self.font_system, max_width, None);
-        buffer.set_text(
-            &mut self.font_system,
-            text,
-            &attrs.as_cosmic(),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        // Shape the block once, then read the caret off it. The composing /
+        // editing paint paths reuse the same `caret_from_buffer` on a buffer
+        // they already hold, so all callers stay bit-for-bit identical.
+        let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
         self.caret_from_buffer(
             &buffer,
             text,
@@ -1162,8 +1043,28 @@ impl TextEngine {
                     }
                 }
             }
-            // No positive-width glyph at `off` (a hard `\n`): fall back to the
-            // end of the prefix's last line via a shape of the shorter prefix.
+            // No positive-width glyph at `off`. The common cause: the caret
+            // rests at the end of a hard line, so `off` points at the `\n`
+            // itself, which shapes to nothing highlightable. The historical
+            // answer — shape the prefix `text[..off]` and read the end of its
+            // last run — is exactly the right edge of `lo_line`'s last visual
+            // row: the prefix ends at that complete hard line, and a line's
+            // wrap never depends on the lines after it. This buffer already
+            // holds those rows, so read the answer off it instead of paying a
+            // whole prefix re-shape every frame the caret sits at a line end.
+            if text.as_bytes()[off] == b'\n' {
+                let mut row_end: Option<(f32, f32)> = None;
+                for run in buffer.layout_runs() {
+                    if run.line_i == lo_line {
+                        row_end = Some((run.line_w, run.line_top));
+                    }
+                }
+                if let Some(xy) = row_end {
+                    return xy;
+                }
+            }
+            // Some other zero-width glyph (exotic): keep the prefix-shape
+            // fallback for exactness.
             return self.cursor_position_attrs(
                 &text[..off],
                 font_size,
@@ -1200,47 +1101,13 @@ impl TextEngine {
         caret_offset: usize,
         underline_range: (usize, usize),
     ) -> ComposedBlock {
-        let metrics = Metrics::new(font_size, line_height);
-        let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_size(&mut self.font_system, max_width, None);
-        buffer.set_text(
-            &mut self.font_system,
-            text,
-            &attrs.as_cosmic(),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
+        let shaped = extract_shaped_plain(&buffer, font_size);
 
-        // Glyphs (mirrors `shape_text_attrs_uncached`).
-        let mut glyphs = Vec::new();
-        let mut total_width: f32 = 0.0;
-        let mut total_height: f32 = 0.0;
-        for run in buffer.layout_runs() {
-            total_width = total_width.max(run.line_w);
-            total_height = run.line_top + run.line_height;
-            let baseline = stable_baseline(run.line_top, run.line_height, font_size);
-            for glyph in run.glyphs.iter() {
-                let physical = glyph.physical((0.0, baseline), 1.0);
-                glyphs.push(ShapedGlyph {
-                    cache_key: physical.cache_key,
-                    x: physical.x,
-                    y: physical.y,
-                    color: None,
-                });
-            }
-        }
-        let shaped = ShapedText {
-            glyphs,
-            width: total_width,
-            height: total_height,
-            span_boxes: Vec::new(),
-            decoration_lines: Vec::new(),
-        };
-
-        // Preedit underline (mirrors the non-trailing body of
-        // `selection_rects_impl`) and caret — both off the same buffer.
-        let underline = highlight_rects(&buffer, text, underline_range.0, underline_range.1);
+        // Preedit underline (the non-trailing selection body) and caret —
+        // both off the same buffer.
+        let underline =
+            selection_rects_in_buffer(&buffer, text, underline_range.0, underline_range.1, None);
         let caret = self.caret_from_buffer(
             &buffer,
             text,
@@ -1256,6 +1123,69 @@ impl TextEngine {
             caret,
             underline,
         }
+    }
+
+    /// Shape a focused `Input`'s plain value **once** into an [`EditBuffer`]
+    /// and derive everything the non-composing focused paint needs from it —
+    /// glyphs, content height, caret, selection, click hit-tests. See
+    /// [`EditBuffer`] for why. Uncached by design: every keystroke's value is
+    /// unique, so caching would only churn the LRU with transient entries.
+    pub fn shape_edit_plain(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> EditBuffer {
+        let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
+        let shaped = extract_shaped_plain(&buffer, font_size);
+        EditBuffer { buffer, shaped }
+    }
+
+    /// Rich twin of [`shape_edit_plain`](Self::shape_edit_plain) for a field
+    /// with a live highlighter: shapes the span tiling of the value instead.
+    /// Color-only spans shape to the identical layout as the plain value (see
+    /// the `Input` highlighter invariant), so caret / hit / selection queries
+    /// against this buffer agree with the plain-attrs standalone methods.
+    pub fn shape_edit_rich(
+        &mut self,
+        spans: &[TextSpan],
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> EditBuffer {
+        let buffer = self.build_rich_buffer(spans, font_size, line_height, max_width);
+        let shaped = extract_shaped_rich(&buffer, spans, font_size);
+        EditBuffer { buffer, shaped }
+    }
+
+    /// Block-relative caret at byte `offset`, read off an already-shaped
+    /// [`EditBuffer`] — matches
+    /// [`caret_at_offset_attrs`](Self::caret_at_offset_attrs) bit-for-bit
+    /// (both run through `caret_from_buffer`). Lives on the engine rather than
+    /// `EditBuffer` because the rare zero-width-glyph fallback shapes the
+    /// caret's prefix; `text` must be the string the buffer was shaped from.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_caret(
+        &mut self,
+        edit: &EditBuffer,
+        text: &str,
+        offset: usize,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> (f32, f32) {
+        self.caret_from_buffer(
+            &edit.buffer,
+            text,
+            offset,
+            font_size,
+            line_height,
+            max_width,
+            attrs,
+        )
     }
 
     /// Rasterize a glyph into an atlas-ready bitmap.
@@ -1317,13 +1247,29 @@ fn offset_to_line_index(text: &str, offset: usize) -> (usize, usize) {
     (line, index)
 }
 
+/// Trailing-sliver width as a fraction of the font size — roughly a
+/// space advance, enough to read as "the break is selected" without
+/// looking like a stray glyph.
+const TRAILING_SELECTION_EM: f32 = 0.33;
+
 /// Selection/underline rects for the cursor range `[start, end)` over an
-/// **already-shaped** `buffer`. This is the non-trailing body of
-/// [`TextEngine::selection_rects_attrs`] factored out so a caller that already
-/// holds a shaped buffer (the IME composing path) can get the rects without
-/// re-shaping. Keeping the two in lockstep is what lets the composing underline
-/// match the standalone one exactly.
-fn highlight_rects(buffer: &Buffer, text: &str, start: usize, end: usize) -> Vec<Rect> {
+/// **already-shaped** `buffer` — the shared body of the `selection_rects*`
+/// family, factored out so a caller that already holds a shaped buffer (the
+/// IME composing path's underline, [`EditBuffer`]'s selection) gets the rects
+/// without re-shaping. Keeping every caller on this one body is what lets them
+/// match the standalone methods exactly.
+///
+/// `sliver_w` adds the FW-6 trailing sliver of that width to every visual row
+/// whose selection continues onto the next one; `None` keeps the rects
+/// glyph-tight (caret geometry and the preedit underline reuse those and must
+/// not gain a phantom trailing mark).
+fn selection_rects_in_buffer(
+    buffer: &Buffer,
+    text: &str,
+    start: usize,
+    end: usize,
+    sliver_w: Option<f32>,
+) -> Vec<Rect> {
     if text.is_empty() || start >= end {
         return Vec::new();
     }
@@ -1333,11 +1279,55 @@ fn highlight_rects(buffer: &Buffer, text: &str, start: usize, end: usize) -> Vec
     let (hi_line, hi_idx) = offset_to_line_index(text, hi);
     let cursor_lo = Cursor::new(lo_line, lo_idx);
     let cursor_hi = Cursor::new(hi_line, hi_idx);
+
+    // Byte offset where each `\n`-delimited line starts, indexed by the
+    // cosmic-text buffer line index (`run.line_i`). Lets us map a run's
+    // per-line glyph byte ranges back into global offsets for the
+    // trailing-sliver test. Only needed when the sliver is requested.
+    let line_starts: Vec<usize> = if sliver_w.is_some() {
+        let mut v = vec![0usize];
+        v.extend(
+            text.bytes()
+                .enumerate()
+                .filter(|(_, b)| *b == b'\n')
+                .map(|(i, _)| i + 1),
+        );
+        v
+    } else {
+        Vec::new()
+    };
+
     let mut rects = Vec::new();
     for run in buffer.layout_runs() {
+        // `highlight` returns the pixel span of this run's glyphs whose
+        // cursor falls within [lo, hi]. A run with no intersecting glyphs
+        // (e.g. a blank line between the endpoints) yields None.
         if let Some((x, w)) = run.highlight(cursor_lo, cursor_hi) {
             if w > 0.0 {
                 rects.push(Rect::new(x, run.line_top, w, run.line_height));
+            }
+        }
+
+        // Trailing sliver: when the selection reaches past this visual
+        // row's last glyph, the line break / soft-wrap joint after it is
+        // selected, so draw a small block at the row's right edge. The
+        // glyph byte ranges are line-relative, so rebase through
+        // `line_starts[run.line_i]` to compare against the global
+        // [lo, hi). An empty run (blank line) ends at the line start and
+        // anchors the sliver at the left edge.
+        if let Some(sliver_w) = sliver_w {
+            let line_start = line_starts.get(run.line_i).copied().unwrap_or(0);
+            let (row_end_global, row_right_x) = match run.glyphs.last() {
+                Some(g) => (line_start + g.end, g.x + g.w),
+                None => (line_start, 0.0),
+            };
+            if lo <= row_end_global && row_end_global < hi {
+                rects.push(Rect::new(
+                    row_right_x,
+                    run.line_top,
+                    sliver_w,
+                    run.line_height,
+                ));
             }
         }
     }
@@ -1382,6 +1372,132 @@ const BASELINE_ASCENT_RATIO: f32 = 0.8;
 /// on the metrics every line shares, so every line lands on one baseline.
 fn stable_baseline(line_top: f32, line_height: f32, font_size: f32) -> f32 {
     line_top + (line_height - font_size) / 2.0 + BASELINE_ASCENT_RATIO * font_size
+}
+
+/// Read positioned glyphs and the block extent off an already-shaped plain
+/// buffer — the extraction half of the plain shape, shared by
+/// `shape_text_attrs_uncached` and the single-shape editing paths
+/// ([`ComposedBlock`], [`EditBuffer`]) so their glyphs match the standalone
+/// shape bit-for-bit.
+fn extract_shaped_plain(buffer: &Buffer, font_size: f32) -> ShapedText {
+    let mut glyphs = Vec::new();
+    let mut total_width: f32 = 0.0;
+    let mut total_height: f32 = 0.0;
+
+    for run in buffer.layout_runs() {
+        total_width = total_width.max(run.line_w);
+        total_height = run.line_top + run.line_height;
+
+        // Place glyphs on a *script-independent* baseline rather than
+        // cosmic-text's `run.line_y`. cosmic centers the baseline using the
+        // line's actual fonts' ascent/descent, so a line's baseline jumps
+        // when its script mix changes — ASCII-only `[a]` and CJK-containing
+        // `[あ]` resolve different fallback fonts and so landed on different
+        // baselines (the brackets in `[a]` sat visibly lower). See
+        // [`stable_baseline`]. The downstream renderer subtracts
+        // `image.top` from `glyph.y`, so this is still a baseline Y.
+        let baseline = stable_baseline(run.line_top, run.line_height, font_size);
+        for glyph in run.glyphs.iter() {
+            let physical = glyph.physical((0.0, baseline), 1.0);
+            glyphs.push(ShapedGlyph {
+                cache_key: physical.cache_key,
+                x: physical.x,
+                y: physical.y,
+                color: None,
+            });
+        }
+    }
+
+    ShapedText {
+        glyphs,
+        width: total_width,
+        height: total_height,
+        span_boxes: Vec::new(),
+        decoration_lines: Vec::new(),
+    }
+}
+
+/// Rich twin of [`extract_shaped_plain`]: glyphs carry per-span colors, and
+/// per-span / per-line boxes plus decoration lines are grouped back together
+/// via the glyph `metadata` (= span index) planted at buffer build time.
+fn extract_shaped_rich(buffer: &Buffer, spans: &[TextSpan], font_size: f32) -> ShapedText {
+    let mut glyphs = Vec::new();
+    let mut span_boxes: Vec<SpanBox> = Vec::new();
+    let mut decoration_lines: Vec<DecorationLine> = Vec::new();
+    let mut total_width: f32 = 0.0;
+    let mut total_height: f32 = 0.0;
+
+    for run in buffer.layout_runs() {
+        total_width = total_width.max(run.line_w);
+        total_height = run.line_top + run.line_height;
+        // Script-independent baseline, replacing cosmic-text's `run.line_y`
+        // (see the plain path and [`stable_baseline`]). Used both to place
+        // glyphs and to anchor decoration lines, so under/strike-through
+        // track the repositioned glyphs.
+        let baseline = stable_baseline(run.line_top, run.line_height, font_size);
+        // Accumulate the horizontal extent of consecutive glyphs sharing a
+        // metadata (= span index) on this line. A group is flushed whenever
+        // the span changes and at end-of-line, so each span gets one box
+        // (and any decoration line) per visual line it occupies.
+        let mut group: Option<(usize, f32, f32)> = None; // (span, min_x, max_x)
+        for glyph in run.glyphs.iter() {
+            let color = glyph.color_opt.map(cosmic_to_shroud);
+            let physical = glyph.physical((0.0, baseline), 1.0);
+            glyphs.push(ShapedGlyph {
+                cache_key: physical.cache_key,
+                x: physical.x,
+                y: physical.y,
+                color,
+            });
+
+            let x0 = glyph.x;
+            let x1 = glyph.x + glyph.w;
+            match group {
+                Some((m, min, max)) if m == glyph.metadata => {
+                    group = Some((m, min.min(x0), max.max(x1)));
+                }
+                _ => {
+                    if let Some((m, min, max)) = group.take() {
+                        flush_group(
+                            &mut span_boxes,
+                            &mut decoration_lines,
+                            spans,
+                            m,
+                            min,
+                            max,
+                            run.line_top,
+                            run.line_height,
+                            baseline,
+                            font_size,
+                        );
+                    }
+                    group = Some((glyph.metadata, x0, x1));
+                }
+            }
+        }
+        if let Some((m, min, max)) = group.take() {
+            flush_group(
+                &mut span_boxes,
+                &mut decoration_lines,
+                spans,
+                m,
+                min,
+                max,
+                run.line_top,
+                run.line_height,
+                baseline,
+                font_size,
+            );
+        }
+    }
+
+    ShapedText {
+        glyphs,
+        width: total_width,
+        height: total_height,
+        span_boxes,
+        decoration_lines,
+    }
 }
 
 /// Emit the span box for a finished glyph group, plus any decoration lines the
@@ -1517,5 +1633,23 @@ mod tests {
 
         e.clear_shape_cache();
         assert_eq!(e.shape_cache.map.len(), 0);
+    }
+
+    #[test]
+    fn edit_buffers_do_not_populate_the_cache() {
+        // The focused editing path shapes a unique string per keystroke;
+        // caching those would only churn the LRU with transient entries (and
+        // `shape_composing`'s may carry preedit text). All three single-shape
+        // paths must leave the cache untouched.
+        let mut e = TextEngine::new();
+        let attrs = TextAttrs::default();
+        let _ = e.shape_edit_plain("typing", 16.0, 20.0, None, &attrs);
+        let _ = e.shape_edit_rich(&[TextSpan::new("typing")], 16.0, 20.0, None);
+        let _ = e.shape_composing("typing", 16.0, 20.0, None, &attrs, 3, (0, 3));
+        assert_eq!(
+            e.shape_cache.map.len(),
+            0,
+            "single-shape editing paths must not populate the cache"
+        );
     }
 }
