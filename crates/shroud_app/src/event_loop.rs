@@ -917,6 +917,17 @@ impl ShroudEventLoop {
         }
     }
 
+    /// Arm the perf log's input→present timer (no-op unless `SHROUD_PERF` is
+    /// on and nothing is already pending). Call this only on paths that
+    /// dispatch an event *and* request a redraw — an input that legitimately
+    /// paints nothing (a bare modifier press, say) must not arm the timer, or
+    /// the next unrelated frame reports a phantom quarter-second latency.
+    fn perf_mark_input(&mut self, desc: &str) {
+        if self.perf_log.is_some() && self.perf_input.is_none() {
+            self.perf_input = Some((Instant::now(), desc.to_string()));
+        }
+    }
+
     /// Handle a paste combo. Text is preferred: clipboard text is replayed
     /// as a burst of `CharInput` events against the current focus. When the
     /// clipboard has no text but holds an image, the image is encoded to PNG
@@ -1230,9 +1241,6 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                if self.perf_log.is_some() && self.perf_input.is_none() {
-                    self.perf_input = Some((Instant::now(), "key".to_string()));
-                }
 
                 match &event.logical_key {
                     // Character input → CharInput event (or KeyDown when a
@@ -1247,11 +1255,13 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                         // by disabling default paste at app build time (not
                         // yet wired — file an issue if you need it).
                         if is_paste_combo(s, self.event_ctx.modifiers) {
+                            self.perf_mark_input("paste");
                             self.dispatch_paste();
                             return;
                         }
                         let events = translate_character(s, self.event_ctx.modifiers);
                         if !events.is_empty() {
+                            self.perf_mark_input("key");
                             if let Some(tree) = &mut self.tree {
                                 for ev in events {
                                     tree.dispatch_event(&ev, &mut self.event_ctx);
@@ -1270,6 +1280,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     // pipeline treats it as a printable character.
                     WinitKey::Named(named) => {
                         if let Some(event) = translate_named_key(named) {
+                            self.perf_mark_input("key");
                             if let Some(tree) = &mut self.tree {
                                 tree.dispatch_event(&event, &mut self.event_ctx);
                                 self.request_redraw();
@@ -1291,7 +1302,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             // splat the final `Commit` through the existing `CharInput`
             // path. See `translate_ime` for the full mapping.
             WindowEvent::Ime(ime) => {
-                if self.perf_log.is_some() && self.perf_input.is_none() {
+                if self.perf_log.is_some() {
                     // Length only — the perf log must never carry preedit or
                     // committed text (it may be the user's plaintext).
                     let desc = match &ime {
@@ -1300,7 +1311,18 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                         Ime::Enabled => "ime-on".to_string(),
                         Ime::Disabled => "ime-off".to_string(),
                     };
-                    self.perf_input = Some((Instant::now(), desc));
+                    // On Windows the composition keystroke arrives as
+                    // KeyboardInput a moment before its Ime event, so a
+                    // pending `key` is this same physical keystroke: keep its
+                    // (earlier) timestamp but let the IME label win, otherwise
+                    // every Japanese keystroke logs as a bare `key`.
+                    if let Some((_, d)) = self.perf_input.as_mut() {
+                        if d.as_str() == "key" {
+                            *d = desc;
+                        }
+                    } else {
+                        self.perf_input = Some((Instant::now(), desc));
+                    }
                 }
                 if let Some(tree) = &mut self.tree {
                     for event in translate_ime(&ime) {
