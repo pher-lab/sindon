@@ -78,11 +78,16 @@ shroud_widgets = { path = "crates/shroud_widgets" }
 shroud_platform = { path = "crates/shroud_platform" }
 shroud_app = { path = "crates/shroud_app" }
 
-# Fork of cosmic-text 0.18.2 vendored under third_party/. The only change is a
-# drop-zeroize on BufferLine's plaintext buffer so SecureText's transient
-# shape path leaves no un-zeroed plaintext residue on the heap (the framework's
-# zeroize-first promise; see crates/shroud_text/src/lib.rs). Same version as
-# upstream 0.18.2 so it satisfies the `cosmic-text = "0.18"` requirement above.
-# To update: re-vendor the new release into third_party/ and re-apply the patch.
+# Fork of cosmic-text 0.18.2 vendored under third_party/. Two changes, each
+# marked `// shroud fork:` in the source:
+#   1. A drop-zeroize on BufferLine's plaintext buffer so SecureText's transient
+#      shape path leaves no un-zeroed plaintext residue on the heap (the
+#      framework's zeroize-first promise; see crates/shroud_text/src/lib.rs).
+#   2. `set_rich_text` re-adds the trailing empty line that `set_text` keeps,
+#      which upstream drops via `BidiParagraphs` — so the plain and rich shape
+#      paths agree on line count / height / caret for text ending in a newline.
+# Same version as upstream 0.18.2 so it satisfies the `cosmic-text = "0.18"`
+# requirement above. To update: re-vendor the new release into third_party/ and
+# re-apply both patches.
 [patch.crates-io]
 cosmic-text = { path = "third_party/cosmic-text" }

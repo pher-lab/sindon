@@ -895,6 +895,27 @@ impl Buffer {
         // Discard excess lines now that we have reused as much of the existing allocations as possible.
         self.lines.truncate(line_count);
 
+        // shroud fork: mirror `set_text`'s trailing-empty-line guard. Upstream
+        // `set_rich_text` splits paragraphs with `BidiParagraphs`, which drops a
+        // trailing empty paragraph, and — unlike `set_text` — never re-adds the
+        // final empty line. That left the rich buffer one (empty) line shorter
+        // than the plain buffer for any string ending in a line break, so the
+        // plain and rich shape paths disagreed on content height *and* caret
+        // placement: a highlighted, focused `Input` measured one line short and
+        // could not put the caret on the trailing blank line. Re-add the empty
+        // line here so both paths produce identical line structure. `set_text`
+        // keys this off the last line's `LineEnding`; the rich path stamps every
+        // line with `LineEnding::default()`, so key off the source string
+        // instead (matching `LineIter`'s `\r` / `\n` split).
+        if matches!(string.chars().next_back(), Some('\n' | '\r')) {
+            self.lines.push(BufferLine::new(
+                "",
+                LineEnding::None,
+                AttrsList::new(default_attrs),
+                shaping,
+            ));
+        }
+
         self.lines.iter_mut().for_each(|line| {
             line.set_align(alignment);
         });
