@@ -1,4 +1,4 @@
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -680,6 +680,8 @@ impl App {
             last_ime_cursor_area: None,
             last_ime_allowed: None,
             fonts_loaded: false,
+            redraw_pending_since: Cell::new(None),
+            redraw_retry_count: Cell::new(0),
             perf_log: std::env::var("SHROUD_PERF")
                 .ok()
                 .and_then(|path| std::fs::File::create(path).ok())
@@ -908,12 +910,43 @@ struct ShroudEventLoop {
     perf_input: Option<(Instant, String)>,
     /// Session start, for the perf log's timestamp column.
     perf_start: Instant,
+    /// When the oldest still-unserved `request_redraw` was issued, or `None`
+    /// when every request has been answered by a `RedrawRequested`. Windows
+    /// drops the WM_PAINT behind `request_redraw` while the IME opens its
+    /// composition window — the first preedit of every composition session
+    /// painted 40–360ms late, rescued only by the next keystroke or the
+    /// frame-hook tick — so `about_to_wait` re-requests any redraw pending
+    /// longer than [`REDRAW_WATCHDOG`]. `Cell` so `request_redraw` can stay
+    /// `&self`.
+    redraw_pending_since: Cell<Option<Instant>>,
+    /// Consecutive watchdog re-requests that still produced no frame. Capped
+    /// at [`REDRAW_WATCHDOG_RETRIES`] so a window that legitimately cannot
+    /// paint (minimized, occluded) doesn't keep the loop waking at 50Hz —
+    /// the next input or tick re-arms the watchdog naturally.
+    redraw_retry_count: Cell<u8>,
 }
+
+/// How long a requested redraw may go unserved before the watchdog in
+/// `about_to_wait` asks again. Longer than any healthy request→frame gap
+/// (sub-millisecond normally; one vsync when animating), far shorter than the
+/// IME-swallowed stalls it exists to fix. A false fire is a coalesced,
+/// harmless duplicate WM_PAINT request.
+const REDRAW_WATCHDOG: Duration = Duration::from_millis(20);
+
+/// Give up re-requesting after this many unanswered watchdog fires until
+/// something else (input, tick) requests a redraw again.
+const REDRAW_WATCHDOG_RETRIES: u8 = 5;
 
 impl ShroudEventLoop {
     fn request_redraw(&self) {
         if let Some(window) = &self.window {
             window.request_redraw();
+            // Arm the redraw watchdog (see `about_to_wait`). First-wins so
+            // the deadline tracks the *oldest* unserved request.
+            if self.redraw_pending_since.get().is_none() {
+                self.redraw_pending_since.set(Some(Instant::now()));
+                self.redraw_retry_count.set(0);
+            }
         }
     }
 
@@ -1039,10 +1072,42 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // While a frame hook is registered, park the loop until the
-        // next scheduled tick. `next_tick` is anchored to prior fires,
-        // so this does not drift on every event.
-        if let Some(deadline) = self.next_tick {
+        // Redraw watchdog: if a `request_redraw` has gone unserved past
+        // `REDRAW_WATCHDOG`, ask again and keep the loop waking until the
+        // frame lands (or the retry cap gives up). This is what puts the
+        // first preedit of an IME composition on screen in ~20ms instead of
+        // whenever the next keystroke or tick happens to rescue it — Windows
+        // swallows the WM_PAINT while the IME opens its composition window.
+        let mut wake_at = self.next_tick;
+        if let Some(since) = self.redraw_pending_since.get() {
+            let mut deadline = since + REDRAW_WATCHDOG;
+            if Instant::now() >= deadline {
+                if self.redraw_retry_count.get() >= REDRAW_WATCHDOG_RETRIES {
+                    // Repeated asks going nowhere (minimized / occluded):
+                    // stop waking; the next input or tick re-arms.
+                    self.redraw_pending_since.set(None);
+                    deadline = wake_at.unwrap_or_else(Instant::now);
+                } else {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    self.redraw_retry_count
+                        .set(self.redraw_retry_count.get() + 1);
+                    let now = Instant::now();
+                    self.redraw_pending_since.set(Some(now));
+                    deadline = now + REDRAW_WATCHDOG;
+                }
+            }
+            if self.redraw_pending_since.get().is_some() {
+                wake_at = Some(wake_at.map_or(deadline, |t| t.min(deadline)));
+            }
+        }
+
+        // While a frame hook is registered (or a redraw is pending), park
+        // the loop until the earlier of the next scheduled tick and the
+        // watchdog deadline. `next_tick` is anchored to prior fires, so this
+        // does not drift on every event.
+        if let Some(deadline) = wake_at {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
     }
@@ -1371,6 +1436,11 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
 
             // ── Render ───────────────────────────────────────────
             WindowEvent::RedrawRequested => {
+                // The OS delivered a paint: every earlier `request_redraw`
+                // is answered by this frame, so disarm the watchdog.
+                self.redraw_pending_since.set(None);
+                self.redraw_retry_count.set(0);
+
                 if self.renderer.is_none() || self.tree.is_none() || self.paint_ctx.is_none() {
                     return;
                 }
