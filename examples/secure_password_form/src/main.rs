@@ -55,8 +55,15 @@ fn main() {
             // Password label
             tree.add_child(form, TextWidget::new("Password"));
 
-            // Password input (SecureInput — the star of the show)
-            tree.add_child(form, SecureInput::new().placeholder("Enter password"));
+            // Password input (SecureInput — the star of the show). `.revealable()`
+            // adds the eye toggle; revealed text still shapes through the
+            // uncached + secure-atlas path, so it never leaks into the cache.
+            tree.add_child(
+                form,
+                SecureInput::new()
+                    .placeholder("Enter password")
+                    .revealable(),
+            );
 
             // Login button — theme primary colors
             tree.add_child(form, Button::new("Login"));

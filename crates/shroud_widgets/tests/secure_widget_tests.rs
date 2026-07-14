@@ -954,6 +954,163 @@ fn pointer_focus_secure_input_shows_ring() {
     );
 }
 
+// ── SecureInput reveal toggle (opt-in eye) ────────────────────────
+//
+// `.revealable()` adds an eye affordance on the trailing edge. Clicking it
+// shows the plaintext — but through the *same* uncached + secure-atlas path as
+// SecureText, so a revealed secret never lands in the shape cache or the
+// persistent glyph atlas. Reveal is off by default and force-reset on blur /
+// clear so a secret is never left on screen.
+
+/// A 200x40 rect whose far-right square (x ∈ [160, 200]) is the eye zone.
+const REVEAL_RECT: shroud_core::Rect = shroud_core::Rect {
+    origin: Point { x: 0.0, y: 0.0 },
+    size: shroud_core::Size {
+        width: 200.0,
+        height: 40.0,
+    },
+};
+
+/// Click at `(x, y)` on `input` with `rect` as its layout.
+fn click_at(
+    input: &mut SecureInput,
+    ctx: &mut EventContext,
+    rect: shroud_core::Rect,
+    x: f32,
+    y: f32,
+) {
+    input.event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(x, y),
+            button: MouseButton::Left,
+        },
+        rect,
+        ctx,
+    );
+}
+
+#[test]
+fn secure_input_not_revealable_by_default() {
+    let mut input = SecureInput::new();
+    let mut ctx = EventContext::new();
+    input.event(&WidgetEvent::FocusGained, REVEAL_RECT, &mut ctx);
+    for ch in "abc".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, REVEAL_RECT, &mut ctx);
+    }
+    // A click at the far right (where the eye would be) just places the caret —
+    // there is no eye to toggle.
+    click_at(&mut input, &mut ctx, REVEAL_RECT, 185.0, 20.0);
+    assert!(
+        !input.is_revealed(),
+        "a plain SecureInput is never revealable"
+    );
+}
+
+#[test]
+fn secure_input_eye_click_reveals_plaintext_via_secure_atlas() {
+    let mut input = SecureInput::new().revealable();
+    let mut ctx = EventContext::new();
+    input.event(&WidgetEvent::FocusGained, REVEAL_RECT, &mut ctx);
+    for ch in "abc".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, REVEAL_RECT, &mut ctx);
+    }
+    assert!(!input.is_revealed(), "starts masked");
+
+    // Masked paint: dots go to the normal glyph atlas, nothing secure.
+    let mut p = PaintContext::default();
+    input.paint(REVEAL_RECT, &mut p);
+    assert!(!p.glyphs.is_empty(), "masked dots use the normal atlas");
+    assert!(p.secure_glyphs.is_empty(), "nothing secure while masked");
+
+    // Click the eye (far-right zone) → reveal.
+    click_at(&mut input, &mut ctx, REVEAL_RECT, 185.0, 20.0);
+    assert!(input.is_revealed(), "clicking the eye reveals");
+
+    // Revealed paint: the real text shapes into the secure (per-frame-zeroed)
+    // atlas and NOT the persistent normal atlas — that's the whole point.
+    let mut p2 = PaintContext::default();
+    input.paint(REVEAL_RECT, &mut p2);
+    assert!(
+        !p2.secure_glyphs.is_empty(),
+        "revealed plaintext must render via the secure atlas"
+    );
+    assert!(
+        p2.glyphs.is_empty(),
+        "revealed plaintext must NOT touch the normal glyph atlas"
+    );
+}
+
+#[test]
+fn secure_input_eye_click_does_not_move_caret() {
+    // Clicking the eye toggles reveal without consuming it as a caret click:
+    // the caret stays at the end, so typing still appends.
+    let mut input = SecureInput::new().revealable();
+    let mut ctx = EventContext::new();
+    input.event(&WidgetEvent::FocusGained, REVEAL_RECT, &mut ctx);
+    for ch in "abc".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, REVEAL_RECT, &mut ctx);
+    }
+    click_at(&mut input, &mut ctx, REVEAL_RECT, 185.0, 20.0);
+    // Paint so any pending click would be resolved into a caret move.
+    let mut p = PaintContext::default();
+    input.paint(REVEAL_RECT, &mut p);
+    input.event(&WidgetEvent::CharInput { ch: 'd' }, REVEAL_RECT, &mut ctx);
+    input.expose(|s| assert_eq!(s, "abcd", "eye click must not reposition the caret"));
+}
+
+#[test]
+fn secure_input_reveal_resets_on_blur() {
+    let mut input = SecureInput::new().revealable();
+    let mut ctx = EventContext::new();
+    input.event(&WidgetEvent::FocusGained, REVEAL_RECT, &mut ctx);
+    for ch in "pw".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, REVEAL_RECT, &mut ctx);
+    }
+    click_at(&mut input, &mut ctx, REVEAL_RECT, 185.0, 20.0);
+    assert!(input.is_revealed());
+
+    input.event(&WidgetEvent::FocusLost, REVEAL_RECT, &mut ctx);
+    assert!(!input.is_revealed(), "blur must re-mask a revealed field");
+}
+
+#[test]
+fn secure_input_reveal_resets_on_clear() {
+    let mut input = SecureInput::new().revealable();
+    let mut ctx = EventContext::new();
+    input.event(&WidgetEvent::FocusGained, REVEAL_RECT, &mut ctx);
+    for ch in "pw".chars() {
+        input.event(&WidgetEvent::CharInput { ch }, REVEAL_RECT, &mut ctx);
+    }
+    click_at(&mut input, &mut ctx, REVEAL_RECT, 185.0, 20.0);
+    assert!(input.is_revealed());
+
+    input.clear();
+    assert!(!input.is_revealed(), "clear must re-mask");
+}
+
+#[test]
+fn secure_input_no_eye_to_toggle_while_empty() {
+    // Revealable but empty: no eye paints (nothing to reveal), and a click in
+    // the reserved eye zone doesn't toggle.
+    let mut input = SecureInput::new().revealable();
+    let mut ctx = EventContext::new();
+    input.event(&WidgetEvent::FocusGained, REVEAL_RECT, &mut ctx);
+    click_at(&mut input, &mut ctx, REVEAL_RECT, 185.0, 20.0);
+    assert!(!input.is_revealed(), "empty field has no eye to toggle");
+}
+
+#[test]
+fn secure_input_revealable_empty_draws_no_eye() {
+    // An unfocused, empty, revealable field paints just the two chrome rects
+    // (bg + border) — the eye is gated on non-emptiness.
+    let ctx = paint_secure_input(SecureInput::new().revealable());
+    assert_eq!(
+        ctx.rects.len(),
+        2,
+        "revealable but empty: still just bg + border, no eye stamps"
+    );
+}
+
 #[test]
 fn secure_text_builder() {
     let _text = SecureText::new(SecureString::new("secret"))

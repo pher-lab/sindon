@@ -4,6 +4,18 @@
 //! `String` buffer. Display renders masked characters (●). The `SecureString`
 //! is zeroized when the widget is dropped or the owning scope is disposed.
 //!
+//! ## Reveal toggle (opt-in)
+//!
+//! An optional [`revealable`](SecureInput::revealable) eye affordance lets the
+//! user show the plaintext. When revealed, the real characters are shaped
+//! through the *same* path [`SecureText`](crate::SecureText) uses —
+//! [`shape_text_uncached`](shroud_text::TextEngine::shape_text_uncached) into
+//! the per-frame-zeroed secure atlas via
+//! [`draw_secure_glyph`](crate::PaintContext::draw_secure_glyph) — so showing a
+//! secret never lands it in the shape cache or the persistent glyph atlas, and
+//! the cosmic-text fork zeroizes every shaped line so nothing lingers on the
+//! heap. Reveal is off by default and force-reset to masked on blur / clear.
+//!
 //! ## Clearing (Phase 18d)
 //!
 //! There is deliberately no `Reactive<SecureString>` binding. Secrets don't
@@ -41,7 +53,10 @@ type LengthHandler = Box<dyn FnMut(usize)>;
 ///
 /// Key security properties:
 /// - Characters go directly into `SecureString` (no `String` intermediary).
-/// - Renders masked characters — the actual text is never rendered.
+/// - Renders masked characters by default; an opt-in
+///   [`revealable`](Self::revealable) eye toggle can show the plaintext, and
+///   even then it renders through the uncached + secure-atlas path (no shape
+///   cache, no persistent atlas, no heap residue).
 /// - `SecurityLevel::Protected` — inherits mlock, secure atlas, etc.
 /// - `SecureString` zeroizes on drop.
 ///
@@ -67,6 +82,16 @@ pub struct SecureInput {
     value: RefCell<SecureString>,
     /// Mask character to display.
     mask_char: char,
+    /// Whether the optional reveal (show-plaintext) eye toggle is offered.
+    /// Off unless [`revealable`](Self::revealable) is called. The eye only
+    /// paints while the field is non-empty.
+    revealable: bool,
+    /// Whether the plaintext is currently revealed. Toggled by clicking the
+    /// eye; force-reset to `false` on blur and on any clear so a secret is
+    /// never left on screen once the field loses focus. `Cell` because the
+    /// clear-driven reset in [`sync_clear`](Self::sync_clear) runs from the
+    /// `&self` paint path.
+    revealed: Cell<bool>,
     /// Placeholder text (shown when empty).
     placeholder: String,
     /// Font size in pixels (None = theme body size).
@@ -142,6 +167,8 @@ impl SecureInput {
         Self {
             value: RefCell::new(SecureString::with_capacity(max_bytes)),
             mask_char: '●',
+            revealable: false,
+            revealed: Cell::new(false),
             placeholder: String::new(),
             font_size: None,
             focused: false,
@@ -189,6 +216,26 @@ impl SecureInput {
     /// Set the mask character (default: ●).
     pub fn mask(mut self, ch: char) -> Self {
         self.mask_char = ch;
+        self
+    }
+
+    /// Enable the reveal (show-plaintext) eye toggle.
+    ///
+    /// Adds a small eye affordance on the trailing edge; clicking it toggles the
+    /// field between masked dots and the real characters. The revealed text is
+    /// shaped through the *same* uncached + secure-atlas path as
+    /// [`SecureText`](crate::SecureText), so showing a secret never lands it in
+    /// the shape cache or the persistent glyph atlas — and the cosmic-text fork
+    /// zeroizes every shaped line, so nothing lingers on the heap.
+    ///
+    /// Reveal is off by default and is force-reset to masked whenever the field
+    /// loses focus or is cleared, so a secret is never left on screen once the
+    /// user moves on. The eye paints only while the field is non-empty.
+    ///
+    /// The field keeps its no-selection / no-clipboard stance while revealed:
+    /// you can *see* the secret but still not select or copy it.
+    pub fn revealable(mut self) -> Self {
+        self.revealable = true;
         self
     }
 
@@ -346,10 +393,20 @@ impl SecureInput {
         self.focused
     }
 
+    /// Whether the plaintext is currently revealed (see
+    /// [`revealable`](Self::revealable)). Always `false` for a field that was
+    /// never made revealable.
+    pub fn is_revealed(&self) -> bool {
+        self.revealed.get()
+    }
+
     /// Clear the input, zeroizing the content.
     pub fn clear(&mut self) {
         self.value.borrow_mut().clear();
         self.cursor.set(0);
+        // Nothing left to reveal — drop back to masked so a subsequent entry
+        // doesn't start out exposed.
+        self.revealed.set(false);
     }
 
     fn resolve_bg(&self, colors: &shroud_core::Colors) -> Color {
@@ -365,6 +422,33 @@ impl SecureInput {
     /// else the theme's `focus.ring_color`. Mirrors `Input`.
     fn focus_indicator_color(&self, focus: &shroud_core::FocusStyle) -> Color {
         self.focus_ring_color.unwrap_or(focus.ring_color)
+    }
+
+    /// The trailing-edge square zone that hosts the reveal eye, in the same
+    /// coordinate space as `layout`. `None` unless the field is
+    /// [`revealable`](Self::revealable).
+    ///
+    /// Computed from `layout` alone — no theme / font metrics — so `event`
+    /// (which has no `PaintContext`) and `paint` agree on the hit region and
+    /// the reserved text inset without threading state between them. The zone
+    /// is a square the height of the field, right-aligned; the eye is drawn
+    /// centered inside it and the text box is inset to clear it. The eye paints
+    /// only while non-empty, but reserving the zone whenever `revealable` keeps
+    /// the text region from reflowing as content comes and goes.
+    fn reveal_hit_rect(&self, layout: Rect) -> Option<Rect> {
+        if !self.revealable {
+            return None;
+        }
+        let zone = layout.size.height.min(layout.size.width);
+        if zone <= 0.0 {
+            return None;
+        }
+        Some(Rect::new(
+            layout.origin.x + layout.size.width - zone,
+            layout.origin.y,
+            zone,
+            layout.size.height,
+        ))
     }
 
     /// Byte offset within the secure buffer of the char at `char_idx`
@@ -392,6 +476,7 @@ impl SecureInput {
             if v != self.last_clear_version.get() {
                 self.value.borrow_mut().clear();
                 self.cursor.set(0);
+                self.revealed.set(false);
                 self.last_clear_version.set(v);
             }
         }
@@ -491,7 +576,10 @@ impl Widget for SecureInput {
 
         let text_x = layout.origin.x + self.pad_x;
         let text_y = layout.origin.y + (layout.size.height - font_size) / 2.0;
-        let max_width = layout.size.width - 2.0 * self.pad_x;
+        // Reserve the trailing eye zone whenever revealable so the text box
+        // doesn't reflow when the eye appears/disappears with (non-)emptiness.
+        let reveal_zone = self.reveal_hit_rect(layout).map_or(0.0, |z| z.size.width);
+        let max_width = (layout.size.width - 2.0 * self.pad_x - reveal_zone).max(0.0);
 
         let value = self.value.borrow();
         // X of the caret's leading edge. Defaults to the text start, so an
@@ -523,66 +611,143 @@ impl Widget for SecureInput {
                 }
             }
         } else {
-            // Render masked characters — never the actual text
             let char_count = value.char_count();
-            let mask_str: String = std::iter::repeat_n(self.mask_char, char_count).collect();
+            let line_height = font_size * 1.2;
 
-            let shaped =
-                ctx.text_engine
-                    .shape_text(&mask_str, font_size, font_size * 1.2, Some(max_width));
-
-            for glyph in &shaped.glyphs {
-                if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
-                    ctx.draw_glyph(
-                        text_x as i32 + glyph.x,
-                        text_y as i32 + glyph.y,
-                        image,
-                        text_color,
-                        glyph.cache_key,
+            if self.revealed.get() {
+                // Reveal: shape and paint the *real* secret through the exact
+                // path SecureText uses — `shape_text_uncached` (never the shape
+                // cache) into the per-frame-zeroed secure atlas via
+                // `draw_secure_glyph`. The cosmic-text fork zeroizes every
+                // shaped line, so no plaintext survives on the heap either. The
+                // caret is measured against the real glyphs.
+                value.expose(|s| {
+                    let shaped = ctx.text_engine.shape_text_uncached(
+                        s,
+                        font_size,
+                        line_height,
+                        Some(max_width),
                     );
+
+                    for glyph in &shaped.glyphs {
+                        if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
+                            ctx.draw_secure_glyph(
+                                text_x as i32 + glyph.x,
+                                text_y as i32 + glyph.y,
+                                image,
+                                text_color,
+                                glyph.cache_key,
+                            );
+                        }
+                    }
+
+                    // Pending click → caret, hit-tested against the real
+                    // glyphs. `offset_at_point` shapes through the same uncached
+                    // build path, so this too keeps the secret out of the cache.
+                    if let Some(click) = self.pending_click.replace(None) {
+                        let rel_x = click.x - text_x;
+                        let rel_y = (click.y - text_y).max(0.0);
+                        let byte = ctx.text_engine.offset_at_point(
+                            s,
+                            rel_x,
+                            rel_y,
+                            font_size,
+                            line_height,
+                            Some(max_width),
+                        );
+                        let clamped = byte.min(s.len());
+                        self.cursor
+                            .set(s[..clamped].chars().count().min(char_count));
+                    }
+
+                    let cursor = self.cursor.get().min(char_count);
+                    if cursor == char_count {
+                        if !shaped.glyphs.is_empty() {
+                            caret_x = text_x + shaped.width;
+                        }
+                    } else if cursor > 0 {
+                        let byte = s
+                            .char_indices()
+                            .nth(cursor)
+                            .map(|(b, _)| b)
+                            .unwrap_or(s.len());
+                        let prefix_shaped = ctx.text_engine.shape_text_uncached(
+                            &s[..byte],
+                            font_size,
+                            line_height,
+                            Some(max_width),
+                        );
+                        caret_x = text_x + prefix_shaped.width;
+                    }
+                    // cursor == 0 → caret_x stays at the left padding (text_x).
+                });
+            } else {
+                // Masked: shape only the homogeneous mask string (not a secret),
+                // so it can use the cached path and the standard glyph atlas.
+                let mask_str: String = std::iter::repeat_n(self.mask_char, char_count).collect();
+
+                let shaped =
+                    ctx.text_engine
+                        .shape_text(&mask_str, font_size, line_height, Some(max_width));
+
+                for glyph in &shaped.glyphs {
+                    if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
+                        ctx.draw_glyph(
+                            text_x as i32 + glyph.x,
+                            text_y as i32 + glyph.y,
+                            image,
+                            text_color,
+                            glyph.cache_key,
+                        );
+                    }
                 }
+
+                // Resolve a pending left-click into a caret position. Hit-test
+                // the click against the masked glyphs (`mask_str`) — never the
+                // real text — then map the byte offset back to a char index. The
+                // mask string is homogeneous, so `byte / mask_char.len_utf8()`
+                // is the char index.
+                if let Some(click) = self.pending_click.replace(None) {
+                    let rel_x = click.x - text_x;
+                    let rel_y = (click.y - text_y).max(0.0);
+                    let byte = ctx.text_engine.offset_at_point(
+                        &mask_str,
+                        rel_x,
+                        rel_y,
+                        font_size,
+                        line_height,
+                        Some(max_width),
+                    );
+                    self.cursor
+                        .set((byte / self.mask_char.len_utf8()).min(char_count));
+                }
+
+                // Caret x at the cursor. The caret can't be measured against the
+                // real text (mask glyphs differ in advance from the secret's
+                // glyphs), so it's positioned against the rendered dots: shape
+                // the masked prefix `[0, cursor)` and take its advance width.
+                let cursor = self.cursor.get().min(char_count);
+                if cursor == char_count {
+                    if !shaped.glyphs.is_empty() {
+                        caret_x = text_x + shaped.width;
+                    }
+                } else if cursor > 0 {
+                    let prefix: String = std::iter::repeat_n(self.mask_char, cursor).collect();
+                    let prefix_shaped = ctx.text_engine.shape_text(
+                        &prefix,
+                        font_size,
+                        line_height,
+                        Some(max_width),
+                    );
+                    caret_x = text_x + prefix_shaped.width;
+                }
+                // cursor == 0 → caret_x stays at the left padding (text_x).
             }
 
-            // Resolve a pending left-click into a caret position. Hit-test the
-            // click against the masked glyphs (`mask_str`) — never the real
-            // text — then map the byte offset back to a char index. The mask
-            // string is homogeneous, so `byte / mask_char.len_utf8()` is the
-            // char index.
-            if let Some(click) = self.pending_click.replace(None) {
-                let rel_x = click.x - text_x;
-                let rel_y = (click.y - text_y).max(0.0);
-                let byte = ctx.text_engine.offset_at_point(
-                    &mask_str,
-                    rel_x,
-                    rel_y,
-                    font_size,
-                    font_size * 1.2,
-                    Some(max_width),
-                );
-                self.cursor
-                    .set((byte / self.mask_char.len_utf8()).min(char_count));
+            // Reveal eye affordance — only while there's something to reveal.
+            if let Some(zone) = self.reveal_hit_rect(layout) {
+                draw_eye(ctx, zone, placeholder_color, self.revealed.get());
             }
-
-            // Caret x at the cursor. The caret can't be measured against the
-            // real text (mask glyphs differ in advance from the secret's
-            // glyphs), so it's positioned against the rendered dots: shape the
-            // masked prefix `[0, cursor)` and take its advance width.
-            let cursor = self.cursor.get().min(char_count);
-            if cursor == char_count {
-                if !shaped.glyphs.is_empty() {
-                    caret_x = text_x + shaped.width;
-                }
-            } else if cursor > 0 {
-                let prefix: String = std::iter::repeat_n(self.mask_char, cursor).collect();
-                let prefix_shaped = ctx.text_engine.shape_text(
-                    &prefix,
-                    font_size,
-                    font_size * 1.2,
-                    Some(max_width),
-                );
-                caret_x = text_x + prefix_shaped.width;
-            }
-            // cursor == 0 → caret_x stays at the left padding (text_x).
         }
 
         // Caret (simple line when focused) — drawn for both the empty and
@@ -615,7 +780,7 @@ impl Widget for SecureInput {
         }
     }
 
-    fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
+    fn event(&mut self, event: &WidgetEvent, layout: Rect, ctx: &mut EventContext) -> EventResult {
         // Observe any queued clear before applying the event. A handler
         // may have bumped the trigger earlier this dispatch cycle.
         self.sync_clear();
@@ -623,11 +788,24 @@ impl Widget for SecureInput {
         let result = match event {
             WidgetEvent::MouseDown { position, button } => {
                 // Focus is already set by WidgetTree's click-to-focus path
-                // (dispatched FocusGained before this handler runs). Record a
-                // left-click so the next paint can place the caret where the
-                // user clicked, hit-tested against the masked glyphs.
+                // (dispatched FocusGained before this handler runs).
                 if *button == MouseButton::Left {
-                    self.pending_click.set(Some(*position));
+                    // A click on the reveal eye toggles plaintext visibility and
+                    // must not also place a caret. The eye is live only while
+                    // the field is non-empty (that's when it paints).
+                    let on_eye = !self.value.borrow().is_empty()
+                        && matches!(
+                            self.reveal_hit_rect(layout),
+                            Some(hit) if hit.contains(*position)
+                        );
+                    if on_eye {
+                        self.revealed.set(!self.revealed.get());
+                    } else {
+                        // Record the click so the next paint can place the caret
+                        // where the user clicked, hit-tested against the rendered
+                        // glyphs (masked dots, or the real text when revealed).
+                        self.pending_click.set(Some(*position));
+                    }
                 }
                 EventResult::Consumed
             }
@@ -639,6 +817,8 @@ impl Widget for SecureInput {
 
             WidgetEvent::FocusLost => {
                 self.focused = false;
+                // Never leave a secret revealed once focus leaves the field.
+                self.revealed.set(false);
                 EventResult::Ignored
             }
 
@@ -724,5 +904,81 @@ impl Widget for SecureInput {
         // clear the Enter handler bumped) after the buffer has settled.
         self.emit_len_if_changed();
         result
+    }
+}
+
+/// Stamp a round-capped stroke of diameter `thickness` from `a` to `b` by
+/// laying overlapping antialiased discs along the segment — the same primitive
+/// [`Checkbox`](crate::Checkbox) uses for its checkmark. Keeps line art
+/// axis-aligned (rects can't rotate; `push_rotation` is glyph-only) while
+/// reading as one smooth stroke with round caps.
+fn stroke_round(
+    ctx: &mut PaintContext,
+    a: (f32, f32),
+    b: (f32, f32),
+    thickness: f32,
+    color: Color,
+) {
+    let r = thickness / 2.0;
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    // Overlap the discs so the interior never gaps; clamp so a zero-length
+    // segment still stamps a single cap.
+    let step = (r * 0.5).max(0.35);
+    let n = (len / step).ceil().max(1.0) as i32;
+    for i in 0..=n {
+        let f = i as f32 / n as f32;
+        let cx = a.0 + dx * f;
+        let cy = a.1 + dy * f;
+        ctx.fill_rect_rounded(Rect::new(cx - r, cy - r, thickness, thickness), color, r);
+    }
+}
+
+/// Draw the reveal "eye" icon centered in `zone`.
+///
+/// Two mirrored parabolic lids meeting at the corners with a filled pupil disc
+/// between them; when `revealed`, a diagonal slash crosses it — the familiar
+/// "click to hide" affordance. Built from AA disc stamps (see
+/// [`stroke_round`]) so no rotated-rect primitive is needed, consistent with
+/// the Checkbox checkmark and the disclosure chevron.
+fn draw_eye(ctx: &mut PaintContext, zone: Rect, color: Color, revealed: bool) {
+    let cx = zone.origin.x + zone.size.width / 2.0;
+    let cy = zone.origin.y + zone.size.height / 2.0;
+    // Eye extent relative to the (square) zone — leaves a comfortable margin.
+    let s = zone.size.height.min(zone.size.width) * 0.5;
+    let half_w = s * 0.5;
+    let half_h = s * 0.30;
+    let pupil_r = s * 0.15;
+    let thickness = (s * 0.09).max(1.3);
+
+    // Two lids: y = ±half_h·(1 − (x/half_w)²), sampled and stamped as arcs that
+    // meet at the almond corners (x = ±half_w, y = 0).
+    const SAMPLES: usize = 12;
+    for sign in [-1.0f32, 1.0] {
+        let mut prev: Option<(f32, f32)> = None;
+        for i in 0..=SAMPLES {
+            let t = i as f32 / SAMPLES as f32;
+            let x = -half_w + 2.0 * half_w * t;
+            let norm = x / half_w;
+            let y = sign * half_h * (1.0 - norm * norm);
+            let pt = (cx + x, cy + y);
+            if let Some(p) = prev {
+                stroke_round(ctx, p, pt, thickness, color);
+            }
+            prev = Some(pt);
+        }
+    }
+
+    // Pupil.
+    ctx.fill_rect_rounded(
+        Rect::new(cx - pupil_r, cy - pupil_r, pupil_r * 2.0, pupil_r * 2.0),
+        color,
+        pupil_r,
+    );
+
+    // Slash across the eye when revealed ("click to hide").
+    if revealed {
+        let d = s * 0.62;
+        stroke_round(ctx, (cx - d, cy + d), (cx + d, cy - d), thickness, color);
     }
 }

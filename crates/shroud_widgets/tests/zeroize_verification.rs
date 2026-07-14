@@ -33,10 +33,10 @@
 
 #![cfg(windows)]
 
-use shroud_core::Point;
+use shroud_core::{Point, Rect};
 use shroud_widgets::{
-    ClearTrigger, Container, EventContext, MouseButton, PaintContext, SecureInput, WidgetEvent,
-    WidgetTree,
+    ClearTrigger, Container, EventContext, MouseButton, PaintContext, SecureInput, Widget,
+    WidgetEvent, WidgetTree,
 };
 
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
@@ -355,5 +355,99 @@ fn secure_input_clear_leaves_no_canary_in_memory() {
         "after full drop the SecureString buffer's bytes must be gone \
          (residue +{})",
         post_drop_residue
+    );
+}
+
+/// Reveal-toggle counterpart to the test above.
+///
+/// The masked path never feeds the secret to cosmic-text, so the test above
+/// asserting `paint_extra == 0` is almost trivially true for it. The reveal
+/// path is the interesting case: painting a *revealed* `SecureInput` shapes the
+/// **real** plaintext through cosmic-text (`shape_text_uncached`). This is only
+/// safe because the vendored cosmic-text fork holds each shaped line in a
+/// `Zeroizing<String>` that wipes when the transient shape buffer drops at the
+/// end of the call — the whole reason the fork exists.
+///
+/// So: type a canary, reveal it, paint, and assert the revealed paint added
+/// **zero** persistent copies beyond the `SecureString` buffer itself. If the
+/// fork's zeroize were dropped (or reveal routed through the cached/persistent
+/// path), the shaped plaintext would linger and this would fail.
+#[test]
+fn secure_input_reveal_paint_leaves_no_canary() {
+    let canary = build_canary();
+    let canary_str = std::str::from_utf8(&canary).expect("ASCII A-Z by construction");
+
+    let mut scanner = Scanner::new();
+    let _ = scan_self_for(&mut scanner, &canary); // warm-up
+    let baseline = scan_self_for(&mut scanner, &canary);
+
+    let (after_type, after_reveal_paint) = {
+        // Bare widget (no tree) so we can assert `is_revealed()` directly and
+        // aim the eye click precisely. Field is 400x40 → the eye zone is the
+        // trailing 40px square (x ∈ [360, 400]).
+        let mut input = SecureInput::new().revealable();
+        let rect = Rect::new(0.0, 0.0, 400.0, 40.0);
+        let mut ev = EventContext::new();
+
+        input.event(&WidgetEvent::FocusGained, rect, &mut ev);
+        for ch in canary_str.chars() {
+            input.event(&WidgetEvent::CharInput { ch }, rect, &mut ev);
+        }
+        let after_type = scan_self_for(&mut scanner, &canary);
+
+        // Click the eye → reveal.
+        input.event(
+            &WidgetEvent::MouseDown {
+                position: Point::new(382.0, 20.0),
+                button: MouseButton::Left,
+            },
+            rect,
+            &mut ev,
+        );
+        assert!(input.is_revealed(), "clicking the eye must reveal");
+
+        // Paint the revealed field: shapes the REAL secret via cosmic-text.
+        let mut p = PaintContext::default();
+        input.paint(rect, &mut p);
+        assert!(
+            !p.secure_glyphs.is_empty(),
+            "a revealed field must actually shape the secret (into the secure atlas)"
+        );
+        let after_reveal_paint = scan_self_for(&mut scanner, &canary);
+
+        (after_type, after_reveal_paint)
+    };
+
+    let typing_copies = after_type.matches.saturating_sub(baseline.matches);
+    let reveal_paint_extra = after_reveal_paint
+        .matches
+        .saturating_sub(after_type.matches);
+
+    eprintln!("=== SecureInput reveal-paint residue ===");
+    eprintln!("baseline matches:            {}", baseline.matches);
+    eprintln!(
+        "after typing:                {}  (+{} via SecureString buffer)",
+        after_type.matches, typing_copies
+    );
+    eprintln!(
+        "after revealed paint:        {}  (+{} via cosmic-text — should be 0)",
+        after_reveal_paint.matches, reveal_paint_extra
+    );
+
+    assert!(
+        typing_copies >= 1,
+        "typing the canary must produce at least one copy \
+         (baseline={}, after_type={})",
+        baseline.matches,
+        after_type.matches
+    );
+
+    assert_eq!(
+        reveal_paint_extra, 0,
+        "revealing shapes the real secret through the uncached + zeroizing \
+         cosmic-text fork, so the shaped plaintext must not survive the paint \
+         call (saw +{} extra copies — the fork's zeroize is not firing, or \
+         reveal is routing through a retained path)",
+        reveal_paint_extra
     );
 }
