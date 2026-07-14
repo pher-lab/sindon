@@ -928,6 +928,23 @@ impl ShroudEventLoop {
         }
     }
 
+    /// Write an event-*arrival* line to the perf log (no-op with logging
+    /// off). Frame lines only show when a frame painted; arrival lines pin
+    /// when the OS actually delivered the event, so a slow input can be
+    /// attributed to late delivery vs. a late frame. Like the frame lines,
+    /// this must never carry text — descriptions are kinds and lengths only.
+    fn perf_event_line(&mut self, desc: &str) {
+        if let Some(log) = self.perf_log.as_mut() {
+            use std::io::Write;
+            let _ = writeln!(
+                log,
+                "[{:9.1}] event={desc}",
+                self.perf_start.elapsed().as_secs_f64() * 1e3
+            );
+            let _ = log.flush();
+        }
+    }
+
     /// Handle a paste combo. Text is preferred: clipboard text is replayed
     /// as a burst of `CharInput` events against the current focus. When the
     /// clipboard has no text but holds an image, the image is encoded to PNG
@@ -1168,6 +1185,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     window.set_ime_allowed(true);
                 }
                 self.last_ime_allowed = Some(true);
+                self.perf_event_line("push-ime-allowed(true)");
             }
 
             WindowEvent::Resized(size) => {
@@ -1241,6 +1259,9 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                // Arrival marker for every pressed key (identity withheld —
+                // modifiers and characters both log as `key`).
+                self.perf_event_line("key");
 
                 match &event.logical_key {
                     // Character input → CharInput event (or KeyDown when a
@@ -1311,6 +1332,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                         Ime::Enabled => "ime-on".to_string(),
                         Ime::Disabled => "ime-off".to_string(),
                     };
+                    self.perf_event_line(&desc);
                     // On Windows the composition keystroke arrives as
                     // KeyboardInput a moment before its Ime event, so a
                     // pending `key` is this same physical keystroke: keep its
@@ -1511,6 +1533,11 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                         window.set_ime_allowed(target_allowed);
                     }
                     self.last_ime_allowed = Some(target_allowed);
+                    self.perf_event_line(if target_allowed {
+                        "push-ime-allowed(true)"
+                    } else {
+                        "push-ime-allowed(false)"
+                    });
                 }
 
                 // Pump the next frame while any animation is mid-flight. An
