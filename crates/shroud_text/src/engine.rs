@@ -1113,7 +1113,7 @@ impl TextEngine {
 
     /// Shape the IME-composition display string **once** and return the glyphs,
     /// the caret at `caret_offset`, and the underline rects for the preedit
-    /// `underline` range — everything a composing [`Input`] paints. See
+    /// `underline` range — everything a composing `Input` paints. See
     /// [`ComposedBlock`]. Uncached by design: each keystroke's composed string
     /// is unique, so caching would only churn the LRU with transient entries.
     #[allow(clippy::too_many_arguments)]
