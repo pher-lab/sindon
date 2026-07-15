@@ -17,3 +17,9 @@ shroud_platform = { workspace = true }
 winit = { workspace = true }
 log = { workspace = true }
 pollster = "0.4"
+# OS accessibility (screen-reader) exposure. Pinned to the winit-0.30
+# compatible line: accesskit_winit 0.33 depends on winit ^0.30.5 and
+# accesskit ^0.24. These are the only crates in the workspace that link
+# accesskit — the vocabulary (shroud_core) and widgets stay accesskit-free.
+accesskit = "0.24"
+accesskit_winit = "0.33"

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::accessibility::{A11Y_WINDOW_ROOT, AccessEntry, AccessSnapshot};
 use crate::event::{
     EventContext, EventResult, Key, MouseButton, NamedKey, TreeCommand, WidgetEvent,
 };
@@ -13,7 +14,7 @@ use crate::reactive_children::ReactiveChildren;
 use crate::scroll_view::ScrollView;
 use crate::shortcut::ShortcutRouter;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Point, Rect, SecurityLevel, Size, Theme};
+use shroud_core::{AccessNode, AccessRole, Point, Rect, SecurityLevel, Size, Theme};
 use shroud_layout::{FlexStyle, LayoutEngine, LayoutNodeId};
 use shroud_text::TextEngine;
 
@@ -1260,6 +1261,122 @@ impl WidgetTree {
             self.paint_node(child, ctx);
         }
         node.widget.paint_post_children(layout_rect, ctx);
+    }
+
+    /// Build a framework-native accessibility snapshot of the whole tree
+    /// (main root + every overlay layer) for OS assistive technology.
+    ///
+    /// See [`crate::accessibility`]. The caller (`shroud_app`) invokes this
+    /// only while an assistive technology is connected, so its cost — a tree
+    /// walk plus a reactive read per node for the label / value — is paid only
+    /// when a screen reader is actually listening.
+    ///
+    /// Every node's bounds are in viewport coordinates (a layer's anchor
+    /// offset is folded in), matching what paint and hit-testing use.
+    pub fn accessibility_snapshot(&self) -> AccessSnapshot {
+        let mut entries: Vec<AccessEntry> = Vec::new();
+        let mut root_children: Vec<u64> = Vec::new();
+
+        // Main tree, if any and visible.
+        if let Some(root) = self.root {
+            if self.node(root).is_some_and(|n| n.widget.visible()) {
+                root_children.push(root as u64);
+                self.walk_access(root, (0.0, 0.0), None, &mut entries);
+            }
+        }
+
+        // Overlay layers. The topmost interactive layer is the modal surface;
+        // each layer's rects are in its own local frame, so we fold in the
+        // layer offset to land them in viewport space (as paint does).
+        let modal_root = self.topmost_interactive_layer().map(|l| l.root);
+        let layer_roots: Vec<(usize, (f32, f32))> =
+            self.layers.iter().map(|l| (l.root, l.offset)).collect();
+        for (layer_root, offset) in layer_roots {
+            if self.node(layer_root).is_some_and(|n| n.widget.visible()) {
+                root_children.push(layer_root as u64);
+                self.walk_access(layer_root, offset, modal_root, &mut entries);
+            }
+        }
+
+        // Synthetic window root bundling the main tree and all layers under a
+        // single a11y root (accesskit requires exactly one).
+        entries.push(AccessEntry {
+            id: A11Y_WINDOW_ROOT,
+            node: AccessNode::new(AccessRole::Window),
+            bounds: Rect::new(0.0, 0.0, self.viewport.0, self.viewport.1),
+            children: root_children,
+            modal: false,
+        });
+
+        // Focus must name a node present in the snapshot; fall back to the
+        // window root if the focused widget just went invisible / away.
+        let focus_id = match self.focus.focused() {
+            Some(idx) if entries.iter().any(|e| e.id == idx as u64) => idx as u64,
+            _ => A11Y_WINDOW_ROOT,
+        };
+
+        AccessSnapshot {
+            root_id: A11Y_WINDOW_ROOT,
+            focus_id,
+            entries,
+        }
+    }
+
+    /// Emit access entries for `idx` and its visible descendants, shifting
+    /// each rect by `offset` (a layer's viewport offset; `(0, 0)` for the main
+    /// tree). `modal_root`, when it matches a node, flags that node as a modal
+    /// dialog surface.
+    fn walk_access(
+        &self,
+        idx: usize,
+        offset: (f32, f32),
+        modal_root: Option<usize>,
+        entries: &mut Vec<AccessEntry>,
+    ) {
+        let Some(node) = self.node(idx) else { return };
+        if !node.widget.visible() {
+            return;
+        }
+        let rect = self.layout.absolute_rect(node.layout_node);
+        let bounds = Rect::new(
+            rect.origin.x + offset.0,
+            rect.origin.y + offset.1,
+            rect.size.width,
+            rect.size.height,
+        );
+
+        let mut access = node
+            .widget
+            .accessibility()
+            .unwrap_or_else(|| AccessNode::new(AccessRole::Group));
+        let modal = modal_root == Some(idx);
+        if modal {
+            // A layer root is a container (Group by default); present it as a
+            // dialog surface so ATs announce the modal boundary.
+            access.role = AccessRole::Dialog;
+        }
+
+        // Only visible children are referenced, so every child id resolves to
+        // an entry we will emit (accesskit rejects dangling child refs).
+        let children: Vec<u64> = node
+            .children
+            .iter()
+            .filter(|&&c| self.node(c).is_some_and(|n| n.widget.visible()))
+            .map(|&c| c as u64)
+            .collect();
+
+        entries.push(AccessEntry {
+            id: idx as u64,
+            node: access,
+            bounds,
+            children,
+            modal,
+        });
+
+        let child_indices: Vec<usize> = node.children.clone();
+        for c in child_indices {
+            self.walk_access(c, offset, modal_root, entries);
+        }
     }
 
     /// Dispatch an event through the widget tree (hit-testing).

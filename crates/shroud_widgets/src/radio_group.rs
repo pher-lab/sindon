@@ -19,7 +19,7 @@ use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, Widget
 use crate::interaction::{InteractionState, dim_over, step_selection};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Color, Rect, Size};
+use shroud_core::{AccessNode, AccessRole, Color, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Reactive, Signal};
 
@@ -203,6 +203,18 @@ impl RadioGroup {
 impl Widget for RadioGroup {
     fn focusable(&self) -> bool {
         !self.disabled.get()
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        // MVP (read-only): the group is one node whose name is the selected
+        // option's label, so the active choice is announced. Per-option
+        // `RadioButton` child nodes (each selectable individually) are deferred
+        // to the operable slice — the same treatment as `Segmented`.
+        let mut node = AccessNode::new(AccessRole::TabList).disabled(self.disabled.get());
+        if let Some(label) = self.labels.get(self.selected_index()) {
+            node = node.name(label.clone());
+        }
+        Some(node)
     }
 
     fn style(&self) -> FlexStyle {

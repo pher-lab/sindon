@@ -10,6 +10,7 @@
 //! timers or async tasks) and [`AppScope::on_frame`] for per-frame tick
 //! callbacks that run on the UI thread.
 
+pub mod a11y;
 pub mod event_loop;
 
 pub use event_loop::{

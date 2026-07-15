@@ -18,7 +18,7 @@ use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, Widget
 use crate::interaction::{InteractionState, dim_over, step_selection};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Color, Rect, Size};
+use shroud_core::{AccessNode, AccessRole, Color, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Reactive, Signal};
 
@@ -212,6 +212,19 @@ impl Segmented {
 impl Widget for Segmented {
     fn focusable(&self) -> bool {
         !self.disabled.get()
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        // MVP (read-only) exposes the whole bar as one node whose name is the
+        // currently-selected label, so a screen reader announces the active
+        // choice. Per-segment `Tab` child nodes (each individually selectable)
+        // are deferred to the operable slice, where each option also needs its
+        // own action target.
+        let mut node = AccessNode::new(AccessRole::TabList).disabled(self.disabled.get());
+        if let Some(label) = self.labels.get(self.selected_index()) {
+            node = node.name(label.clone());
+        }
+        Some(node)
     }
 
     fn style(&self) -> FlexStyle {

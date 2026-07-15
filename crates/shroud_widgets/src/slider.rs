@@ -20,7 +20,7 @@ use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, Widget
 use crate::interaction::{InteractionState, dim_over};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Color, Rect, Size};
+use shroud_core::{AccessNode, AccessRange, AccessRole, Color, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Reactive, Signal};
 
@@ -231,6 +231,18 @@ impl Slider {
 impl Widget for Slider {
     fn focusable(&self) -> bool {
         !self.disabled.get()
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        Some(
+            AccessNode::new(AccessRole::Slider)
+                .numeric(AccessRange {
+                    min: self.min as f64,
+                    max: self.max as f64,
+                    now: self.get() as f64,
+                })
+                .disabled(self.disabled.get()),
+        )
     }
 
     fn style(&self) -> FlexStyle {

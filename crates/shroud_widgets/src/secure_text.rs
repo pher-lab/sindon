@@ -5,7 +5,7 @@
 
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, Rect, SecurityLevel};
+use shroud_core::{AccessNode, AccessRole, Color, Rect, SecurityLevel};
 use shroud_layout::FlexStyle;
 use shroud_security::SecureString;
 
@@ -88,6 +88,17 @@ impl SecureText {
 impl Widget for SecureText {
     fn security_level(&self) -> SecurityLevel {
         SecurityLevel::Sensitive
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        // Displays a secret (a decrypted note, a revealed field). Exposed as a
+        // protected, value-less label: a screen reader learns *that* protected
+        // content is here, never *what* it says. The buffer is never read.
+        Some(
+            AccessNode::new(AccessRole::Label)
+                .name("Protected content")
+                .protected(),
+        )
     }
 
     fn style(&self) -> FlexStyle {

@@ -2,6 +2,9 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use accesskit_winit::{Adapter, Event as A11yEvent, WindowEvent as A11yWindowEvent};
+
+use crate::a11y::snapshot_to_tree_update;
 use shroud_core::{Color, Colors, Point, Rect, Theme};
 use shroud_platform::{PlatformWindow, SecureClipboard, SystemTheme};
 use shroud_reactive::{Reactive, Signal};
@@ -167,12 +170,22 @@ where
 /// Kept internal — users only interact with the thin [`AppHandle`] API.
 /// Expand this enum if future phases need to carry data across the thread
 /// boundary (e.g. batched signal updates produced off the UI thread).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(crate) enum AppEvent {
     /// Request a redraw. Reactive values are re-read on paint, so this is
     /// how external producers (timer threads, async tasks, IPC) push UI
     /// updates without touching the widget tree directly.
     Wake,
+    /// An event from the accessibility adapter (an AT connected and wants the
+    /// initial tree, requested an action, or disconnected). Delivered through
+    /// the same event-loop proxy the adapter is handed in `resumed`.
+    Accessibility(A11yEvent),
+}
+
+impl From<A11yEvent> for AppEvent {
+    fn from(event: A11yEvent) -> Self {
+        AppEvent::Accessibility(event)
+    }
 }
 
 /// Thread-safe handle to a running shroud app.
@@ -360,6 +373,11 @@ struct AppConfig {
     /// [`TextEngine::set_default_font_family`](shroud_text::TextEngine::set_default_font_family),
     /// applied once after `fonts` are registered and before the first paint.
     default_font_family: Option<String>,
+    /// Whether to expose the UI to OS assistive technology (screen readers)
+    /// via an `accesskit` adapter. On by default; the adapter activates
+    /// lazily (only when an AT actually connects), so the steady-state cost
+    /// of leaving it on is a single branch per frame.
+    accessibility: bool,
 }
 
 impl Default for AppConfig {
@@ -388,6 +406,7 @@ impl Default for AppConfig {
             tick_interval: DEFAULT_TICK_INTERVAL,
             fonts: Vec::new(),
             default_font_family: None,
+            accessibility: true,
         }
     }
 }
@@ -593,6 +612,30 @@ impl App {
         self
     }
 
+    /// Expose the UI to OS assistive technology (screen readers) via an
+    /// `accesskit` adapter. **Defaults to `true`.**
+    ///
+    /// The adapter activates *lazily*: it does nothing until an assistive
+    /// technology actually connects, at which point the framework starts
+    /// publishing an accessibility tree built from the widget hierarchy
+    /// (roles, names, states, focus). While no AT is connected the per-frame
+    /// cost is a single `update_if_active` branch — so leaving accessibility on
+    /// is effectively free for users who don't use a screen reader, which is
+    /// why it is the default.
+    ///
+    /// Secret-bearing widgets (`SecureInput`, `SecureText`) are exposed as
+    /// masked / protected nodes whose plaintext is never placed in the tree, so
+    /// turning this on does not weaken the secret-aware guarantees.
+    ///
+    /// Flip to `false` for deployments that deliberately keep the process off
+    /// the OS accessibility surface entirely — a kiosk, or a high-security
+    /// context where even the (secret-free) UI structure should not be visible
+    /// to UI Automation / AT-SPI clients.
+    pub fn accessibility(mut self, on: bool) -> Self {
+        self.config.accessibility = on;
+        self
+    }
+
     /// Cadence for the idle tick when an [`AppScope::on_frame`] hook is
     /// registered. Defaults to 500 ms, which is suitable for coarse
     /// timers (countdown UI, clipboard auto-clear). Lower for smoother
@@ -670,6 +713,7 @@ impl App {
             handle,
             window: None,
             renderer: None,
+            adapter: None,
             tree: Some(tree),
             paint_ctx: None,
             event_ctx: EventContext::new(),
@@ -858,10 +902,16 @@ fn translate_ime(ime: &Ime) -> Vec<WidgetEvent> {
 
 struct ShroudEventLoop {
     config: AppConfig,
-    #[allow(dead_code)] // retained so user clones stay valid; future phases may read it
     handle: AppHandle,
     window: Option<PlatformWindow>,
     renderer: Option<Renderer>,
+    /// OS accessibility adapter, created in `resumed` when
+    /// [`AppConfig::accessibility`] is on. `None` when accessibility is
+    /// disabled or the window isn't up yet. Fed every winit `WindowEvent`;
+    /// emits [`AppEvent::Accessibility`] through the event-loop proxy when an
+    /// AT connects / acts / disconnects, and is pushed a fresh tree each frame
+    /// via `update_if_active` (a no-op while no AT is listening).
+    adapter: Option<Adapter>,
     tree: Option<WidgetTree>,
     paint_ctx: Option<PaintContext>,
     event_ctx: EventContext,
@@ -1029,6 +1079,37 @@ impl ShroudEventLoop {
             let _ = clipboard.write(&text);
         }
     }
+
+    /// Handle an event surfaced by the accessibility adapter.
+    ///
+    /// MVP is read-only ("perceivable"): we answer the AT's request for an
+    /// initial tree and keep publishing updates, but do not yet act on
+    /// `ActionRequested` (SR-driven click / focus / value change) — that is the
+    /// operable slice. `AccessibilityDeactivated` needs no teardown: the
+    /// adapter simply goes dormant and `update_if_active` no-ops again.
+    fn handle_a11y_event(&mut self, event: A11yEvent) {
+        match event.window_event {
+            A11yWindowEvent::InitialTreeRequested => self.push_a11y_update(),
+            A11yWindowEvent::ActionRequested(_request) => {
+                // Deferred to the operable slice — accept and ignore for now.
+            }
+            A11yWindowEvent::AccessibilityDeactivated => {}
+        }
+    }
+
+    /// Publish the current widget tree to the accessibility adapter.
+    ///
+    /// A no-op unless an AT is connected: `update_if_active` runs the closure
+    /// (which walks the tree and translates it) only while the adapter is
+    /// active, so the snapshot cost is paid solely when a screen reader is
+    /// listening. Bounds come from the last layout pass, so callers should
+    /// invoke this after layout (the redraw path does).
+    fn push_a11y_update(&mut self) {
+        let (Some(adapter), Some(tree)) = (self.adapter.as_mut(), self.tree.as_ref()) else {
+            return;
+        };
+        adapter.update_if_active(|| snapshot_to_tree_update(&tree.accessibility_snapshot()));
+    }
 }
 
 impl ApplicationHandler<AppEvent> for ShroudEventLoop {
@@ -1152,6 +1233,19 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         }
 
         let window_arc = platform_window.arc();
+
+        // Bring up the accessibility adapter (unless opted out). It shares the
+        // app's event-loop proxy, so AT connect / action / disconnect events
+        // arrive as `AppEvent::Accessibility` in `user_event`. Creation is
+        // cheap and the adapter stays dormant until an AT actually connects.
+        if self.config.accessibility {
+            self.adapter = Some(Adapter::with_event_loop_proxy(
+                event_loop,
+                window_arc.as_ref(),
+                self.handle.proxy.clone(),
+            ));
+        }
+
         let renderer = pollster::block_on(Renderer::new(Arc::clone(&window_arc)));
 
         let theme = self.config.theme.get();
@@ -1185,6 +1279,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::Wake => self.request_redraw(),
+            AppEvent::Accessibility(a11y) => self.handle_a11y_event(a11y),
         }
     }
 
@@ -1200,6 +1295,16 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         // or an auto-lock would never fire.
         if is_user_input(&event) {
             self.last_input = Instant::now();
+        }
+
+        // Let the accessibility adapter observe every window event first (it
+        // watches focus / activation to drive AT hand-shakes). Take the window
+        // Arc out before borrowing the adapter mutably so the two field borrows
+        // don't overlap. Cheap and a no-op while no AT is connected.
+        if let Some(win) = self.window.as_ref().map(|w| w.arc()) {
+            if let Some(adapter) = self.adapter.as_mut() {
+                adapter.process_event(win.as_ref(), &event);
+            }
         }
 
         match event {
@@ -1609,6 +1714,10 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                         "push-ime-allowed(false)"
                     });
                 }
+
+                // Publish the freshly laid-out tree to any connected screen
+                // reader. No-op while no AT is listening (lazy `update_if_active`).
+                self.push_a11y_update();
 
                 // Pump the next frame while any animation is mid-flight. An
                 // in-flight `Animated::get` voted during paint above; if so,

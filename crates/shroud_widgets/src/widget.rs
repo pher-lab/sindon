@@ -2,7 +2,7 @@
 
 use crate::event::{EventContext, EventResult, WidgetEvent};
 use crate::paint::PaintContext;
-use shroud_core::{Rect, SecurityLevel, Size, Theme};
+use shroud_core::{AccessNode, Rect, SecurityLevel, Size, Theme};
 use shroud_layout::FlexStyle;
 use shroud_text::TextEngine;
 
@@ -59,6 +59,31 @@ pub trait Widget: std::any::Any {
     /// value, so an override can unconditionally return `true`.
     fn focusable(&self) -> bool {
         false
+    }
+
+    /// Describe this widget for OS assistive technology (screen readers).
+    ///
+    /// Returns the widget's a11y role, name, and state as a framework-native
+    /// [`AccessNode`]. `None` (the default) means the widget carries no
+    /// semantics of its own and is exposed as a structural
+    /// [`Group`](shroud_core::AccessRole::Group) so its bounds and children
+    /// still form a coherent tree.
+    ///
+    /// Consulted once per frame *only while an assistive technology is
+    /// connected* (the snapshot is built inside the adapter's
+    /// `update_if_active`), so reactive labels / values reflect live state at
+    /// near-zero cost when no screen reader is present.
+    ///
+    /// # Secret safety
+    ///
+    /// Secret-bearing widgets (`SecureInput`, `SecureText`) must return a
+    /// [`protected`](shroud_core::AccessNode::protected) node and never place
+    /// their plaintext in `name` or `value` — a protected node force-suppresses
+    /// its value, and the widget supplies only a generic name ("Password" /
+    /// "Protected content"). This is what lets a secret-aware UI be perceivable
+    /// to a screen reader without ever reading a password aloud.
+    fn accessibility(&self) -> Option<AccessNode> {
+        None
     }
 
     /// Whether this widget consumes printable text input when focused.

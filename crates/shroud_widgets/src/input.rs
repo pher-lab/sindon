@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 use crate::event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, FocusIndicator, Point, Rect};
+use shroud_core::{AccessNode, AccessRole, Color, FocusIndicator, Point, Rect};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Animated, Easing, Reactive, Signal};
 use shroud_text::{FontWeight, TextAttrs, TextSpan};
@@ -1654,6 +1654,18 @@ impl Widget for Input {
 
     fn accepts_text(&self) -> bool {
         true
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        // A plain `Input` holds ordinary (non-secret) content — the user's own
+        // note body, a title, a filter query — so exposing its text is exactly
+        // what a screen-reader user needs to read their own document. Secret
+        // entry is `SecureInput`, which is protected separately.
+        let mut node = AccessNode::new(AccessRole::TextInput).value(self.value_clone());
+        if !self.placeholder.is_empty() {
+            node = node.name(self.placeholder.clone());
+        }
+        Some(node)
     }
 
     fn style(&self) -> FlexStyle {

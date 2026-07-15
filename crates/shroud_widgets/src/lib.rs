@@ -3,6 +3,7 @@
 //! Provides the `Widget` trait, core widgets (Container, Text, Button),
 //! a `WidgetTree` for managing the widget hierarchy, and event dispatch.
 
+pub mod accessibility;
 mod button;
 mod checkbox;
 mod clear_trigger;
@@ -29,6 +30,7 @@ mod text;
 pub mod tree;
 mod widget;
 
+pub use accessibility::{A11Y_WINDOW_ROOT, AccessEntry, AccessSnapshot};
 pub use button::Button;
 pub use checkbox::Checkbox;
 pub use clear_trigger::ClearTrigger;

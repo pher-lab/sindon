@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Color, Point, Rect, Size};
+use shroud_core::{AccessNode, AccessRole, Color, Point, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::Reactive;
 use shroud_text::{FontStyle, FontWeight, TextAttrs, TextEngine, TextFamily, TextSpan};
@@ -284,6 +284,14 @@ impl TextWidget {
 }
 
 impl Widget for TextWidget {
+    fn accessibility(&self) -> Option<AccessNode> {
+        let text = self.text();
+        if text.is_empty() {
+            return None;
+        }
+        Some(AccessNode::new(AccessRole::Label).name(text))
+    }
+
     fn style(&self) -> FlexStyle {
         // No `min_height` here: this is a measured leaf, and its height comes
         // from `measure` (the shaped line height). Declaring a style `min_size`

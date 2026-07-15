@@ -4,7 +4,7 @@ use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
 use crate::interaction::InteractionState;
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, Rect};
+use shroud_core::{AccessNode, AccessRole, Color, Rect};
 use shroud_layout::FlexStyle;
 
 /// A checkbox with an optional text label.
@@ -129,6 +129,14 @@ impl Checkbox {
 impl Widget for Checkbox {
     fn focusable(&self) -> bool {
         true
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        let mut node = AccessNode::new(AccessRole::CheckBox).checked(self.checked);
+        if !self.label.is_empty() {
+            node = node.name(self.label.clone());
+        }
+        Some(node)
     }
 
     fn style(&self) -> FlexStyle {

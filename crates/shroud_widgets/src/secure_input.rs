@@ -31,7 +31,7 @@ use crate::clear_trigger::ClearTrigger;
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, FocusIndicator, Point, Rect, SecurityLevel};
+use shroud_core::{AccessNode, AccessRole, Color, FocusIndicator, Point, Rect, SecurityLevel};
 use shroud_layout::FlexStyle;
 use shroud_security::SecureString;
 
@@ -518,6 +518,24 @@ impl Widget for SecureInput {
 
     fn accepts_text(&self) -> bool {
         true
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        // The whole point of the secret-aware a11y story: expose a *masked*
+        // field so a screen reader announces "password" and can land focus
+        // here, but NEVER read the characters. `.protected()` force-suppresses
+        // the value; the name is the (non-secret) placeholder label, or a
+        // generic fallback — the buffer is never touched.
+        let name = if self.placeholder.is_empty() {
+            "Password".to_string()
+        } else {
+            self.placeholder.clone()
+        };
+        Some(
+            AccessNode::new(AccessRole::PasswordInput)
+                .name(name)
+                .protected(),
+        )
     }
 
     fn style(&self) -> FlexStyle {

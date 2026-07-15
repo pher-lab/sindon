@@ -7,7 +7,7 @@ use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, Widget
 use crate::interaction::{InteractionState, Release};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Color, Lerp, Rect, Size};
+use shroud_core::{AccessNode, AccessRole, Color, Lerp, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Animated, Easing, Reactive};
 use shroud_text::{TextAttrs, TextFamily};
@@ -463,6 +463,14 @@ impl Widget for Button {
     fn focusable(&self) -> bool {
         // A disabled button is inert, so it drops out of the Tab order too.
         !self.disabled.get()
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        Some(
+            AccessNode::new(AccessRole::Button)
+                .name(self.label.get())
+                .disabled(self.disabled.get()),
+        )
     }
 
     fn menu_switch_trigger(&self) -> bool {

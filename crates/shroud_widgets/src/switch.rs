@@ -20,7 +20,7 @@ use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
 use crate::interaction::{InteractionState, dim_over};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Color, Lerp, Rect, Size};
+use shroud_core::{AccessNode, AccessRole, Color, Lerp, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Animated, Easing, Reactive, Signal};
 
@@ -225,6 +225,16 @@ impl Default for Switch {
 impl Widget for Switch {
     fn focusable(&self) -> bool {
         !self.disabled.get()
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        let mut node = AccessNode::new(AccessRole::Switch)
+            .checked(self.is_on())
+            .disabled(self.disabled.get());
+        if !self.label.is_empty() {
+            node = node.name(self.label.clone());
+        }
+        Some(node)
     }
 
     fn style(&self) -> FlexStyle {
