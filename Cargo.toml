@@ -16,6 +16,7 @@ members = [
     "examples/counter",
     "examples/dialog_settings_demo",
     "examples/font_size_demo",
+    "examples/form_controls_demo",
     "examples/hello_world",
     "examples/hover_demo",
     "examples/image_demo",
