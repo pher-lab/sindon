@@ -123,6 +123,12 @@ pub struct Button {
     /// intrinsic label width; positive values make it claim its share of
     /// leftover space along the parent's main axis. See [`Button::grow`].
     flex_grow: f32,
+    /// Whether this button is a menu-switch trigger: a peer overlay's
+    /// dismissing outside-click that lands here re-routes to this button so
+    /// its own menu opens in the same click. Default `false`. See
+    /// [`Button::menu_switch`] and
+    /// [`Widget::menu_switch_trigger`](crate::Widget::menu_switch_trigger).
+    menu_switch: bool,
 }
 
 impl Button {
@@ -158,6 +164,7 @@ impl Button {
             min_width: None,
             visible: Reactive::Static(true),
             flex_grow: 0.0,
+            menu_switch: false,
         }
     }
 
@@ -193,6 +200,7 @@ impl Button {
             min_width: None,
             visible: Reactive::Static(true),
             flex_grow: 0.0,
+            menu_switch: false,
         }
     }
 
@@ -227,6 +235,23 @@ impl Button {
     /// Both `on_click` and `on_click_rect` fire when both are set.
     pub fn on_click_rect(mut self, f: impl FnMut(Rect, &mut EventContext) + 'static) -> Self {
         self.on_click_rect = Some(Box::new(f));
+        self
+    }
+
+    /// Mark this button as a *menu-switch trigger* so a peer overlay
+    /// switches to its menu in a single click.
+    ///
+    /// By default, clicking a toolbar button while another button's menu is
+    /// open takes two clicks: the first pointer-down is swallowed to dismiss
+    /// the open menu, the second activates the button. Set this on the
+    /// buttons that open sibling menus (e.g. a gear and an overflow `⋮`) so
+    /// the dismissing click is instead re-routed here — the open menu closes
+    /// and this button's menu opens in one click. See
+    /// [`Widget::menu_switch_trigger`](crate::Widget::menu_switch_trigger)
+    /// for the routing rule and the safety note (opt in only for buttons
+    /// whose sole action is opening a menu).
+    pub fn menu_switch(mut self, on: bool) -> Self {
+        self.menu_switch = on;
         self
     }
 
@@ -438,6 +463,13 @@ impl Widget for Button {
     fn focusable(&self) -> bool {
         // A disabled button is inert, so it drops out of the Tab order too.
         !self.disabled.get()
+    }
+
+    fn menu_switch_trigger(&self) -> bool {
+        // A disabled trigger is inert (it can't open its own menu), so it
+        // doesn't claim the one-click switch path either — the outside click
+        // just dismisses the open menu as usual.
+        self.menu_switch && !self.disabled.get()
     }
 
     fn style(&self) -> FlexStyle {

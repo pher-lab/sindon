@@ -979,6 +979,265 @@ fn outside_click_does_not_reach_main_tree() {
     );
 }
 
+// ── menu-switch: one-click switch between peer menu triggers ──────────
+//
+// Two toolbar triggers (gear + ⋮) each open their own popover. With one menu
+// open, a single click on the *other* trigger should close the open menu AND
+// open the second: the trigger opts into `Button::menu_switch(true)`, so the
+// dismissing pointer-down is re-routed to it instead of being swallowed. A
+// plain button (the header lock) does not opt in and stays two-click, proving
+// this is a scoped re-route to opted-in triggers, not a general pass-through.
+
+/// Center point of a laid-out rect, for clicking a widget by index.
+fn center(r: Rect) -> Point {
+    Point::new(
+        r.origin.x + r.size.width / 2.0,
+        r.origin.y + r.size.height / 2.0,
+    )
+}
+
+/// One full primary click (press + release) at `p`.
+fn click_at(tree: &mut WidgetTree, p: Point) {
+    dispatch(
+        tree,
+        WidgetEvent::MouseDown {
+            position: p,
+            button: MouseButton::Left,
+        },
+    );
+    dispatch(
+        tree,
+        WidgetEvent::MouseUp {
+            position: p,
+            button: MouseButton::Left,
+        },
+    );
+}
+
+/// A `menu_switch` trigger that opens a centered popover on click and bumps
+/// `opens` each time. Centered so top-left triggers sit outside its rect.
+fn switch_trigger(label: &str, opens: Rc<Cell<u32>>) -> Button {
+    Button::new(label.to_string())
+        .background(Color::WHITE)
+        .menu_switch(true)
+        .on_click(move |ctx| {
+            opens.set(opens.get() + 1);
+            ctx.push_layer(
+                LayerOptions::popover(),
+                Container::column().width(120.0).height(80.0),
+                |_t, _root| {},
+            );
+        })
+}
+
+#[test]
+fn menu_switch_switches_between_peer_triggers_in_one_click() {
+    let a_opens = Rc::new(Cell::new(0u32));
+    let b_opens = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let main = tree.set_root(Container::column().width(800.0).height(600.0));
+    let a = tree.add_child(main, switch_trigger("A", a_opens.clone()));
+    let b = tree.add_child(main, switch_trigger("B", b_opens.clone()));
+    measured_layout(&mut tree, 800.0, 600.0);
+
+    let a_pt = center(tree.layout_rect(a));
+    let b_pt = center(tree.layout_rect(b));
+
+    // Open A's menu.
+    click_at(&mut tree, a_pt);
+    measured_layout(&mut tree, 800.0, 600.0);
+    assert_eq!(tree.layer_count(), 1, "A's menu is open");
+    assert_eq!(a_opens.get(), 1);
+
+    // One click on B: closes A's menu and opens B's in the same click.
+    click_at(&mut tree, b_pt);
+    measured_layout(&mut tree, 800.0, 600.0);
+    assert_eq!(
+        tree.layer_count(),
+        1,
+        "still exactly one menu open after the switch"
+    );
+    assert_eq!(
+        b_opens.get(),
+        1,
+        "B's menu opened on the single switch click"
+    );
+    assert_eq!(a_opens.get(), 1, "A did not reopen");
+}
+
+#[test]
+fn menu_switch_opens_new_menu_on_the_press_no_empty_gap() {
+    let a_opens = Rc::new(Cell::new(0u32));
+    let b_opens = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let main = tree.set_root(Container::column().width(800.0).height(600.0));
+    let a = tree.add_child(main, switch_trigger("A", a_opens.clone()));
+    let b = tree.add_child(main, switch_trigger("B", b_opens.clone()));
+    measured_layout(&mut tree, 800.0, 600.0);
+    let a_pt = center(tree.layout_rect(a));
+    let b_pt = center(tree.layout_rect(b));
+
+    click_at(&mut tree, a_pt);
+    measured_layout(&mut tree, 800.0, 600.0);
+    assert_eq!(tree.layer_count(), 1, "A's menu is open");
+
+    // Press (MouseDown only, no release yet) on B: the switch must complete on
+    // the press — A closed and B opened within the one event — so a menu is
+    // always up. If the open waited for the release, layer_count would be 0
+    // here: the empty-frame flicker the user reported.
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseDown {
+            position: b_pt,
+            button: MouseButton::Left,
+        },
+    );
+    assert_eq!(
+        tree.layer_count(),
+        1,
+        "a menu is up on the press alone — no empty gap between the two"
+    );
+    assert_eq!(b_opens.get(), 1, "B's menu opened on the press");
+    assert_eq!(a_opens.get(), 1, "A did not reopen");
+
+    // The trailing real release is harmless — swallowed by B's open menu.
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseUp {
+            position: b_pt,
+            button: MouseButton::Left,
+        },
+    );
+    measured_layout(&mut tree, 800.0, 600.0);
+    assert_eq!(
+        tree.layer_count(),
+        1,
+        "still exactly one menu after release"
+    );
+    assert_eq!(b_opens.get(), 1, "release did not re-open or double-fire");
+}
+
+#[test]
+fn menu_switch_sibling_trigger_hovers_while_a_peer_menu_is_open() {
+    let a_opens = Rc::new(Cell::new(0u32));
+    let b_opens = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let main = tree.set_root(Container::column().width(800.0).height(600.0));
+    let a = tree.add_child(main, switch_trigger("A", a_opens.clone()));
+    let b = tree.add_child(main, switch_trigger("B", b_opens.clone()));
+    measured_layout(&mut tree, 800.0, 600.0);
+    let a_pt = center(tree.layout_rect(a));
+    let b_pt = center(tree.layout_rect(b));
+
+    // Open A's menu (the push clears any hover).
+    click_at(&mut tree, a_pt);
+    measured_layout(&mut tree, 800.0, 600.0);
+    assert_eq!(tree.layer_count(), 1, "A's menu is open");
+    assert_eq!(tree.hovered(), None, "push cleared hover");
+
+    // Move over B (a sibling switch trigger) while A's menu is open: B lights
+    // up instead of the move being swallowed — the "pressable" affordance.
+    dispatch(&mut tree, WidgetEvent::MouseMove { position: b_pt });
+    assert_eq!(
+        tree.hovered(),
+        Some(b),
+        "sibling switch trigger hovers under an open peer menu"
+    );
+
+    // Move into A's centered menu (~viewport center): B is left again — hover
+    // enter/leave spans the layer boundary.
+    dispatch(
+        &mut tree,
+        WidgetEvent::MouseMove {
+            position: Point::new(400.0, 300.0),
+        },
+    );
+    assert_ne!(
+        tree.hovered(),
+        Some(b),
+        "moving into the menu leaves the sibling trigger"
+    );
+}
+
+#[test]
+fn menu_switch_click_on_owning_trigger_toggles_closed() {
+    let a_opens = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let main = tree.set_root(Container::column().width(800.0).height(600.0));
+    let a = tree.add_child(main, switch_trigger("A", a_opens.clone()));
+    measured_layout(&mut tree, 800.0, 600.0);
+    let a_pt = center(tree.layout_rect(a));
+
+    // Open A's menu.
+    click_at(&mut tree, a_pt);
+    measured_layout(&mut tree, 800.0, 600.0);
+    assert_eq!(tree.layer_count(), 1, "A's menu is open");
+    assert_eq!(a_opens.get(), 1);
+
+    // Click A again: it owns the open menu, so this must toggle it closed and
+    // NOT reopen it (the switch re-route is suppressed for the owning trigger).
+    click_at(&mut tree, a_pt);
+    measured_layout(&mut tree, 800.0, 600.0);
+    assert_eq!(
+        tree.layer_count(),
+        0,
+        "clicking the owning trigger toggles its menu closed"
+    );
+    assert_eq!(
+        a_opens.get(),
+        1,
+        "the owning trigger did not reopen its menu"
+    );
+}
+
+#[test]
+fn plain_button_under_dismiss_click_stays_two_click() {
+    let a_opens = Rc::new(Cell::new(0u32));
+    let lock_clicks = Rc::new(Cell::new(0u32));
+
+    let mut tree = WidgetTree::new();
+    let main = tree.set_root(Container::column().width(800.0).height(600.0));
+    let a = tree.add_child(main, switch_trigger("A", a_opens.clone()));
+    let lc = lock_clicks.clone();
+    // A consequential control (the lock) — NOT a menu-switch trigger.
+    let lock = tree.add_child(
+        main,
+        Button::new("lock")
+            .background(Color::WHITE)
+            .on_click(move |_| lc.set(lc.get() + 1)),
+    );
+    measured_layout(&mut tree, 800.0, 600.0);
+
+    let a_pt = center(tree.layout_rect(a));
+    let lock_pt = center(tree.layout_rect(lock));
+
+    click_at(&mut tree, a_pt);
+    measured_layout(&mut tree, 800.0, 600.0);
+    assert_eq!(tree.layer_count(), 1, "A's menu is open");
+
+    // First click on the lock only dismisses A's menu; its press is swallowed.
+    click_at(&mut tree, lock_pt);
+    measured_layout(&mut tree, 800.0, 600.0);
+    assert_eq!(tree.layer_count(), 0, "menu dismissed by the outside click");
+    assert_eq!(
+        lock_clicks.get(),
+        0,
+        "lock is not a switch target — its press is swallowed"
+    );
+
+    // A second click is required to actually activate the lock.
+    click_at(&mut tree, lock_pt);
+    assert_eq!(
+        lock_clicks.get(),
+        1,
+        "lock activates only on the second click"
+    );
+}
+
 // ── stacked-layer dismissal (location-aware collapse) ─────────────
 //
 // An outside-click carries a position, and that position encodes how deep

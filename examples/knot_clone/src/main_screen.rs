@@ -664,6 +664,13 @@ fn popover_divider(tree: &mut WidgetTree, parent: usize) {
 /// `right-0 top-full`. (This used to be a `Container` with `on_press_rect`, the
 /// only rect-anchoring API at the time, which cost the trigger its Tab/Enter
 /// focusability; `on_click_rect` restores it while keeping the same anchor.)
+///
+/// Both header menus (gear + `⋮`) are built through here, so both opt into
+/// [`Button::menu_switch`]: with one already open, clicking the other closes
+/// it and opens the second in a single click, rather than one click to dismiss
+/// and a second to open. Safe because a trigger's only action is opening its
+/// own menu — the consequential header control (lock) is a plain `icon_button`
+/// that stays two-click on purpose.
 fn menu_icon_trigger(
     tree: &mut WidgetTree,
     parent: usize,
@@ -681,6 +688,7 @@ fn menu_icon_trigger(
             .text_color(icon_fg())
             .hover_background(border())
             .press_background(border())
+            .menu_switch(true)
             .on_click_rect(open),
     );
 }

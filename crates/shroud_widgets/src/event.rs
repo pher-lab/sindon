@@ -176,6 +176,14 @@ pub(crate) enum TreeCommand {
         options: LayerOptions,
         root_widget: Box<dyn Widget + 'static>,
         populate: LayerPopulator,
+        /// Index of the widget whose handler pushed this layer, stamped by
+        /// the tree right after that handler returns (see
+        /// [`EventContext::stamp_pending_layer_opener`]). Recorded on the
+        /// resulting `LayerEntry` so the menu-switch path can tell a click
+        /// on the *owning* trigger (toggle closed) from a click on a peer
+        /// trigger (switch). `None` for layers pushed outside event dispatch
+        /// (boot / tests via `WidgetTree::push_layer`).
+        opener: Option<usize>,
     },
     /// Pop a specific layer by its root index. No-op when the layer is
     /// already gone (e.g. dismissed by an outside-click before the
@@ -488,7 +496,26 @@ impl EventContext {
             options,
             root_widget: Box::new(root_widget),
             populate: Box::new(populate),
+            opener: None,
         });
+    }
+
+    /// Stamp the opener index onto any `PushLayer` command enqueued during the
+    /// dispatch of `node` that doesn't have one yet.
+    ///
+    /// Intended for `WidgetTree` to call right after a widget's `event`
+    /// returns (alongside pointer-capture binding), so a layer pushed from
+    /// that handler remembers which widget opened it. Commands enqueued by
+    /// earlier nodes in the same drain are already stamped, so this only fills
+    /// the fresh `None`s — attributing each push to the node that made it.
+    pub(crate) fn stamp_pending_layer_opener(&mut self, node: usize) {
+        for cmd in &mut self.commands {
+            if let TreeCommand::PushLayer { opener, .. } = cmd {
+                if opener.is_none() {
+                    *opener = Some(node);
+                }
+            }
+        }
     }
 
     /// Dismiss the layer whose root is `root`. No-op when that layer is

@@ -74,6 +74,27 @@ pub trait Widget: std::any::Any {
         false
     }
 
+    /// Whether this widget is a *menu-switch trigger*: a control that opens
+    /// an overlay layer and should switch to it in a single click even while
+    /// a peer overlay is already open.
+    ///
+    /// Normally a pointer-down outside an open layer only dismisses that
+    /// layer and is swallowed (see
+    /// [`LayerOptions::dismiss_on_outside_click`](crate::LayerOptions)), so
+    /// activating another control behind the layer takes two clicks. When the
+    /// dismissing click instead lands on a widget that returns `true` here,
+    /// the tree pops the layer *and* re-routes the click to this trigger, so
+    /// its own overlay opens in the same click.
+    ///
+    /// Opt in only for controls whose sole action is opening a menu/popover
+    /// (a toolbar's gear/overflow buttons) — never a control that performs a
+    /// consequential action, so the one-click path can't trigger something
+    /// irreversible by accident. Default is `false`; `Button` overrides it
+    /// via [`Button::menu_switch`](crate::Button::menu_switch).
+    fn menu_switch_trigger(&self) -> bool {
+        false
+    }
+
     /// Return the flex style for layout computation.
     fn style(&self) -> FlexStyle;
 

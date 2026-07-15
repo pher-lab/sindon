@@ -285,4 +285,10 @@ pub(crate) struct LayerEntry {
     pub options: LayerOptions,
     pub offset: (f32, f32),
     pub measured_size: shroud_core::Size,
+    /// Index of the widget whose handler opened this layer, or `None` for a
+    /// layer pushed outside event dispatch. Read only by the menu-switch
+    /// dismiss path to suppress re-routing a dismissing click back onto the
+    /// trigger that owns this very layer (which would reopen it instead of
+    /// toggling it closed).
+    pub opener: Option<usize>,
 }
