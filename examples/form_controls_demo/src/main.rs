@@ -14,12 +14,12 @@ use shroud::app::App;
 use shroud::core::Color;
 use shroud::reactive::Signal;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, Switch, TextWidget};
+use shroud::widgets::{Container, Slider, Switch, TextWidget};
 
 fn main() {
     App::new()
         .title("shroud — form controls (Phase 44)")
-        .size(560, 560)
+        .size(600, 820)
         .run(|_scope| {
             let mut tree = WidgetTree::new();
             let root = tree.set_root(
@@ -62,6 +62,29 @@ fn main() {
             for sw in rows {
                 tree.add_child(list, sw);
             }
+
+            // ── Slider ────────────────────────────────────────────────────
+            tree.add_child(
+                root,
+                TextWidget::new("Slider")
+                    .font_size(24.0)
+                    .color(Color::rgb(0.92, 0.94, 1.0)),
+            );
+
+            // Two sliders share one signal — dragging either moves both.
+            let volume = Signal::new(40.0);
+            let sliders = tree.add_child(
+                root,
+                Container::column()
+                    .gap(18.0)
+                    .padding(16.0)
+                    .radius(10.0)
+                    .background(Color::rgb(0.14, 0.15, 0.20)),
+            );
+            tree.add_child(sliders, Slider::new(0.0, 100.0).bind(volume));
+            tree.add_child(sliders, Slider::new(0.0, 100.0).bind(volume));
+            tree.add_child(sliders, Slider::new(0.0, 10.0).step(1.0).value(3.0));
+            tree.add_child(sliders, Slider::new(0.0, 100.0).value(60.0).disabled(true));
 
             tree
         });
