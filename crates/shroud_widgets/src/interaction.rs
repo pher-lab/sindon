@@ -28,6 +28,8 @@
 //! [`Animated`](shroud_reactive::Animated); the others flip a bool), so a
 //! widget with an animated hover drives its animator alongside these flags.
 
+use shroud_core::{Color, Lerp};
+
 /// The three interaction flags a control widget tracks. `Copy` — it is a plain
 /// bag of bools, cheap to pass by value.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +133,32 @@ pub(crate) fn step_selection(current: usize, len: usize, delta: i32) -> usize {
     (current as i64 + delta as i64).clamp(0, max) as usize
 }
 
+/// Mute a colour for a disabled control by compositing it at half weight over
+/// `backdrop`, returning an **opaque** result.
+///
+/// The obvious "dim" — halving a colour's alpha — looks right for a lone shape
+/// but betrays a control built from *overlapping* opaque shapes: a slider thumb
+/// over its track, a segmented chip over its groove, a radio dot inside its
+/// ring. Once each shape is translucent the lower one shows through the upper —
+/// the thumb turns to glass and the track is visible through it. Compositing
+/// over a fixed backdrop keeps every shape opaque, so the upper one still
+/// covers the lower while the whole control still reads as greyed. `backdrop`
+/// is the surface the control sits on ([`theme.colors.surface`]); muting toward
+/// it also frees the disabled look from whatever happens to be painted directly
+/// behind the widget.
+///
+/// [`theme.colors.surface`]: shroud_core::Colors::surface
+pub(crate) fn dim_over(color: Color, backdrop: Color) -> Color {
+    // `t` = the colour's own alpha × 0.5, so an opaque colour lands halfway to
+    // the backdrop (the old `a * 0.5` look, for a lone shape) and an already
+    // translucent one fades further in. Force the result opaque regardless.
+    let t = (color.a * 0.5).clamp(0.0, 1.0);
+    Color {
+        a: 1.0,
+        ..backdrop.lerp(&color, t)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +173,29 @@ mod tests {
         assert_eq!(step_selection(0, 3, -1), 0, "first stays first");
         // Empty list is inert.
         assert_eq!(step_selection(0, 0, 1), 0);
+    }
+
+    #[test]
+    fn dim_over_mutes_toward_backdrop_and_stays_opaque() {
+        let backdrop = Color::rgb(0.1, 0.1, 0.1);
+        let color = Color::rgb(0.9, 0.9, 0.9);
+        let muted = dim_over(color, backdrop);
+        // Opaque, so an overlapping shape still fully covers what's beneath it —
+        // the whole point over the old alpha-halving dim.
+        assert_eq!(muted.a, 1.0, "muted colour stays opaque");
+        // Halfway between the colour and the backdrop (the old half-alpha look,
+        // made opaque): (0.9 + 0.1) / 2 = 0.5 per channel.
+        assert!((muted.r - 0.5).abs() < 1e-6);
+        assert!((muted.g - 0.5).abs() < 1e-6);
+        assert!((muted.b - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dim_over_of_an_opaque_colour_over_itself_is_unchanged() {
+        // Muting a colour toward its own backdrop-matched value is a no-op on
+        // hue — greying only pulls it toward the surface, never shifts it.
+        let c = Color::rgb(0.3, 0.4, 0.85);
+        assert_eq!(dim_over(c, c), Color { a: 1.0, ..c });
     }
 
     // The headline invariant, proven once here so every widget that composes

@@ -17,7 +17,7 @@
 use std::cell::Cell;
 
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
-use crate::interaction::InteractionState;
+use crate::interaction::{InteractionState, dim_over};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Rect, Size};
@@ -127,8 +127,9 @@ impl Slider {
     }
 
     /// Gate the slider on a disabled state (reactive). While `true` it drops
-    /// hover feedback, is skipped by Tab, ignores drag and keys, and paints at
-    /// half alpha.
+    /// hover feedback, is skipped by Tab, ignores drag and keys, and paints
+    /// muted — the track / fill / thumb faded toward the surface, kept opaque so
+    /// the thumb still covers the track rather than turning to glass.
     pub fn disabled(mut self, v: impl Into<Reactive<bool>>) -> Self {
         self.disabled = v.into();
         self
@@ -263,9 +264,10 @@ impl Widget for Slider {
         let mut fill = self.fill_color.unwrap_or(ctx.theme.colors.primary);
         let mut thumb = self.thumb_color.unwrap_or(ctx.theme.colors.on_primary);
         if disabled {
-            track = dim(track);
-            fill = dim(fill);
-            thumb = dim(thumb);
+            let surface = ctx.theme.colors.surface;
+            track = dim_over(track, surface);
+            fill = dim_over(fill, surface);
+            thumb = dim_over(thumb, surface);
         }
 
         // Groove (full width), then the filled portion up to the thumb centre.
@@ -377,11 +379,6 @@ impl Widget for Slider {
             _ => EventResult::Ignored,
         }
     }
-}
-
-/// Dim a colour to half alpha — the disabled track / fill / thumb.
-fn dim(c: Color) -> Color {
-    Color { a: c.a * 0.5, ..c }
 }
 
 #[cfg(test)]

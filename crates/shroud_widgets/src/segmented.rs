@@ -15,7 +15,7 @@
 use std::cell::Cell;
 
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
-use crate::interaction::{InteractionState, step_selection};
+use crate::interaction::{InteractionState, dim_over, step_selection};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Rect, Size};
@@ -116,8 +116,9 @@ impl Segmented {
     }
 
     /// Gate the control on a disabled state (reactive). While `true` it drops
-    /// hover feedback, is skipped by Tab, ignores clicks and keys, and paints at
-    /// half alpha.
+    /// hover feedback, is skipped by Tab, ignores clicks and keys, and paints
+    /// muted — faded toward the surface, kept opaque so the selected chip still
+    /// covers the groove.
     pub fn disabled(mut self, v: impl Into<Reactive<bool>>) -> Self {
         self.disabled = v.into();
         self
@@ -248,11 +249,12 @@ impl Widget for Segmented {
         let selected = self.selected_index();
 
         let radius = ctx.theme.shape.radius_md;
+        let surface = ctx.theme.colors.surface;
         let mut track = self.track_color.unwrap_or(ctx.theme.colors.surface_variant);
         let mut chip = self.selected_color.unwrap_or(ctx.theme.colors.primary);
         if disabled {
-            track = dim(track);
-            chip = dim(chip);
+            track = dim_over(track, surface);
+            chip = dim_over(chip, surface);
         }
 
         // Groove behind all segments, plus a hairline outline so the control's
@@ -261,7 +263,7 @@ impl Widget for Segmented {
         ctx.fill_rect_rounded(layout, track, radius);
         let mut outline = ctx.theme.colors.outline;
         if disabled {
-            outline = dim(outline);
+            outline = dim_over(outline, surface);
         }
         ctx.stroke_rect_rounded(layout, outline, radius, 1.0);
 
@@ -297,7 +299,7 @@ impl Widget for Segmented {
                 unsel_label
             };
             if disabled {
-                color = dim(color);
+                color = dim_over(color, surface);
             }
             for glyph in &shaped.glyphs {
                 if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
@@ -380,11 +382,6 @@ impl Widget for Segmented {
             _ => EventResult::Ignored,
         }
     }
-}
-
-/// Dim a colour to half alpha — the disabled track / chip / labels.
-fn dim(c: Color) -> Color {
-    Color { a: c.a * 0.5, ..c }
 }
 
 #[cfg(test)]

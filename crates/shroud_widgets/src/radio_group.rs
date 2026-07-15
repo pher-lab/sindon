@@ -16,7 +16,7 @@
 use std::cell::Cell;
 
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
-use crate::interaction::{InteractionState, step_selection};
+use crate::interaction::{InteractionState, dim_over, step_selection};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Rect, Size};
@@ -114,8 +114,9 @@ impl RadioGroup {
     }
 
     /// Gate the group on a disabled state (reactive). While `true` it drops
-    /// hover feedback, is skipped by Tab, ignores clicks and keys, and paints at
-    /// half alpha.
+    /// hover feedback, is skipped by Tab, ignores clicks and keys, and paints
+    /// muted — faded toward the surface, kept opaque so the dot still covers the
+    /// ring rather than turning to glass.
     pub fn disabled(mut self, v: impl Into<Reactive<bool>>) -> Self {
         self.disabled = v.into();
         self
@@ -243,6 +244,7 @@ impl Widget for RadioGroup {
         let dot_d = ring_d * 0.45;
         let row_h = layout.size.height / n as f32;
 
+        let surface = ctx.theme.colors.surface;
         let sel_col = self.selected_color.unwrap_or(ctx.theme.colors.primary);
         let ring_col = self.ring_color.unwrap_or(ctx.theme.colors.input_border);
         let label_base = self.label_color.unwrap_or(ctx.theme.colors.on_background);
@@ -256,7 +258,7 @@ impl Widget for RadioGroup {
             let ring_rect = Rect::new(ring_x, row_cy - ring_r, ring_d, ring_d);
             let mut this_ring = if is_sel { sel_col } else { ring_col };
             if disabled {
-                this_ring = dim(this_ring);
+                this_ring = dim_over(this_ring, surface);
             }
             ctx.stroke_rect_rounded(ring_rect, this_ring, ring_r, RING_STROKE);
 
@@ -264,7 +266,7 @@ impl Widget for RadioGroup {
             if is_sel {
                 let mut dot = sel_col;
                 if disabled {
-                    dot = dim(dot);
+                    dot = dim_over(dot, surface);
                 }
                 let dot_x = ring_x + (ring_d - dot_d) / 2.0;
                 ctx.fill_rect_rounded(
@@ -279,7 +281,7 @@ impl Widget for RadioGroup {
             let max_width = layout.size.width - ring_d - RING_GAP;
             let mut color = label_base;
             if disabled {
-                color = dim(color);
+                color = dim_over(color, surface);
             }
             if max_width > 0.0 {
                 let shaped =
@@ -371,11 +373,6 @@ impl Widget for RadioGroup {
             _ => EventResult::Ignored,
         }
     }
-}
-
-/// Dim a colour to half alpha — the disabled rings / dot / labels.
-fn dim(c: Color) -> Color {
-    Color { a: c.a * 0.5, ..c }
 }
 
 #[cfg(test)]

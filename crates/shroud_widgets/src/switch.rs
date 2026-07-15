@@ -17,7 +17,7 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
-use crate::interaction::InteractionState;
+use crate::interaction::{InteractionState, dim_over};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{Color, Lerp, Rect, Size};
@@ -134,7 +134,8 @@ impl Switch {
 
     /// Gate the switch on a disabled state (reactive). While `true` it drops
     /// hover feedback, is skipped by Tab, and does not toggle — the disabled
-    /// track/knob/label paint at half alpha. Accepts a literal `bool` or a
+    /// track/knob/label paint muted (faded toward the surface, kept opaque so
+    /// the knob still covers the track). Accepts a literal `bool` or a
     /// signal-backed source.
     pub fn disabled(mut self, v: impl Into<Reactive<bool>>) -> Self {
         self.disabled = v.into();
@@ -287,8 +288,9 @@ impl Widget for Switch {
         let mut track = off_col.lerp(&on_col, t);
         let mut knob_col = self.knob_color.unwrap_or(ctx.theme.colors.on_primary);
         if disabled {
-            track = dim(track);
-            knob_col = dim(knob_col);
+            let surface = ctx.theme.colors.surface;
+            track = dim_over(track, surface);
+            knob_col = dim_over(knob_col, surface);
         }
         ctx.fill_rect_rounded(track_rect, track, radius);
 
@@ -310,7 +312,11 @@ impl Widget for Switch {
             let label_y = layout.origin.y + (layout.size.height - font_size) / 2.0;
             let max_width = layout.size.width - track_w - 16.0;
             let base = self.label_color.unwrap_or(ctx.theme.colors.on_background);
-            let label_col = if disabled { dim(base) } else { base };
+            let label_col = if disabled {
+                dim_over(base, ctx.theme.colors.surface)
+            } else {
+                base
+            };
             if max_width > 0.0 {
                 let shaped = ctx.text_engine.shape_text(
                     &self.label,
@@ -377,12 +383,6 @@ impl Widget for Switch {
             _ => EventResult::Ignored,
         }
     }
-}
-
-/// Dim a colour to half alpha — the theme-agnostic "greyed out" used for the
-/// disabled track / knob / label, matching `Button`'s default disabled fill.
-fn dim(c: Color) -> Color {
-    Color { a: c.a * 0.5, ..c }
 }
 
 #[cfg(test)]

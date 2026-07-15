@@ -3256,6 +3256,48 @@ fn disabled_text_color_overrides_the_dim() {
 }
 
 #[test]
+fn disabled_slider_paints_only_opaque_marks() {
+    // The reported bug: the disabled dim halved each shape's *alpha*, so the
+    // half-transparent thumb let the track show through it — the knob turned to
+    // glass. The fix mutes toward the surface but keeps every shape opaque, so
+    // the thumb still fully covers the track. Guard both halves: nothing a
+    // disabled slider paints is translucent, and the thumb is genuinely muted
+    // rather than left at its crisp enabled colour.
+    fn paint_slider(disabled: bool) -> Vec<Color> {
+        let mut tree = WidgetTree::new();
+        let root = tree.set_root(Container::column().width(200.0).height(40.0));
+        tree.add_child(root, Slider::new(0.0, 1.0).value(0.5).disabled(disabled));
+        tree.compute_layout(200.0, 40.0);
+        let mut ctx = PaintContext::default();
+        tree.paint(&mut ctx);
+        ctx.rects.iter().map(|r| r.color).collect()
+    }
+
+    let enabled = paint_slider(false);
+    let disabled = paint_slider(true);
+    // The thumb is the last shape the slider fills (over the track, then the
+    // filled portion).
+    let enabled_thumb = *enabled.last().expect("slider paints a thumb");
+    let disabled_thumb = *disabled.last().expect("slider paints a thumb");
+
+    // Every mark the disabled slider paints is fully opaque — the thumb can no
+    // longer reveal the track beneath it.
+    for c in &disabled {
+        assert_eq!(
+            c.a, 1.0,
+            "disabled slider must paint only opaque marks, got {c:?}"
+        );
+    }
+    // Muting still happens — the thumb is greyed toward the surface, just
+    // opaquely, so it reads as disabled rather than identical to enabled.
+    assert!(
+        disabled_thumb != enabled_thumb,
+        "disabled thumb should be muted, not identical to the enabled thumb \
+         (enabled={enabled_thumb:?}, disabled={disabled_thumb:?})"
+    );
+}
+
+#[test]
 fn button_reactive_label_reflects_signal() {
     // `Button::reactive_label` parallels `TextWidget::reactive` — the label
     // closure is re-read each paint, so updating the signal changes the
