@@ -14,7 +14,7 @@ use shroud::app::App;
 use shroud::core::Color;
 use shroud::reactive::Signal;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, Slider, Switch, TextWidget};
+use shroud::widgets::{Container, Segmented, Slider, Switch, TextWidget};
 
 fn main() {
     App::new()
@@ -85,6 +85,35 @@ fn main() {
             tree.add_child(sliders, Slider::new(0.0, 100.0).bind(volume));
             tree.add_child(sliders, Slider::new(0.0, 10.0).step(1.0).value(3.0));
             tree.add_child(sliders, Slider::new(0.0, 100.0).value(60.0).disabled(true));
+
+            // ── Segmented ─────────────────────────────────────────────────
+            tree.add_child(
+                root,
+                TextWidget::new("Segmented")
+                    .font_size(24.0)
+                    .color(Color::rgb(0.92, 0.94, 1.0)),
+            );
+
+            let view = Signal::new(0usize);
+            let segs = tree.add_child(
+                root,
+                Container::column()
+                    .gap(14.0)
+                    .padding(16.0)
+                    .radius(10.0)
+                    .background(Color::rgb(0.14, 0.15, 0.20)),
+            );
+            tree.add_child(segs, Segmented::new(["Edit", "Preview"]).bind(view));
+            tree.add_child(
+                segs,
+                Segmented::new(["Day", "Week", "Month", "Year"]).selected(1),
+            );
+            tree.add_child(
+                segs,
+                Segmented::new(["Low", "Med", "High"])
+                    .selected(2)
+                    .disabled(true),
+            );
 
             tree
         });

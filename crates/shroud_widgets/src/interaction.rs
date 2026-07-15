@@ -116,9 +116,36 @@ impl InteractionState {
     }
 }
 
+/// Move a single-selection index by `delta`, clamped to `[0, len)` — no wrap.
+///
+/// The shared arrow-navigation step for the single-select controls
+/// ([`Segmented`](crate::Segmented), [`RadioGroup`](crate::RadioGroup)): a
+/// native segmented control / radio group moves selection with the arrow keys
+/// but stops at the ends rather than wrapping. Returns `current` unchanged when
+/// the option list is empty.
+pub(crate) fn step_selection(current: usize, len: usize, delta: i32) -> usize {
+    if len == 0 {
+        return current;
+    }
+    let max = (len - 1) as i64;
+    (current as i64 + delta as i64).clamp(0, max) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step_selection_clamps_without_wrapping() {
+        // Middle moves freely.
+        assert_eq!(step_selection(1, 3, 1), 2);
+        assert_eq!(step_selection(1, 3, -1), 0);
+        // Ends clamp rather than wrap.
+        assert_eq!(step_selection(2, 3, 1), 2, "last stays last");
+        assert_eq!(step_selection(0, 3, -1), 0, "first stays first");
+        // Empty list is inert.
+        assert_eq!(step_selection(0, 0, 1), 0);
+    }
 
     // The headline invariant, proven once here so every widget that composes
     // InteractionState inherits it: disabled blocks *entering* an active state
