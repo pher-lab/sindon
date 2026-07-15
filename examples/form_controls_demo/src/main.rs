@@ -14,12 +14,12 @@ use shroud::app::App;
 use shroud::core::Color;
 use shroud::reactive::Signal;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, Segmented, Slider, Switch, TextWidget};
+use shroud::widgets::{Container, RadioGroup, Segmented, Slider, Switch, TextWidget};
 
 fn main() {
     App::new()
         .title("shroud — form controls (Phase 44)")
-        .size(600, 820)
+        .size(600, 980)
         .run(|_scope| {
             let mut tree = WidgetTree::new();
             let root = tree.set_root(
@@ -113,6 +113,33 @@ fn main() {
                 Segmented::new(["Low", "Med", "High"])
                     .selected(2)
                     .disabled(true),
+            );
+
+            // ── RadioGroup ────────────────────────────────────────────────
+            tree.add_child(
+                root,
+                TextWidget::new("RadioGroup")
+                    .font_size(24.0)
+                    .color(Color::rgb(0.92, 0.94, 1.0)),
+            );
+
+            let theme_choice = Signal::new(0usize);
+            let radios = tree.add_child(
+                root,
+                Container::row()
+                    .gap(32.0)
+                    .padding(16.0)
+                    .radius(10.0)
+                    .align_center()
+                    .background(Color::rgb(0.14, 0.15, 0.20)),
+            );
+            tree.add_child(
+                radios,
+                RadioGroup::new(["System", "Light", "Dark"]).bind(theme_choice),
+            );
+            tree.add_child(
+                radios,
+                RadioGroup::new(["On", "Off"]).selected(1).disabled(true),
             );
 
             tree
