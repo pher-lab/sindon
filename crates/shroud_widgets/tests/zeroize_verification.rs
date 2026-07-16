@@ -98,6 +98,17 @@ fn is_readable(protect: u32) -> bool {
     (protect & read_flags) != 0
 }
 
+/// Where a single match was found: absolute VA plus its owning region's
+/// geometry, for flake forensics.
+#[derive(Debug)]
+struct MatchDetail {
+    addr: usize,
+    region_base: usize,
+    region_size: usize,
+    protect: u32,
+    mem_type: u32,
+}
+
 #[derive(Default, Debug)]
 struct ScanReport {
     matches: usize,
@@ -106,6 +117,11 @@ struct ScanReport {
     matches_in_mapped: usize,
     regions_scanned: usize,
     bytes_scanned: u64,
+    /// Per-match location (capped at 64). A match whose address falls inside
+    /// the scanner's own scratch buffer is by construction an artifact: the
+    /// scratch only ever holds copies of memory that is already counted at
+    /// its real address.
+    match_details: Vec<MatchDetail>,
 }
 
 /// Scanner with a fixed-address scratch buffer. The scratch is zeroed
@@ -183,6 +199,15 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
                     while i + needle.len() <= nread {
                         if &buf[i..i + needle.len()] == needle {
                             report.matches += 1;
+                            if report.match_details.len() < 64 {
+                                report.match_details.push(MatchDetail {
+                                    addr: region_base + offset + i,
+                                    region_base,
+                                    region_size,
+                                    protect: mbi.Protect.0,
+                                    mem_type: mbi.Type.0,
+                                });
+                            }
                             if is_image {
                                 report.matches_in_image += 1;
                             } else if is_private {
@@ -210,6 +235,26 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
     report
 }
 
+/// Print every recorded match location, flagging matches whose address falls
+/// inside the scanner's own scratch buffer — those are scanner artifacts by
+/// construction (the scratch only ever holds copies of other memory).
+fn dump_match_forensics(label: &str, report: &ScanReport, scanner: &Scanner) {
+    let scratch_start = scanner.buf.as_ptr() as usize;
+    let scratch_end = scratch_start + scanner.buf.len();
+    eprintln!("  {label}: {} match(es)", report.matches);
+    for d in &report.match_details {
+        let tag = if d.addr >= scratch_start && d.addr < scratch_end {
+            "  <-- INSIDE SCANNER SCRATCH (artifact)"
+        } else {
+            ""
+        };
+        eprintln!(
+            "    @ {:#014x}  region=[{:#014x} +{:#x}] prot={:#x} type={:#x}{}",
+            d.addr, d.region_base, d.region_size, d.protect, d.mem_type, tag
+        );
+    }
+}
+
 /// A residue scan hardened against the *stale-freed-page* reads that make a
 /// scan taken immediately after a free flaky on shared CI runners.
 ///
@@ -230,9 +275,15 @@ fn settled_scan(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
     const REPS: usize = 5;
     const SETTLE: std::time::Duration = std::time::Duration::from_millis(40);
     let mut best = scan_self_for(scanner, needle);
-    for _ in 1..REPS {
+    eprintln!("  settled_scan rep 1/{REPS}: {} match(es)", best.matches);
+    for rep in 1..REPS {
         std::thread::sleep(SETTLE);
         let r = scan_self_for(scanner, needle);
+        eprintln!(
+            "  settled_scan rep {}/{REPS}: {} match(es)",
+            rep + 1,
+            r.matches
+        );
         if r.matches < best.matches {
             best = r;
         }
@@ -352,6 +403,17 @@ fn secure_input_clear_leaves_no_canary_in_memory() {
         after_drop.regions_scanned,
         after_drop.bytes_scanned as f64 / (1024.0 * 1024.0)
     );
+    eprintln!(
+        "scratch=[{:#014x}..{:#014x}) needle@{:#014x}",
+        scanner.buf.as_ptr() as usize,
+        scanner.buf.as_ptr() as usize + scanner.buf.len(),
+        canary.as_ptr() as usize
+    );
+    dump_match_forensics("baseline", &baseline, &scanner);
+    dump_match_forensics("after_type", &live_after_type, &scanner);
+    dump_match_forensics("after_paint", &live_after_paint, &scanner);
+    dump_match_forensics("after_clear", &after_clear, &scanner);
+    dump_match_forensics("after_drop", &after_drop, &scanner);
 
     // Sanity: typing must have produced a detectable copy. Otherwise
     // the scanner is broken or SecureInput silently dropped the input.
@@ -476,6 +538,15 @@ fn secure_input_reveal_paint_leaves_no_canary() {
         "after revealed paint:        {}  (+{} via cosmic-text — should be 0)",
         after_reveal_paint.matches, reveal_paint_extra
     );
+    eprintln!(
+        "scratch=[{:#014x}..{:#014x}) needle@{:#014x}",
+        scanner.buf.as_ptr() as usize,
+        scanner.buf.as_ptr() as usize + scanner.buf.len(),
+        canary.as_ptr() as usize
+    );
+    dump_match_forensics("baseline", &baseline, &scanner);
+    dump_match_forensics("after_type", &after_type, &scanner);
+    dump_match_forensics("after_reveal_paint", &after_reveal_paint, &scanner);
 
     assert!(
         typing_copies >= 1,

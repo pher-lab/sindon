@@ -70,6 +70,17 @@ fn is_readable(protect: u32) -> bool {
     (protect & read_flags) != 0
 }
 
+/// Where a single match was found: absolute VA plus its owning region's
+/// geometry, for flake forensics.
+#[derive(Debug)]
+struct MatchDetail {
+    addr: usize,
+    region_base: usize,
+    region_size: usize,
+    protect: u32,
+    mem_type: u32,
+}
+
 #[derive(Default, Debug)]
 struct ScanReport {
     matches: usize,
@@ -78,6 +89,11 @@ struct ScanReport {
     matches_in_mapped: usize,
     regions_scanned: usize,
     bytes_scanned: u64,
+    /// Per-match location (capped at 64). A match whose address falls inside
+    /// the scanner's own scratch buffer is by construction an artifact: the
+    /// scratch only ever holds copies of memory that is already counted at
+    /// its real address.
+    match_details: Vec<MatchDetail>,
 }
 
 /// Scanner with a fixed-address scratch buffer. The scratch is zeroed
@@ -155,6 +171,15 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
                     while i + needle.len() <= nread {
                         if &buf[i..i + needle.len()] == needle {
                             report.matches += 1;
+                            if report.match_details.len() < 64 {
+                                report.match_details.push(MatchDetail {
+                                    addr: region_base + offset + i,
+                                    region_base,
+                                    region_size,
+                                    protect: mbi.Protect.0,
+                                    mem_type: mbi.Type.0,
+                                });
+                            }
                             if is_image {
                                 report.matches_in_image += 1;
                             } else if is_private {
@@ -180,6 +205,26 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
         addr = next;
     }
     report
+}
+
+/// Print every recorded match location, flagging matches whose address falls
+/// inside the scanner's own scratch buffer — those are scanner artifacts by
+/// construction (the scratch only ever holds copies of other memory).
+fn dump_match_forensics(label: &str, report: &ScanReport, scanner: &Scanner) {
+    let scratch_start = scanner.buf.as_ptr() as usize;
+    let scratch_end = scratch_start + scanner.buf.len();
+    eprintln!("  {label}: {} match(es)", report.matches);
+    for d in &report.match_details {
+        let tag = if d.addr >= scratch_start && d.addr < scratch_end {
+            "  <-- INSIDE SCANNER SCRATCH (artifact)"
+        } else {
+            ""
+        };
+        eprintln!(
+            "    @ {:#014x}  region=[{:#014x} +{:#x}] prot={:#x} type={:#x}{}",
+            d.addr, d.region_base, d.region_size, d.protect, d.mem_type, tag
+        );
+    }
 }
 
 #[test]
@@ -256,6 +301,16 @@ fn cosmic_text_residue_after_drop() {
         after_drop.regions_scanned,
         after_drop.bytes_scanned as f64 / (1024.0 * 1024.0)
     );
+    eprintln!(
+        "scratch=[{:#014x}..{:#014x}) needle@{:#014x}",
+        scanner.buf.as_ptr() as usize,
+        scanner.buf.as_ptr() as usize + scanner.buf.len(),
+        canary.as_ptr() as usize
+    );
+    dump_match_forensics("baseline", &baseline, &scanner);
+    dump_match_forensics("live", &live, &scanner);
+    dump_match_forensics("after_engine_drop", &initial_residue_floor, &scanner);
+    dump_match_forensics("after_drop", &after_drop, &scanner);
 
     // Sanity: while the secret is live we must be able to find its canary,
     // otherwise the scanner is broken and the `final_residue == 0` gate below
