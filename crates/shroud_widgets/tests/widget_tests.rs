@@ -6336,12 +6336,20 @@ fn hover_background_overrides_theme_default() {
 
 #[test]
 fn hover_fade_default_animates_and_requests_frames() {
-    // B-8 wiring: with the default (non-zero) transition, the first paint
-    // after entering a hoverable container must not have arrived at the
-    // hover color yet — it must be mid-fade and vote for another frame so
-    // the event loop keeps pumping until the fade settles.
-    use shroud_reactive::animation::{frame_requested, reset_frame_request};
+    // B-8 wiring: with the default (non-zero) transition, entering a
+    // hoverable container must not arrive at the hover color immediately —
+    // it must be mid-fade and vote for another frame so the event loop keeps
+    // pumping, then stop voting once it settles so the loop can idle again.
+    //
+    // The clock is frozen for the whole test because the default transition
+    // is a real 120ms timer: "still in flight at paint time" would otherwise
+    // be a race this test loses whenever the thread is descheduled past the
+    // fade between the MouseMove and the paint (passes in isolation, flakes
+    // under load). Frozen, the fade only moves when we move it.
+    use shroud_reactive::animation::{frame_requested, reset_frame_request, test_clock};
 
+    let clock = test_clock::freeze();
+    let theme = Theme::default();
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(100.0).height(100.0).hoverable());
     tree.compute_layout(100.0, 100.0);
@@ -6355,12 +6363,37 @@ fn hover_fade_default_animates_and_requests_frames() {
         &mut event_ctx,
     );
 
+    // A hair into the fade: a bg-less hoverable rests at the hover color with
+    // zero alpha, so mid-fade is a partial alpha. The step is deliberately
+    // tiny so this holds for any non-zero default rather than baking in the
+    // current 120ms.
+    clock.advance(std::time::Duration::from_millis(1));
     reset_frame_request();
-    let mut paint = PaintContext::default();
+    let mut paint = PaintContext::new(theme.clone());
     tree.paint(&mut paint);
     assert!(
         frame_requested(),
         "an in-flight hover fade must vote for another frame"
+    );
+    let mid = paint.rects[0].color;
+    assert!(
+        mid.a > 0.0 && mid.a < theme.hover.bg.a,
+        "fade must sit between transparent and the hover color, got alpha {}",
+        mid.a
+    );
+
+    // Well past any plausible transition: arrived exactly, and silent.
+    clock.advance(std::time::Duration::from_secs(1));
+    reset_frame_request();
+    let mut paint = PaintContext::new(theme.clone());
+    tree.paint(&mut paint);
+    assert_eq!(
+        paint.rects[0].color, theme.hover.bg,
+        "a settled fade paints the hover color exactly"
+    );
+    assert!(
+        !frame_requested(),
+        "a settled fade must stop voting so the event loop can idle"
     );
 }
 
