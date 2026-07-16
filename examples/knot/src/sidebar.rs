@@ -104,6 +104,12 @@ struct SidebarWiring {
     /// created note isn't hidden by a stale search.
     search: Signal<String>,
     tag_refresh: TagRefresh,
+    /// Note whose pin toggle should get focus back once the list rebuilds.
+    /// Set by the star's own click handler and consumed by the rebuild it
+    /// triggers — a baton between the two halves of `add_row`, since the
+    /// star that was focused and the star that ends up focused are two
+    /// different widgets. `None` whenever no rebuild is in flight.
+    refocus_pin: Rc<Cell<Option<NoteId>>>,
 }
 
 /// Build the whole sidebar pane. The wide signature mirrors `editor::build`
@@ -127,6 +133,7 @@ pub fn build(
         filter: Rc::new(Cell::new(0)),
         search: Signal::new(String::new()),
         tag_refresh,
+        refocus_pin: Rc::new(Cell::new(None)),
     };
 
     let pane = tree.add_child(
@@ -647,8 +654,8 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
     if !trash {
         let pin_label_state = Rc::clone(&w.state);
         let pin_color_state = Rc::clone(&w.state);
-        let w = w.clone();
-        tree.add_child(
+        let w_click = w.clone();
+        let star = tree.add_child(
             row,
             Button::reactive_label(move || {
                 if pin_label_state.borrow().is_pinned(note_id) {
@@ -669,11 +676,24 @@ fn add_row(tree: &mut WidgetTree, parent: usize, note_id: NoteId, w: &SidebarWir
                 }
             }))
             .on_click(move |ctx| {
-                w.state.borrow_mut().toggle_pin(note_id);
+                w_click.state.borrow_mut().toggle_pin(note_id);
+                // The rebuild below tombstones this very button — focus goes
+                // with it, so a Space-pin would drop the user out of the tab
+                // order. Name the row that should get it back; the rebuilt
+                // star claims the baton below.
+                w_click.refocus_pin.set(Some(note_id));
                 // Pin state changed the sort order — re-sort the visible rows.
-                rebuild_list(&w, ctx);
+                rebuild_list(&w_click, ctx);
             }),
         );
+
+        // Other half: this build may *be* that rebuild. `refocus_initially`
+        // no-ops unless a removal really did clear focus this frame, and it
+        // carries the old ring state over, so the mouse path stays ringless.
+        if w.refocus_pin.get() == Some(note_id) {
+            w.refocus_pin.set(None);
+            tree.refocus_initially(star);
+        }
     }
 
     let label_state = Rc::clone(&w.state);

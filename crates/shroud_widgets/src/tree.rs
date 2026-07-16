@@ -83,12 +83,23 @@ pub struct WidgetTree {
     /// [`Self::advance_focus`] (Tab/Shift+Tab) and invalidated by
     /// [`Self::remove`] so a removed widget never stays focused.
     focus: FocusManager,
-    /// Deferred initial focus queued by [`Self::focus_initially`]. Consumed
-    /// by [`Self::flush_pending_focus`] — typically called once per redraw
-    /// by the event loop. One-shot: the field is taken and cleared on flush,
-    /// so re-arming requires another `focus_initially` call (e.g. inside a
+    /// Deferred initial focus queued by [`Self::focus_initially`] /
+    /// [`Self::refocus_initially`], with the reason to apply it under.
+    /// Consumed by [`Self::flush_pending_focus`] — typically called once per
+    /// redraw by the event loop. One-shot: the field is taken and cleared on
+    /// flush, so re-arming requires another call (e.g. inside a
     /// `replace_screen` build closure).
-    pending_initial_focus: Option<usize>,
+    pending_initial_focus: Option<(usize, FocusReason)>,
+    /// The `:focus-visible` flag of the widget whose removal just cleared
+    /// focus — stashed by [`Self::remove`], consumed by
+    /// [`Self::refocus_initially`] so a rebuild can hand focus back exactly
+    /// as it was. `None` means "no focus was lost", which is what makes
+    /// `refocus_initially` a no-op rather than a focus thief.
+    ///
+    /// Frame-scoped: [`Self::flush_pending_focus`] drops it unconditionally,
+    /// so an unconsumed stash can never be picked up by a later, unrelated
+    /// rebuild.
+    dropped_focus_visible: Option<bool>,
     /// Active overlay layers (modals, dropdowns, context menus), painted
     /// in push order over the main root. Topmost layer (last push) gets
     /// event priority. While `layers` is non-empty, the main tree
@@ -263,6 +274,7 @@ impl WidgetTree {
             pointer_capture: None,
             focus: FocusManager::new(),
             pending_initial_focus: None,
+            dropped_focus_visible: None,
             layers: Vec::new(),
             root_replaced: false,
             viewport: (0.0, 0.0),
@@ -296,10 +308,44 @@ impl WidgetTree {
     /// (e.g. inside a `replace_screen` build closure that wants to focus
     /// the first input on the new screen).
     pub fn focus_initially(&mut self, idx: usize) {
-        self.pending_initial_focus = Some(idx);
+        self.pending_initial_focus = Some((idx, FocusReason::Programmatic));
     }
 
-    /// Apply any pending initial focus from [`Self::focus_initially`].
+    /// Hand focus back to a widget that a rebuild just replaced, preserving
+    /// the focus ring exactly as it was.
+    ///
+    /// [`Self::rebuild_children`](crate::event::EventContext::rebuild_children)
+    /// tombstones every child before running the builder, so a row's own
+    /// button that rebuilds its list — a pin toggle that re-sorts, a filter
+    /// chip that re-queries — activates itself out of existence, and
+    /// [`Self::remove`] drops focus with it. The replacement is a fresh index,
+    /// so the tree cannot know it is "the same" widget: only the app holds
+    /// that identity mapping. Call this from inside the build closure once the
+    /// replacement is in the tree to close the loop.
+    ///
+    /// Prefer this over [`Self::focus_initially`] whenever focus is being
+    /// *restored* rather than moved. `focus_initially` is programmatic, so it
+    /// always shows a ring; using it here would paint one on a widget the user
+    /// reached with the mouse. This carries the previous ring state instead,
+    /// which makes the rebuild invisible to the `:focus-visible` heuristic —
+    /// a Space-activated pin keeps its ring, a clicked one stays ringless.
+    ///
+    /// A no-op unless a removal cleared focus earlier in this same frame, so
+    /// arming it for a row that never had focus cannot steal focus from
+    /// elsewhere. Like `focus_initially` it is one-shot and overwrites any
+    /// prior pending target.
+    pub fn refocus_initially(&mut self, idx: usize) {
+        // No focus was lost → nothing to restore. Bailing (rather than
+        // focusing anyway) is what lets a builder arm this unconditionally
+        // for its "should be refocused" row without a `focused()` check.
+        let Some(visible) = self.dropped_focus_visible.take() else {
+            return;
+        };
+        self.pending_initial_focus = Some((idx, FocusReason::Restored { visible }));
+    }
+
+    /// Apply any pending initial focus from [`Self::focus_initially`] or
+    /// [`Self::refocus_initially`].
     ///
     /// Called by the event loop at the top of each redraw. Cheap when
     /// nothing is pending (single field check). When a target is pending,
@@ -307,10 +353,19 @@ impl WidgetTree {
     /// drains any commands those handlers enqueue so the focus change
     /// settles before paint.
     pub fn flush_pending_focus(&mut self, event_ctx: &mut EventContext) {
-        let Some(target) = self.pending_initial_focus.take() else {
+        // End of the window in which a removal's ring state can be claimed.
+        // Every rebuild is followed by a redraw, so a builder that wanted to
+        // restore focus has already called `refocus_initially` (which takes
+        // the stash) by now; anything left is from a removal nobody restored.
+        // Dropping it here — before the early return below, so it happens on
+        // every frame — keeps a stale flag from being handed to an unrelated
+        // rebuild a hundred frames later.
+        self.dropped_focus_visible = None;
+
+        let Some((target, reason)) = self.pending_initial_focus.take() else {
             return;
         };
-        // Race: target tombstoned between `focus_initially` and flush. Skip
+        // Race: target tombstoned between the arming call and flush. Skip
         // the focus call entirely — `WidgetTree::focus` would still update
         // the FocusManager pointer to a tombstoned slot otherwise (it only
         // guards the FocusGained dispatch, not the pointer set). One-shot
@@ -318,7 +373,7 @@ impl WidgetTree {
         if !self.contains(target) {
             return;
         }
-        self.focus(Some(target), event_ctx);
+        self.focus_with_reason(Some(target), reason, event_ctx);
         self.drain_commands(event_ctx);
     }
 
@@ -519,8 +574,14 @@ impl WidgetTree {
         // not in the fresh tab order and jump to first/last, which looks
         // fine but masks the bug of the focus pointer dangling on a
         // tombstoned slot.
+        //
+        // Stash the ring state on the way out. A rebuild often replaces the
+        // focused widget with an equivalent one (see `refocus_initially`);
+        // the flag has to be captured here because `focus.set(None)` forces
+        // it false, so by the time the builder runs it is gone.
         if let Some(f) = self.focus.focused() {
             if to_remove.contains(&f) {
+                self.dropped_focus_visible = Some(self.focus.visible());
                 self.focus.set(None);
             }
         }
@@ -1870,6 +1931,17 @@ impl WidgetTree {
     /// automatically when the focused widget is removed from the tree.
     pub fn focused(&self) -> Option<usize> {
         self.focus.focused()
+    }
+
+    /// Whether the focused widget should paint a focus ring — the
+    /// `:focus-visible` state the paint pass publishes each frame.
+    ///
+    /// `false` when nothing is focused, and when focus was acquired by
+    /// pointing at the widget. The companion to [`Self::focused`]: focus is
+    /// two facts, where it is and whether it shows, and code that restores
+    /// focus across a rebuild has to reason about both.
+    pub fn focus_visible(&self) -> bool {
+        self.focus.visible()
     }
 
     /// Index of the widget that currently holds the pointer capture, if any.
