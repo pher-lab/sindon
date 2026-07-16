@@ -134,10 +134,14 @@ jobs:
     #     execution removes that cross-scanner pollution.
     #  2. Retry the run up to 3 times (fresh process each attempt). A *real*
     #     residue leak is deterministic — the plaintext is physically present
-    #     every run — so it fails all three and is still caught. What retry
-    #     absorbs is the runner's nondeterministic stale-read of just-freed
-    #     pages (freeing memory cannot create a canary; see `settled_scan` in
-    #     the test), which varies run to run.
+    #     every run — so it fails all three and is still caught; only
+    #     runner-specific nondeterminism is absorbed. (The 2026-07 flake this
+    #     used to absorb was the scanner ReadProcessMemory-ing a chunk window
+    #     that overlaps its own scratch buffer — an overlapping RPM is a
+    #     forward copy over its own source, smearing any canary in the sliver
+    #     before the scratch into phantom matches. The scanner now hops over
+    #     its scratch; see the Scanner doc in either residue test. Retry
+    #     stays as cheap insurance.)
     #
     # A pass on attempt >= 2 emits a workflow warning annotation so absorbed
     # flakes stay visible instead of vanishing into the log. "Real leaks are

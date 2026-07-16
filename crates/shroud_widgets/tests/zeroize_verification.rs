@@ -124,11 +124,19 @@ struct ScanReport {
     match_details: Vec<MatchDetail>,
 }
 
-/// Scanner with a fixed-address scratch buffer. The scratch is zeroed
-/// before every read so that, when the walk crosses scratch's own
-/// address (a self-read which the kernel turns into a no-op), we don't
-/// retain canary bytes from the previous chunk and produce a spurious
-/// match.
+/// Scanner with a fixed-address scratch buffer.
+///
+/// The walk never reads a window that overlaps the scratch's own address
+/// range. `ReadProcessMemory` with overlapping src/dst is a plain forward
+/// copy — NOT a no-op — so reading the chunk that contains the scratch
+/// smears the sliver `[window_start, scratch_start)` across the whole
+/// window with period `scratch_start - window_start`, replicating any real
+/// canary in that sliver into `floor(64K/period)` phantom matches. That was
+/// the 2026-07 CI-only "residue after drop" flake: dropping the widget tree
+/// resized the scratch's heap region, shifting the chunk grid so the needle
+/// Vec (allocated just before the scratch, hence nearby on the heap) landed
+/// in the sliver with a small period. Skipping the scratch loses nothing:
+/// it only ever holds copies of memory that is counted at its real address.
 struct Scanner {
     buf: Box<[u8]>,
 }
@@ -173,15 +181,27 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
             // To catch a match that straddles a chunk boundary, the next
             // chunk overlaps the previous by (needle.len() - 1) bytes.
             let overlap = needle.len() - 1;
+            let scratch_start = buf.as_ptr() as usize;
+            let scratch_end = scratch_start + buf.len();
             while offset < region_size {
-                let want = (region_size - offset).min(buf.len());
-                // Zero scratch before every read. If the kernel turns
-                // this into a self-read (when we happen to be reading
-                // scratch's own pages), we'll see zeros instead of the
-                // previous chunk's content — and so won't double-count
-                // a canary that's actually elsewhere.
-                for b in buf.iter_mut() {
-                    *b = 0;
+                let read_start = region_base + offset;
+                // Never read a window that overlaps the scratch itself: an
+                // overlapping ReadProcessMemory forward-copies over its own
+                // source, smearing the sliver before the scratch into
+                // phantom canary copies (see the Scanner doc). Hop over it.
+                if read_start >= scratch_start && read_start < scratch_end {
+                    offset = (scratch_end - region_base).min(region_size);
+                    continue;
+                }
+                let mut want = (region_size - offset).min(buf.len());
+                if read_start < scratch_start && read_start + want > scratch_start {
+                    // Stop just short of the scratch; a match straddling
+                    // into it could only be scratch bytes, not real data.
+                    want = scratch_start - read_start;
+                    if want < needle.len() {
+                        offset = (scratch_end - region_base).min(region_size);
+                        continue;
+                    }
                 }
                 let mut nread: usize = 0;
                 let ok = unsafe {
@@ -253,42 +273,6 @@ fn dump_match_forensics(label: &str, report: &ScanReport, scanner: &Scanner) {
             d.addr, d.region_base, d.region_size, d.protect, d.mem_type, tag
         );
     }
-}
-
-/// A residue scan hardened against the *stale-freed-page* reads that make a
-/// scan taken immediately after a free flaky on shared CI runners.
-///
-/// Key fact: **freeing memory cannot create a canary.** So any match that
-/// appears only right after a free — and vanishes once the runner's memory
-/// manager settles that page — is a stale read of the page's pre-free content,
-/// not recoverable plaintext. (Seen on hosted `windows-latest`: `after_clear`,
-/// scanned while the buffer is live-and-zeroed, is reliably 0, yet the very
-/// next scan taken *after the tree drops* reports +6/+7 nondeterministically —
-/// freeing zeroed/live memory cannot add real copies.)
-///
-/// So we scan a few times with a short pause between and keep the SMALLEST
-/// count. A genuinely retained (still-referenced) copy is present in every
-/// scan and survives the min — detection strength is unchanged; a stale-read
-/// artifact clears as the freed page settles. Local runs already sit at the
-/// true value, so this is a no-op there.
-fn settled_scan(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
-    const REPS: usize = 5;
-    const SETTLE: std::time::Duration = std::time::Duration::from_millis(40);
-    let mut best = scan_self_for(scanner, needle);
-    eprintln!("  settled_scan rep 1/{REPS}: {} match(es)", best.matches);
-    for rep in 1..REPS {
-        std::thread::sleep(SETTLE);
-        let r = scan_self_for(scanner, needle);
-        eprintln!(
-            "  settled_scan rep {}/{REPS}: {} match(es)",
-            rep + 1,
-            r.matches
-        );
-        if r.matches < best.matches {
-            best = r;
-        }
-    }
-    best
 }
 
 // ─── Verification Plan #4 ─────────────────────────────────────────────────
@@ -365,11 +349,7 @@ fn secure_input_clear_leaves_no_canary_in_memory() {
     };
 
     // ── Phase 2: post-drop ───────────────────────────────────────────
-    // Scanned right after the tree (and its SecureString) were freed, so use
-    // the settle-and-take-min scan: a stale read of the just-freed page can
-    // otherwise report the pre-zeroize bytes on a shared CI runner. Real
-    // retained residue would survive every rep. See `settled_scan`.
-    let after_drop = settled_scan(&mut scanner, &canary);
+    let after_drop = scan_self_for(&mut scanner, &canary);
 
     // ── Assertions ────────────────────────────────────────────────────
     let typing_copies = live_after_type.matches.saturating_sub(baseline.matches);
@@ -514,11 +494,7 @@ fn secure_input_reveal_paint_leaves_no_canary() {
             !p.secure_glyphs.is_empty(),
             "a revealed field must actually shape the secret (into the secure atlas)"
         );
-        // The revealed paint shapes the real secret into transient cosmic-text
-        // buffers that the zeroizing fork wipes and frees at the end of the
-        // call. This scan therefore reads just-freed pages; settle-and-min so a
-        // stale read of their pre-zeroize content doesn't masquerade as a leak.
-        let after_reveal_paint = settled_scan(&mut scanner, &canary);
+        let after_reveal_paint = scan_self_for(&mut scanner, &canary);
 
         (after_type, after_reveal_paint)
     };

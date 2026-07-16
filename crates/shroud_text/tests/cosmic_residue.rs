@@ -96,11 +96,19 @@ struct ScanReport {
     match_details: Vec<MatchDetail>,
 }
 
-/// Scanner with a fixed-address scratch buffer. The scratch is zeroed
-/// before every read so that, when the walk crosses scratch's own
-/// address (a self-read which the kernel turns into a no-op), we don't
-/// retain canary bytes from the previous chunk and produce a spurious
-/// match.
+/// Scanner with a fixed-address scratch buffer.
+///
+/// The walk never reads a window that overlaps the scratch's own address
+/// range. `ReadProcessMemory` with overlapping src/dst is a plain forward
+/// copy — NOT a no-op — so reading the chunk that contains the scratch
+/// smears the sliver `[window_start, scratch_start)` across the whole
+/// window with period `scratch_start - window_start`, replicating any real
+/// canary in that sliver into `floor(64K/period)` phantom matches. That was
+/// the 2026-07 CI-only "residue after drop" flake: dropping the shaped tree
+/// resized the scratch's heap region, shifting the chunk grid so the needle
+/// Vec (allocated just before the scratch, hence nearby on the heap) landed
+/// in the sliver with a small period. Skipping the scratch loses nothing:
+/// it only ever holds copies of memory that is counted at its real address.
 struct Scanner {
     buf: Box<[u8]>,
 }
@@ -145,15 +153,27 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
             // To catch a match that straddles a chunk boundary, the next
             // chunk overlaps the previous by (needle.len() - 1) bytes.
             let overlap = needle.len() - 1;
+            let scratch_start = buf.as_ptr() as usize;
+            let scratch_end = scratch_start + buf.len();
             while offset < region_size {
-                let want = (region_size - offset).min(buf.len());
-                // Zero scratch before every read. If the kernel turns
-                // this into a self-read (when we happen to be reading
-                // scratch's own pages), we'll see zeros instead of the
-                // previous chunk's content — and so won't double-count
-                // a canary that's actually elsewhere.
-                for b in buf.iter_mut() {
-                    *b = 0;
+                let read_start = region_base + offset;
+                // Never read a window that overlaps the scratch itself: an
+                // overlapping ReadProcessMemory forward-copies over its own
+                // source, smearing the sliver before the scratch into
+                // phantom canary copies (see the Scanner doc). Hop over it.
+                if read_start >= scratch_start && read_start < scratch_end {
+                    offset = (scratch_end - region_base).min(region_size);
+                    continue;
+                }
+                let mut want = (region_size - offset).min(buf.len());
+                if read_start < scratch_start && read_start + want > scratch_start {
+                    // Stop just short of the scratch; a match straddling
+                    // into it could only be scratch bytes, not real data.
+                    want = scratch_start - read_start;
+                    if want < needle.len() {
+                        offset = (scratch_end - region_base).min(region_size);
+                        continue;
+                    }
                 }
                 let mut nread: usize = 0;
                 let ok = unsafe {
