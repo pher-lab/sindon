@@ -139,6 +139,13 @@ jobs:
     #     pages (freeing memory cannot create a canary; see `settled_scan` in
     #     the test), which varies run to run.
     #
+    # A pass on attempt >= 2 emits a workflow warning annotation so absorbed
+    # flakes stay visible instead of vanishing into the log. "Real leaks are
+    # deterministic" only holds while the tested flows are single-threaded and
+    # deterministic; a *rising* flake rate here is the fingerprint of a new
+    # intermittent retention path (e.g. an eviction-dependent cache) that the
+    # retry would otherwise silently mask — investigate, don't ignore.
+    #
     # Do not remove either layer.
     steps:
       - uses: actions/checkout@v5
@@ -149,7 +156,12 @@ jobs:
           for ($i = 1; $i -le 3; $i++) {
             Write-Host "residue attempt $i/3"
             cargo test -p shroud_text --test cosmic_residue -- --test-threads=1
-            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($LASTEXITCODE -eq 0) {
+              if ($i -gt 1) {
+                Write-Host "::warning title=Residue gate flaked (absorbed)::cosmic_residue passed on attempt $i/3. Retry only absorbs nondeterministic runner noise; a real leak is deterministic and fails all 3 attempts. If this warning becomes frequent, suspect a new intermittent retention path, not the runner."
+              }
+              exit 0
+            }
           }
           exit 1
       - name: SecureInput lock flow leaves zero plaintext residue
@@ -157,6 +169,11 @@ jobs:
           for ($i = 1; $i -le 3; $i++) {
             Write-Host "residue attempt $i/3"
             cargo test -p shroud_widgets --test zeroize_verification -- --test-threads=1
-            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($LASTEXITCODE -eq 0) {
+              if ($i -gt 1) {
+                Write-Host "::warning title=Residue gate flaked (absorbed)::zeroize_verification passed on attempt $i/3. Retry only absorbs nondeterministic runner noise; a real leak is deterministic and fails all 3 attempts. If this warning becomes frequent, suspect a new intermittent retention path, not the runner."
+              }
+              exit 0
+            }
           }
           exit 1
