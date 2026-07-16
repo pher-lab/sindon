@@ -2141,17 +2141,25 @@ impl WidgetTree {
     /// Call once per frame *after* layout, so the hit-test sees fresh
     /// geometry: a handler that popped the layer may also have rebuilt the
     /// tree beneath it (choosing a dropdown item that reorders the list), and
-    /// those nodes have no resolved rect until the layout pass runs. Skipped
+    /// those nodes have no resolved rect until the layout pass runs. Deferred
     /// while the pointer is captured — a drag owns the pointer and must not be
-    /// interrupted by a hover change — and before the first pointer event of
-    /// the session, when the cursor's position is simply unknown.
+    /// interrupted by a hover change — and skipped before the first pointer
+    /// event of the session, when the cursor's position is simply unknown.
     pub fn resync_hover(&mut self, event_ctx: &mut EventContext) -> bool {
-        if !std::mem::take(&mut self.hover_dirty) {
-            return false;
-        }
+        // Test the capture *before* consuming `hover_dirty`: a drag defers the
+        // resync, it does not cancel it. Taking the flag first would burn it on
+        // a frame that declines to use it, so a rebuild landing mid-drag would
+        // leave the replacement dark even once the drag released — the exact
+        // hole this resync exists to close.
         if self.pointer_capture.is_some() {
             return false;
         }
+        if !std::mem::take(&mut self.hover_dirty) {
+            return false;
+        }
+        // Unlike the capture, this needs no deferral: `last_pointer_pos` is
+        // only `None` before the first pointer event, and the event that
+        // clears it is a `MouseMove` that resolves hover on its own.
         let Some(pos) = self.last_pointer_pos else {
             return false;
         };

@@ -6486,10 +6486,11 @@ fn rebuild_clear_of_the_cursor_invents_no_hover() {
 }
 
 #[test]
-fn rebuild_mid_drag_does_not_resync_hover_under_the_captured_pointer() {
-    // A drag owns the pointer, so hover must not move while one is in
-    // flight — `resync_hover` declines outright rather than re-resolving
-    // under a cursor whose moves are being routed elsewhere.
+fn rebuild_mid_drag_defers_hover_resync_until_the_drag_releases() {
+    // A drag owns the pointer, so hover must not move while one is in flight.
+    // But the resync is *deferred*, not cancelled: the rebuild's claim on a
+    // resync outlives the drag, so the replacement lights up the moment the
+    // capture releases rather than waiting for the user to jiggle the mouse.
     let events = Rc::new(RefCell::new(Vec::new()));
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(200.0).height(200.0));
@@ -6526,15 +6527,60 @@ fn rebuild_mid_drag_does_not_resync_hover_under_the_captured_pointer() {
     );
     assert_eq!(tree.hovered(), Some(probe), "hover is still on the probe");
 
-    let (_fresh, changed) = rebuild_row_and_resync(&mut tree, &mut ev, row, events.clone());
+    // Drag back over the probe row. The capture routes this to the input, so
+    // hover stays frozen — but it does move `last_pointer_pos`, which is what
+    // the resync will replay once the drag lets go.
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(probe_rect.origin.x + 5.0, probe_rect.origin.y + 5.0),
+        },
+        &mut ev,
+    );
+    assert_eq!(
+        tree.hovered(),
+        Some(probe),
+        "a captured move re-resolves no hover"
+    );
 
-    assert!(!changed, "a captured pointer suppresses the resync");
+    let (fresh, changed) = rebuild_row_and_resync(&mut tree, &mut ev, row, events.clone());
+
+    assert!(!changed, "a captured pointer defers the resync");
     assert_eq!(
         tree.hovered(),
         None,
-        "removal cleared it and nothing re-resolved"
+        "removal cleared it and nothing re-resolved mid-drag"
     );
     assert!(events.borrow().is_empty(), "no hover handed out mid-drag");
+
+    // Release the drag over the probe row. `MouseUp` drops the capture but
+    // resolves no hover of its own — only `MouseMove` does — so the deferred
+    // resync is the only thing that can light the replacement.
+    tree.dispatch_event(
+        &WidgetEvent::MouseUp {
+            position: Point::new(probe_rect.origin.x + 5.0, probe_rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    assert_eq!(
+        tree.pointer_capture(),
+        None,
+        "the drag released the pointer"
+    );
+
+    let changed = tree.resync_hover(&mut ev);
+
+    assert!(changed, "the deferred resync ran once the capture cleared");
+    assert_eq!(
+        tree.hovered(),
+        Some(fresh),
+        "the cursor never moved, so it is still over the replacement"
+    );
+    assert_eq!(
+        *events.borrow(),
+        vec!["star:enter".to_string()],
+        "the replacement lights up without a mouse move"
+    );
 }
 
 // ── Input: multi-line (Phase 25, A-2) ────────────────────────────
