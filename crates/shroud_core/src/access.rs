@@ -20,6 +20,12 @@
 //! protected node with a fixed generic name ("Password" / "Protected content")
 //! and never derive name or value from their buffer. See the hard tests that
 //! pin this in the widgets and app crates.
+//!
+//! The action half ([`AccessAction`]) keeps the same discipline: there is no
+//! action that carries text *into* a widget, so an AT can operate a control
+//! without a channel that could round-trip a secret.
+
+use crate::geometry::Rect;
 
 /// The accessibility role of a widget — what kind of control it is, in the
 /// vocabulary an OS screen reader understands. Translated to `accesskit::Role`
@@ -38,7 +44,9 @@ pub enum AccessRole {
     Button,
     /// A two-state checkbox.
     CheckBox,
-    /// One option within a radio group.
+    /// The container of a set of mutually exclusive radio buttons.
+    RadioGroup,
+    /// One option within a [`RadioGroup`](AccessRole::RadioGroup).
     RadioButton,
     /// An on/off toggle switch.
     Switch,
@@ -57,6 +65,79 @@ pub enum AccessRole {
     ScrollView,
     /// A modal dialog / popover surface.
     Dialog,
+}
+
+impl AccessRole {
+    /// Whether a control of this role has a default "activate" action — the
+    /// thing a screen reader performs when the user asks it to click/press the
+    /// node ([`AccessAction::Click`]).
+    ///
+    /// A property of the vocabulary, not of any one widget: it decides which
+    /// nodes advertise the action to the OS. Text fields are deliberately
+    /// absent — activating one means focusing it, which is
+    /// [`AccessAction::Focus`]'s job.
+    pub fn is_activatable(self) -> bool {
+        matches!(
+            self,
+            AccessRole::Button
+                | AccessRole::CheckBox
+                | AccessRole::RadioButton
+                | AccessRole::Switch
+                | AccessRole::Tab
+        )
+    }
+}
+
+/// Something an assistive technology asks a widget to *do* — the operable half
+/// of the a11y contract, next to the perceivable [`AccessNode`].
+///
+/// Translated from `accesskit::Action` at the `shroud_app` edge and routed to
+/// the target widget's `Widget::accessibility_action`. The set is deliberately
+/// small: every variant maps onto something the widget already does for a mouse
+/// or a key, so an AT can only reach behaviour a sighted user could reach too.
+///
+/// # Secret safety
+///
+/// There is no text-setting action. `accesskit` has one (`SetValue` with a
+/// string), and refusing to translate it means an AT can never push characters
+/// into a field — the mirror image of a protected node never handing characters
+/// out. [`SetValue`](Self::SetValue) is numeric-only, for range controls.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AccessAction {
+    /// Perform the control's default action: press a button, flip a checkbox
+    /// or switch, choose an option. Only sent to nodes whose role
+    /// [`is_activatable`](AccessRole::is_activatable).
+    Click,
+    /// Move keyboard focus to this node. Handled by the tree (which owns the
+    /// `FocusManager`), not by the widget.
+    Focus,
+    /// Step a range control up by its natural step.
+    Increment,
+    /// Step a range control down by its natural step.
+    Decrement,
+    /// Set a range control to an absolute value (clamped / snapped by the
+    /// widget, exactly as a drag would be).
+    SetValue(f64),
+}
+
+/// A synthetic child node a widget contributes to the a11y tree: one option
+/// inside a composite control that is a *single* widget.
+///
+/// `Segmented` and `RadioGroup` paint N options themselves rather than owning N
+/// child widgets, so without this a screen reader would see one node and never
+/// learn what the other choices are. Each child gets a derived id (see the
+/// widgets crate's `accessibility` module), so the AT can target an individual
+/// option with [`AccessAction::Click`].
+///
+/// `bounds` is in the owner's own coordinate space — the same rect the widget
+/// gets in `paint` — and the tree walk folds in any layer offset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessChild {
+    /// The option's semantics: role ([`Tab`](AccessRole::Tab) /
+    /// [`RadioButton`](AccessRole::RadioButton)), name, selected state.
+    pub node: AccessNode,
+    /// The option's box, in the owner widget's coordinate space.
+    pub bounds: Rect,
 }
 
 /// The numeric state of a range control ([`AccessRole::Slider`]): its bounds
@@ -212,6 +293,35 @@ mod tests {
         let n = AccessNode::new(AccessRole::TextInput).value("my note");
         assert_eq!(n.exposed_value(), Some("my note"));
         assert!(!n.is_protected());
+    }
+
+    #[test]
+    fn only_activatable_roles_take_a_click() {
+        for role in [
+            AccessRole::Button,
+            AccessRole::CheckBox,
+            AccessRole::RadioButton,
+            AccessRole::Switch,
+            AccessRole::Tab,
+        ] {
+            assert!(role.is_activatable(), "{role:?} should take a click");
+        }
+        // Text fields included: an AT focuses them, it does not "press" them.
+        // A secret field must never look pressable either.
+        for role in [
+            AccessRole::Window,
+            AccessRole::Group,
+            AccessRole::Label,
+            AccessRole::Slider,
+            AccessRole::RadioGroup,
+            AccessRole::TabList,
+            AccessRole::TextInput,
+            AccessRole::PasswordInput,
+            AccessRole::ScrollView,
+            AccessRole::Dialog,
+        ] {
+            assert!(!role.is_activatable(), "{role:?} should not take a click");
+        }
     }
 
     #[test]

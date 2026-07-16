@@ -11,8 +11,9 @@
 //! spirit, a positive control proves the pipeline actually carries text so the
 //! negative assertion can't pass vacuously.
 
-use shroud_app::a11y::snapshot_to_tree_update;
-use shroud_core::{Point, Rect, Size};
+use accesskit::{Action, ActionData, ActionRequest, NodeId, TreeId};
+use shroud_app::a11y::{action_from_request, snapshot_to_tree_update};
+use shroud_core::{AccessAction, Point, Rect, Size};
 use shroud_security::SecureString;
 use shroud_widgets::*;
 
@@ -69,4 +70,92 @@ fn translated_tree_update_never_carries_a_secret() {
         "a plain input's text must reach the accesskit tree — otherwise the \
          no-secret assertion above would pass vacuously"
     );
+}
+
+/// The inbound mirror of the gate above: `accesskit` has actions that carry
+/// text *into* a control, and the translation must refuse every one of them —
+/// so no assistive technology can push characters into a field, masked or not.
+#[test]
+fn no_action_can_carry_text_into_the_tree() {
+    fn request(action: Action, data: Option<ActionData>) -> ActionRequest {
+        ActionRequest {
+            action,
+            target_tree: TreeId::ROOT,
+            target_node: NodeId(7),
+            data,
+        }
+    }
+
+    const PAYLOAD: &str = "text-an-AT-tried-to-inject";
+    let text_bearing = [
+        request(
+            Action::SetValue,
+            Some(ActionData::Value(PAYLOAD.into())), // the string form of SetValue
+        ),
+        request(
+            Action::ReplaceSelectedText,
+            Some(ActionData::Value(PAYLOAD.into())),
+        ),
+    ];
+    for req in text_bearing {
+        assert_eq!(
+            action_from_request(&req),
+            None,
+            "{:?} carrying text must not translate to any action",
+            req.action
+        );
+    }
+
+    // Positive control: the numeric form of the *same* accesskit action does
+    // translate, so the refusal above is about the text, not about SetValue
+    // being unimplemented.
+    assert_eq!(
+        action_from_request(&request(
+            Action::SetValue,
+            Some(ActionData::NumericValue(0.5))
+        )),
+        Some((7, AccessAction::SetValue(0.5))),
+        "a numeric SetValue is the one value channel an AT gets"
+    );
+}
+
+#[test]
+fn requests_translate_to_the_framework_vocabulary() {
+    fn bare(action: Action, target: u64) -> ActionRequest {
+        ActionRequest {
+            action,
+            target_tree: TreeId::ROOT,
+            target_node: NodeId(target),
+            data: None,
+        }
+    }
+
+    for (action, expected) in [
+        (Action::Click, AccessAction::Click),
+        (Action::Focus, AccessAction::Focus),
+        (Action::Increment, AccessAction::Increment),
+        (Action::Decrement, AccessAction::Decrement),
+    ] {
+        assert_eq!(
+            action_from_request(&bare(action, 42)),
+            Some((42, expected)),
+            "{action:?} must reach the tree as {expected:?} against its target"
+        );
+    }
+
+    // Actions we don't implement are dropped rather than guessed at — an AT is
+    // free to ask for anything in accesskit's much wider set.
+    for action in [
+        Action::Blur,
+        Action::ShowContextMenu,
+        Action::ScrollIntoView,
+        Action::Expand,
+        Action::SetValue, // without the numeric data it carries nothing
+    ] {
+        assert_eq!(
+            action_from_request(&bare(action, 42)),
+            None,
+            "{action:?} is not implemented and must not be invented"
+        );
+    }
 }

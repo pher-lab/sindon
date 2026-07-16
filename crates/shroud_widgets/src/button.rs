@@ -7,7 +7,7 @@ use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, Widget
 use crate::interaction::{InteractionState, Release};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{AccessNode, AccessRole, Color, Lerp, Rect, Size};
+use shroud_core::{AccessAction, AccessNode, AccessRole, Color, Lerp, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Animated, Easing, Reactive};
 use shroud_text::{TextAttrs, TextFamily};
@@ -473,6 +473,23 @@ impl Widget for Button {
         )
     }
 
+    fn accessibility_action(
+        &mut self,
+        action: AccessAction,
+        _option: Option<usize>,
+        layout: Rect,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        // A screen reader's "press" is the fourth activation route, joining
+        // mouse-release / Enter / Space on the shared `activate` path — and it
+        // is inert while disabled, exactly like the other three.
+        if action != AccessAction::Click || self.disabled.get() {
+            return EventResult::Ignored;
+        }
+        self.activate(layout, ctx);
+        EventResult::Consumed
+    }
+
     fn menu_switch_trigger(&self) -> bool {
         // A disabled trigger is inert (it can't open its own menu), so it
         // doesn't claim the one-click switch path either — the outside click
@@ -789,6 +806,39 @@ mod tests {
         } else {
             WidgetEvent::MouseUp { position, button }
         }
+    }
+
+    #[test]
+    fn screen_reader_click_fires_both_activation_handlers() {
+        // The AT's press is the fourth route onto `activate`, so it must hand
+        // `on_click_rect` the same rect a keyboard activation would.
+        let clicked = Rc::new(Cell::new(false));
+        let seen_rect = Rc::new(Cell::new(None));
+        let c2 = Rc::clone(&clicked);
+        let r2 = Rc::clone(&seen_rect);
+        let mut b = Button::new("ok")
+            .on_click(move |_| c2.set(true))
+            .on_click_rect(move |r, _| r2.set(Some(r)));
+        let mut ctx = EventContext::new();
+
+        let result = b.accessibility_action(AccessAction::Click, None, rect(), &mut ctx);
+        assert_eq!(result, EventResult::Consumed);
+        assert!(clicked.get(), "on_click fired");
+        assert_eq!(seen_rect.get(), Some(rect()), "on_click_rect got our rect");
+    }
+
+    #[test]
+    fn disabled_button_refuses_the_screen_reader_click() {
+        let clicked = Rc::new(Cell::new(false));
+        let c2 = Rc::clone(&clicked);
+        let mut b = Button::new("ok")
+            .disabled(true)
+            .on_click(move |_| c2.set(true));
+        let mut ctx = EventContext::new();
+
+        let result = b.accessibility_action(AccessAction::Click, None, rect(), &mut ctx);
+        assert_eq!(result, EventResult::Ignored, "disabled blocks activation");
+        assert!(!clicked.get(), "handler must not fire");
     }
 
     // Audit regression (disabled early-return): a button disabled mid-focus

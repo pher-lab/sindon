@@ -19,7 +19,7 @@ use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, Widget
 use crate::interaction::{InteractionState, dim_over, step_selection};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{AccessNode, AccessRole, Color, Rect, Size};
+use shroud_core::{AccessAction, AccessChild, AccessNode, AccessRole, Color, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Reactive, Signal};
 
@@ -206,15 +206,61 @@ impl Widget for RadioGroup {
     }
 
     fn accessibility(&self) -> Option<AccessNode> {
-        // MVP (read-only): the group is one node whose name is the selected
-        // option's label, so the active choice is announced. Per-option
-        // `RadioButton` child nodes (each selectable individually) are deferred
-        // to the operable slice — the same treatment as `Segmented`.
-        let mut node = AccessNode::new(AccessRole::TabList).disabled(self.disabled.get());
+        // A real radio group now that its options are individually exposed as
+        // `RadioButton` children (the MVP borrowed `TabList` when the group was
+        // a single opaque node). Its name stays the selected label so an AT
+        // that summarises the group still announces the active choice.
+        let mut node = AccessNode::new(AccessRole::RadioGroup).disabled(self.disabled.get());
         if let Some(label) = self.labels.get(self.selected_index()) {
             node = node.name(label.clone());
         }
         Some(node)
+    }
+
+    fn accessibility_children(&self, layout: Rect) -> Vec<AccessChild> {
+        let n = self.labels.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        // One node per row, boxed the way `paint` (and `row_at_y`) box them.
+        let disabled = self.disabled.get();
+        let selected = self.selected_index();
+        let row_h = layout.size.height / n as f32;
+        self.labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| AccessChild {
+                node: AccessNode::new(AccessRole::RadioButton)
+                    .name(label.clone())
+                    .selected(i == selected)
+                    .disabled(disabled),
+                bounds: Rect::new(
+                    layout.origin.x,
+                    layout.origin.y + i as f32 * row_h,
+                    layout.size.width,
+                    row_h,
+                ),
+            })
+            .collect()
+    }
+
+    fn accessibility_action(
+        &mut self,
+        action: AccessAction,
+        option: Option<usize>,
+        _layout: Rect,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        // Only a row is clickable — `RadioGroup` is not an activatable role, so
+        // the group's own node never advertises the action.
+        if action != AccessAction::Click || self.disabled.get() {
+            return EventResult::Ignored;
+        }
+        let Some(index) = option.filter(|&i| i < self.labels.len()) else {
+            return EventResult::Ignored;
+        };
+        self.commit(index, ctx);
+        EventResult::Consumed
     }
 
     fn style(&self) -> FlexStyle {
@@ -491,5 +537,74 @@ mod tests {
         r.event(&down(75.0), layout(), &mut ctx);
         assert_eq!(r.selected_index(), 1, "disabled group ignores a click");
         assert!(!r.focusable(), "disabled group is out of the Tab order");
+    }
+
+    #[test]
+    fn every_option_is_exposed_as_its_own_radio_button() {
+        let r = rg().selected(2);
+        let children = r.accessibility_children(layout());
+        assert_eq!(children.len(), 3, "one node per row");
+
+        for (i, child) in children.iter().enumerate() {
+            assert_eq!(child.node.role, AccessRole::RadioButton);
+            assert_eq!(
+                child.node.name.as_deref(),
+                Some(["System", "Light", "Dark"][i])
+            );
+            assert_eq!(child.node.selected, Some(i == 2));
+            // Bounds match `row_at_y`: even 30px rows down a 90px group.
+            assert_eq!(child.bounds.origin.y, i as f32 * 30.0);
+            assert_eq!(child.bounds.size.height, 30.0);
+        }
+    }
+
+    #[test]
+    fn group_is_a_radio_group_named_for_its_selection() {
+        let node = rg().selected(1).accessibility().expect("group has a node");
+        assert_eq!(
+            node.role,
+            AccessRole::RadioGroup,
+            "a group of radio buttons, not a tab list"
+        );
+        assert_eq!(node.name.as_deref(), Some("Light"));
+    }
+
+    #[test]
+    fn screen_reader_click_selects_the_targeted_row() {
+        let seen = Rc::new(StdCell::new(usize::MAX));
+        let s2 = Rc::clone(&seen);
+        let mut r = rg().on_change(move |i, _| s2.set(i));
+        let mut ctx = EventContext::new();
+
+        let res = r.accessibility_action(AccessAction::Click, Some(2), layout(), &mut ctx);
+        assert_eq!(res, EventResult::Consumed);
+        assert_eq!(r.selected_index(), 2, "the AT's target row is selected");
+        assert_eq!(seen.get(), 2, "handler fired as for a mouse click");
+    }
+
+    #[test]
+    fn screen_reader_click_needs_a_real_row() {
+        let mut r = rg().selected(1);
+        let mut ctx = EventContext::new();
+
+        // The group node itself is not activatable, and a stale option index
+        // (from a snapshot of a longer list) selects nothing.
+        for option in [None, Some(9)] {
+            assert_eq!(
+                r.accessibility_action(AccessAction::Click, option, layout(), &mut ctx),
+                EventResult::Ignored,
+            );
+        }
+        assert_eq!(r.selected_index(), 1, "selection untouched");
+    }
+
+    #[test]
+    fn disabled_group_refuses_the_screen_reader_click() {
+        let mut r = rg().selected(1).disabled(true);
+        let mut ctx = EventContext::new();
+
+        let res = r.accessibility_action(AccessAction::Click, Some(2), layout(), &mut ctx);
+        assert_eq!(res, EventResult::Ignored);
+        assert_eq!(r.selected_index(), 1, "state unchanged");
     }
 }

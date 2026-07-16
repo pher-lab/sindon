@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::accessibility::{A11Y_WINDOW_ROOT, AccessEntry, AccessSnapshot};
+use crate::accessibility::{
+    A11Y_WINDOW_ROOT, AccessEntry, AccessSnapshot, AccessTarget, access_target, push_child_entries,
+};
 use crate::event::{
     EventContext, EventResult, Key, MouseButton, NamedKey, TreeCommand, WidgetEvent,
 };
@@ -14,7 +16,7 @@ use crate::reactive_children::ReactiveChildren;
 use crate::scroll_view::ScrollView;
 use crate::shortcut::ShortcutRouter;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{AccessNode, AccessRole, Point, Rect, SecurityLevel, Size, Theme};
+use shroud_core::{AccessAction, AccessNode, AccessRole, Point, Rect, SecurityLevel, Size, Theme};
 use shroud_layout::{FlexStyle, LayoutEngine, LayoutNodeId};
 use shroud_text::TextEngine;
 
@@ -1375,6 +1377,7 @@ impl WidgetTree {
             bounds: Rect::new(0.0, 0.0, self.viewport.0, self.viewport.1),
             children: root_children,
             modal: false,
+            focusable: false,
         });
 
         // Focus must name a node present in the snapshot; fall back to the
@@ -1427,12 +1430,21 @@ impl WidgetTree {
 
         // Only visible children are referenced, so every child id resolves to
         // an entry we will emit (accesskit rejects dangling child refs).
-        let children: Vec<u64> = node
+        let mut children: Vec<u64> = node
             .children
             .iter()
             .filter(|&&c| self.node(c).is_some_and(|n| n.widget.visible()))
             .map(|&c| c as u64)
             .collect();
+
+        // A composite control (Segmented / RadioGroup) paints its options
+        // instead of owning child widgets, so it contributes their nodes here.
+        // Its own rect is what paint sees (layer offset not yet folded in), so
+        // the derived option rects get the same shift as the owner's bounds.
+        let options = node.widget.accessibility_children(rect);
+        if !options.is_empty() {
+            push_child_entries(idx, options, offset, &mut children, entries);
+        }
 
         entries.push(AccessEntry {
             id: idx as u64,
@@ -1440,12 +1452,92 @@ impl WidgetTree {
             bounds,
             children,
             modal,
+            focusable: node.widget.focusable(),
         });
 
         let child_indices: Vec<usize> = node.children.clone();
         for c in child_indices {
             self.walk_access(c, offset, modal_root, entries);
         }
+    }
+
+    /// Perform an action an assistive technology requested against a node from
+    /// the last [`accessibility_snapshot`](Self::accessibility_snapshot) — the
+    /// operable counterpart to that (perceivable) walk.
+    ///
+    /// `node_id` is the id the AT names, resolved through
+    /// [`crate::accessibility::access_target`]: a widget, one option inside a
+    /// composite widget, or the window root (never actionable). Returns whether
+    /// anything acted on it.
+    ///
+    /// Three rules keep an AT inside what a mouse or keyboard could already do:
+    ///
+    /// - **Stale / invisible targets are refused.** The tree can rebuild
+    ///   between the snapshot an AT read and the action it sends back, so an id
+    ///   may name a tombstoned slot; that is a miss, not a panic.
+    /// - **A modal layer confines actions**, exactly as it confines pointer and
+    ///   key dispatch: while one is up, a target outside its subtree is inert.
+    ///   The snapshot already flags the modal for the AT — this enforces it.
+    /// - **Activating a focusable control focuses it first**, mirroring the
+    ///   click path, so the ring and any focus-driven widget state end up where
+    ///   they would after a mouse press.
+    ///
+    /// [`Focus`](AccessAction::Focus) is handled here rather than by the widget
+    /// — the tree owns the `FocusManager`. Everything else routes to
+    /// [`Widget::accessibility_action`]. Tree mutations queued by whatever
+    /// handler runs are drained before returning, exactly as in
+    /// [`dispatch_event`](Self::dispatch_event).
+    pub fn perform_access_action(
+        &mut self,
+        node_id: u64,
+        action: AccessAction,
+        event_ctx: &mut EventContext,
+    ) -> bool {
+        let (idx, option) = match access_target(node_id) {
+            AccessTarget::Window => return false,
+            AccessTarget::Widget(idx) => (idx, None),
+            AccessTarget::Option { owner, index } => (owner, Some(index)),
+        };
+
+        // The id came from a snapshot that may be a frame or more old.
+        if !self.node(idx).is_some_and(|n| n.widget.visible()) {
+            return false;
+        }
+        if !self.reachable_for_access(idx) {
+            return false;
+        }
+
+        if action == AccessAction::Focus {
+            if !self.widget(idx).focusable() {
+                return false;
+            }
+            self.focus(Some(idx), event_ctx);
+            self.drain_commands(event_ctx);
+            return true;
+        }
+
+        if self.widget(idx).focusable() && self.focus.focused() != Some(idx) {
+            self.focus(Some(idx), event_ctx);
+        }
+
+        let layout = self.layout_rect(idx);
+        let result = self
+            .widget_mut(idx)
+            .accessibility_action(action, option, layout, event_ctx);
+        self.drain_commands(event_ctx);
+        result == EventResult::Consumed
+    }
+
+    /// Whether `idx` sits in the subtree that currently owns input — the
+    /// topmost interactive layer if one is up, otherwise anywhere. The same
+    /// confinement `dispatch_event` applies to pointer and key events, so an
+    /// AT cannot operate a widget behind a modal that the user can't click.
+    fn reachable_for_access(&self, idx: usize) -> bool {
+        let Some(layer) = self.topmost_interactive_layer() else {
+            return true;
+        };
+        let layer_root = layer.root;
+        self.ancestors_inclusive(Some(idx)).contains(&layer_root)
     }
 
     /// Dispatch an event through the widget tree (hit-testing).

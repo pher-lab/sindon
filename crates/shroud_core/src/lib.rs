@@ -14,7 +14,7 @@ pub mod lerp;
 pub mod security_level;
 pub mod theme;
 
-pub use access::{AccessNode, AccessRange, AccessRole};
+pub use access::{AccessAction, AccessChild, AccessNode, AccessRange, AccessRole};
 pub use geometry::{Color, Point, Rect, Size};
 pub use id::{NodeId, ScopeId, WidgetId};
 pub use lerp::Lerp;

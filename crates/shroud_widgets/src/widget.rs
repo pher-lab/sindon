@@ -2,7 +2,7 @@
 
 use crate::event::{EventContext, EventResult, WidgetEvent};
 use crate::paint::PaintContext;
-use shroud_core::{AccessNode, Rect, SecurityLevel, Size, Theme};
+use shroud_core::{AccessAction, AccessChild, AccessNode, Rect, SecurityLevel, Size, Theme};
 use shroud_layout::FlexStyle;
 use shroud_text::TextEngine;
 
@@ -84,6 +84,58 @@ pub trait Widget: std::any::Any {
     /// to a screen reader without ever reading a password aloud.
     fn accessibility(&self) -> Option<AccessNode> {
         None
+    }
+
+    /// Describe the options a *composite* widget paints itself, as synthetic
+    /// child nodes of its own a11y node.
+    ///
+    /// `Segmented` and `RadioGroup` own their option list and render every
+    /// option rather than holding child widgets, so the tree walk has nothing
+    /// to descend into: without this a screen reader would hear the selected
+    /// label and never learn the alternatives. Returning one [`AccessChild`]
+    /// per option (in selection-index order — the index is what an action on
+    /// that option reports back) exposes each one as its own node, with its own
+    /// bounds and `selected` state.
+    ///
+    /// `layout` is the widget's absolute rect, exactly as `paint` receives it;
+    /// derive each option's box from it the same way paint does. Called only
+    /// while an assistive technology is connected. Default is empty — a widget
+    /// with real child widgets needs nothing here, as the tree walks those.
+    fn accessibility_children(&self, _layout: Rect) -> Vec<AccessChild> {
+        Vec::new()
+    }
+
+    /// Perform an action an assistive technology asked for — the operable half
+    /// of [`accessibility`](Self::accessibility).
+    ///
+    /// Route it into whatever the widget already does for a mouse or a key
+    /// (`Button` fires its click handlers, `Switch` toggles, `Slider` commits a
+    /// value), so an AT can only reach behaviour that is reachable without one.
+    /// `option` names the target when the request landed on a synthetic child
+    /// from [`accessibility_children`](Self::accessibility_children); it is
+    /// `None` when the widget's own node was the target.
+    ///
+    /// [`Focus`](shroud_core::AccessAction::Focus) never arrives here — the
+    /// tree owns focus and handles it before dispatch.
+    ///
+    /// Return [`EventResult::Consumed`] when the action was performed. Default
+    /// is `Ignored`, so a widget that hasn't opted in stays inert.
+    ///
+    /// # Disabled
+    ///
+    /// A disabled widget must refuse to act, the same way its `event` refuses
+    /// pointer and key activation (the shared `InteractionState` rule: clearing
+    /// transitions pass, activation is blocked). The translation layer already
+    /// withholds the action from the OS for a disabled node, so this is the
+    /// second line of the same rule.
+    fn accessibility_action(
+        &mut self,
+        _action: AccessAction,
+        _option: Option<usize>,
+        _layout: Rect,
+        _ctx: &mut EventContext,
+    ) -> EventResult {
+        EventResult::Ignored
     }
 
     /// Whether this widget consumes printable text input when focused.

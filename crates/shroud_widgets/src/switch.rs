@@ -20,7 +20,7 @@ use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
 use crate::interaction::{InteractionState, dim_over};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{AccessNode, AccessRole, Color, Lerp, Rect, Size};
+use shroud_core::{AccessAction, AccessNode, AccessRole, Color, Lerp, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Animated, Easing, Reactive, Signal};
 
@@ -237,6 +237,20 @@ impl Widget for Switch {
         Some(node)
     }
 
+    fn accessibility_action(
+        &mut self,
+        action: AccessAction,
+        _option: Option<usize>,
+        _layout: Rect,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if action != AccessAction::Click || self.disabled.get() {
+            return EventResult::Ignored;
+        }
+        self.toggle(ctx);
+        EventResult::Consumed
+    }
+
     fn style(&self) -> FlexStyle {
         // Measured leaf (see `measure`): no `min_size` here, or an ancestor
         // that hugs its content over-counts height. Same invariant as `Button`.
@@ -427,6 +441,47 @@ mod tests {
         sw.event(&down(), rect(), &mut ctx);
         assert!(!sw.is_on(), "second click turns it off");
         assert_eq!(seen.get(), Some(false));
+    }
+
+    #[test]
+    fn screen_reader_click_toggles_like_a_mouse_click() {
+        let seen = Rc::new(StdCell::new(None));
+        let s2 = Rc::clone(&seen);
+        let mut sw = Switch::new().on_change(move |on, _| s2.set(Some(on)));
+        let mut ctx = EventContext::new();
+
+        let r = sw.accessibility_action(AccessAction::Click, None, rect(), &mut ctx);
+        assert_eq!(r, EventResult::Consumed);
+        assert!(sw.is_on(), "the AT's click lands on the same toggle path");
+        assert_eq!(seen.get(), Some(true), "handler saw the new state");
+    }
+
+    #[test]
+    fn disabled_switch_refuses_the_screen_reader_click() {
+        let mut sw = Switch::new().disabled(true);
+        let mut ctx = EventContext::new();
+
+        let r = sw.accessibility_action(AccessAction::Click, None, rect(), &mut ctx);
+        assert_eq!(r, EventResult::Ignored, "disabled blocks activation");
+        assert!(!sw.is_on(), "state unchanged");
+    }
+
+    #[test]
+    fn switch_ignores_range_actions() {
+        let mut sw = Switch::new();
+        let mut ctx = EventContext::new();
+        for action in [
+            AccessAction::Increment,
+            AccessAction::Decrement,
+            AccessAction::SetValue(1.0),
+        ] {
+            assert_eq!(
+                sw.accessibility_action(action, None, rect(), &mut ctx),
+                EventResult::Ignored,
+                "{action:?} is not a switch's action"
+            );
+            assert!(!sw.is_on(), "{action:?} must not flip the switch");
+        }
     }
 
     #[test]

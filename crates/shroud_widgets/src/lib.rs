@@ -30,7 +30,10 @@ mod text;
 pub mod tree;
 mod widget;
 
-pub use accessibility::{A11Y_WINDOW_ROOT, AccessEntry, AccessSnapshot};
+pub use accessibility::{
+    A11Y_WINDOW_ROOT, ACCESS_MAX_OPTIONS, AccessEntry, AccessSnapshot, AccessTarget,
+    access_child_id, access_target,
+};
 pub use button::Button;
 pub use checkbox::Checkbox;
 pub use clear_trigger::ClearTrigger;
