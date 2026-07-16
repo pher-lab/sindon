@@ -30,6 +30,11 @@
 //!
 //! Windows-only (`VirtualQueryEx` + `ReadProcessMemory`). Linux /
 //! macOS equivalents would need their own walker; not in scope today.
+//!
+//! **Run serially** (`--test-threads=1`). Each test counts a canary across the
+//! *whole process's* memory; a second scanner running concurrently inflates
+//! the baseline with its own scratch buffers, flaking the "typing added a
+//! copy" precondition (not the residue==0 assertion). CI enforces this.
 
 #![cfg(windows)]
 

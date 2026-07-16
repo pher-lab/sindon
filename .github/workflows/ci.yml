@@ -123,11 +123,19 @@ jobs:
     # job is their home. Scoped to the two crates that own the tests so it does
     # NOT build the knot example (its bundled-SQLCipher/OpenSSL build needs
     # Strawberry Perl first on PATH, which is fragile on hosted runners).
+    #
+    # `--test-threads=1` is REQUIRED, not a nicety: each test walks *this whole
+    # process's* memory counting a canary. Run two of them in parallel and each
+    # scanner's scratch buffers + allocation churn inflate the other's absolute
+    # count, so the "typing added a copy" precondition (a count diff) flakes on
+    # slower/shared runners — baseline gets inflated to where after-type no
+    # longer exceeds it. The residue==0 security assertion itself is unaffected;
+    # serializing just keeps the instrumentation honest. Do not remove.
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: cosmic-text fork leaves zero plaintext residue
-        run: cargo test -p shroud_text --test cosmic_residue
+        run: cargo test -p shroud_text --test cosmic_residue -- --test-threads=1
       - name: SecureInput lock flow leaves zero plaintext residue
-        run: cargo test -p shroud_widgets --test zeroize_verification
+        run: cargo test -p shroud_widgets --test zeroize_verification -- --test-threads=1
