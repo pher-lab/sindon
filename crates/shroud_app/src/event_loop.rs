@@ -1269,6 +1269,12 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             self.fonts_loaded = true;
         }
 
+        // Now that the accessibility adapter (if any) has been constructed,
+        // it is safe to show the window for the first time — accesskit_winit
+        // requires the adapter to exist before the window is first made
+        // visible. The window was created hidden in `PlatformWindow::new`.
+        platform_window.show();
+
         self.window = Some(platform_window);
         self.renderer = Some(renderer);
         self.paint_ctx = Some(paint_ctx);

@@ -14,10 +14,18 @@ pub struct PlatformWindow {
 
 impl PlatformWindow {
     /// Create a new window on the given event loop.
+    ///
+    /// The window is created **hidden** (`with_visible(false)`); the caller
+    /// must call [`show`](Self::show) once first-frame setup is done. This is
+    /// not cosmetic: `accesskit_winit` requires its adapter to be constructed
+    /// *before* the window is first shown, and the adapter needs the window to
+    /// exist — so the only valid order is create-hidden → build adapter →
+    /// show. Showing hidden→visible also avoids a flash of an unpainted window.
     pub fn new(event_loop: &ActiveEventLoop, title: &str, width: u32, height: u32) -> Self {
         let attrs = WindowAttributes::default()
             .with_title(title)
-            .with_inner_size(LogicalSize::new(width, height));
+            .with_inner_size(LogicalSize::new(width, height))
+            .with_visible(false);
 
         let window = event_loop
             .create_window(attrs)
@@ -30,6 +38,13 @@ impl PlatformWindow {
             window,
             display_protection,
         }
+    }
+
+    /// Make the window visible. Call once, after the accessibility adapter is
+    /// constructed and the first frame is ready — see [`new`](Self::new) for
+    /// why the window starts hidden.
+    pub fn show(&self) {
+        self.window.set_visible(true);
     }
 
     /// Get a clone of the `Arc<Window>` for sharing with the renderer.
