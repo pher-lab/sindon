@@ -67,11 +67,13 @@ pub struct WidgetTree {
     /// [`Self::resync_hover`] can re-resolve it after the tree changes
     /// underneath a stationary cursor. `None` until the first pointer event.
     last_pointer_pos: Option<Point>,
-    /// Set when a layer pops, consumed by [`Self::resync_hover`] on the next
-    /// frame. Popping can expose a widget directly under a cursor that never
-    /// moves afterwards (dismissing a menu by clicking a button behind it),
-    /// and without a resync that widget stays un-hovered until the user
-    /// jiggles the mouse.
+    /// Set when a layer pops or [`Self::remove`] tombstones the hovered
+    /// widget, consumed by [`Self::resync_hover`] on the next frame. Both
+    /// can leave a widget sitting directly under a cursor that never moves
+    /// afterwards — dismissing a menu by clicking a button behind it, or a
+    /// button that rebuilds its own list and is replaced in place — and
+    /// without a resync that widget stays un-hovered until the user jiggles
+    /// the mouse.
     hover_dirty: bool,
     /// Widget that has captured the pointer (e.g. an `Input` mid drag-select).
     /// While `Some`, `MouseMove` / `MouseUp` are routed directly to it,
@@ -562,10 +564,16 @@ impl WidgetTree {
             self.root = None;
         }
 
-        // Clear hover if it landed on something we're about to remove.
+        // Clear hover if it landed on something we're about to remove, and
+        // ask for a resync: a rebuild typically drops a fresh node right back
+        // under the stationary cursor (knot's pin star replaces its own row),
+        // and hover is only otherwise recomputed from a live `MouseMove`, so
+        // the replacement would sit un-hovered until the user moved the mouse.
+        // No `MouseLeave` here — the widget is being dropped, not left.
         if let Some(h) = self.hovered {
             if to_remove.contains(&h) {
                 self.hovered = None;
+                self.hover_dirty = true;
             }
         }
 
@@ -2180,13 +2188,21 @@ impl WidgetTree {
     /// emitting the `MouseLeave` / `MouseEnter` a real `MouseMove` would have.
     /// Returns `true` when the hover chain actually changed.
     ///
-    /// A no-op unless a layer popped since the last call. `hovered` is
-    /// normally only ever updated from a live `MouseMove`, which leaves a hole:
-    /// dismissing a menu re-exposes whatever sits under the cursor, but if the
-    /// cursor does not then move, nothing tells that widget it is hovered. It
-    /// is most visible when the dismiss *is* the click on another button — the
-    /// outside-click path swallows that press, so the button under the pointer
-    /// receives neither the click nor a hover until the mouse jiggles.
+    /// A no-op unless a layer popped or the hovered widget was removed since
+    /// the last call. `hovered` is normally only ever updated from a live
+    /// `MouseMove`, which leaves a hole: dismissing a menu re-exposes whatever
+    /// sits under the cursor, but if the cursor does not then move, nothing
+    /// tells that widget it is hovered. It is most visible when the dismiss
+    /// *is* the click on another button — the outside-click path swallows that
+    /// press, so the button under the pointer receives neither the click nor a
+    /// hover until the mouse jiggles.
+    ///
+    /// Removal is the same hole reached from the other side: a button whose
+    /// handler rebuilds the list it lives in activates itself out of
+    /// existence, and the replacement lands under the unmoved cursor with no
+    /// `MouseMove` to light it. Hover is purely geometric, so unlike the
+    /// focus counterpart this needs nothing from the builder — the replay
+    /// re-derives it from the cursor position alone.
     ///
     /// The mirror case on push is deliberately not handled here: opening a
     /// layer clears hover (see the `PushLayer` arm of `apply_commands`) and
@@ -2197,17 +2213,25 @@ impl WidgetTree {
     /// Call once per frame *after* layout, so the hit-test sees fresh
     /// geometry: a handler that popped the layer may also have rebuilt the
     /// tree beneath it (choosing a dropdown item that reorders the list), and
-    /// those nodes have no resolved rect until the layout pass runs. Skipped
+    /// those nodes have no resolved rect until the layout pass runs. Deferred
     /// while the pointer is captured — a drag owns the pointer and must not be
-    /// interrupted by a hover change — and before the first pointer event of
-    /// the session, when the cursor's position is simply unknown.
+    /// interrupted by a hover change — and skipped before the first pointer
+    /// event of the session, when the cursor's position is simply unknown.
     pub fn resync_hover(&mut self, event_ctx: &mut EventContext) -> bool {
-        if !std::mem::take(&mut self.hover_dirty) {
-            return false;
-        }
+        // Test the capture *before* consuming `hover_dirty`: a drag defers the
+        // resync, it does not cancel it. Taking the flag first would burn it on
+        // a frame that declines to use it, so a rebuild landing mid-drag would
+        // leave the replacement dark even once the drag released — the exact
+        // hole this resync exists to close.
         if self.pointer_capture.is_some() {
             return false;
         }
+        if !std::mem::take(&mut self.hover_dirty) {
+            return false;
+        }
+        // Unlike the capture, this needs no deferral: `last_pointer_pos` is
+        // only `None` before the first pointer event, and the event that
+        // clears it is a `MouseMove` that resolves hover on its own.
         let Some(pos) = self.last_pointer_pos else {
             return false;
         };

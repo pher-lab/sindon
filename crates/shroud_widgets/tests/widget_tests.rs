@@ -6550,6 +6550,210 @@ fn hover_bubble_skips_common_ancestor_when_moving_within_subtree() {
     );
 }
 
+// ── hover survives a self-triggered rebuild ───────────────────────
+//
+// The knot pin toggle, on the pointer side: a row's own button rebuilds the
+// list it lives in, so `remove` tombstones the widget under the cursor and
+// the replacement lands in the same spot. Hover is otherwise only ever
+// recomputed from a live `MouseMove`, so the fresh star stayed dark until the
+// user jiggled the mouse. `remove` now marks the chain dirty and the next
+// frame's `resync_hover` replays the hit-test.
+//
+// Cheaper than the focus counterpart: hover is purely geometric, so the
+// replay re-derives it from the last cursor position with no baton handed
+// over by the builder.
+
+/// A rebuildable row holding one probe. Returns (tree, row, probe, events).
+fn hover_probe_row() -> (WidgetTree, usize, usize, Rc<RefCell<Vec<String>>>) {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(200.0));
+    let row = tree.add_child(root, Container::row().width(200.0).height(40.0));
+    let probe = tree.add_child(row, HoverProbe::new("star", events.clone()));
+    tree.compute_layout(200.0, 200.0);
+    (tree, row, probe, events)
+}
+
+/// Rebuild `row`'s children into a fresh probe, then run the frame tail the
+/// event loop runs: apply commands, lay out, resync. Layout comes first
+/// because the resync hit-tests against this frame's geometry — the fresh
+/// node has no resolved rect before it. Returns (new index, chain changed).
+fn rebuild_row_and_resync(
+    tree: &mut WidgetTree,
+    ev: &mut EventContext,
+    row: usize,
+    events: Rc<RefCell<Vec<String>>>,
+) -> (usize, bool) {
+    let fresh = Rc::new(Cell::new(usize::MAX));
+    let fresh_setter = Rc::clone(&fresh);
+    ev.rebuild_children(row, move |tree, row| {
+        fresh_setter.set(tree.add_child(row, HoverProbe::new("star", events.clone())));
+    });
+    tree.apply_pending_commands(ev);
+    tree.compute_layout(200.0, 200.0);
+    let changed = tree.resync_hover(ev);
+    (fresh.get(), changed)
+}
+
+#[test]
+fn rebuild_under_a_stationary_cursor_relights_the_replacement() {
+    let (mut tree, row, probe, events) = hover_probe_row();
+    let mut ev = EventContext::new();
+
+    let rect = tree.layout_rect(probe);
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+        },
+        &mut ev,
+    );
+    assert_eq!(tree.hovered(), Some(probe));
+    assert_eq!(*events.borrow(), vec!["star:enter".to_string()]);
+    events.borrow_mut().clear();
+
+    let (fresh, changed) = rebuild_row_and_resync(&mut tree, &mut ev, row, events.clone());
+
+    assert_ne!(fresh, probe, "the rebuild really did allocate a new node");
+    assert!(changed, "the resync reports the chain moved");
+    assert_eq!(
+        tree.hovered(),
+        Some(fresh),
+        "cursor is over the replacement"
+    );
+    // Enter with no preceding leave: the old probe was dropped, not left.
+    assert_eq!(
+        *events.borrow(),
+        vec!["star:enter".to_string()],
+        "the replacement lights up without a mouse move"
+    );
+}
+
+#[test]
+fn rebuild_clear_of_the_cursor_invents_no_hover() {
+    // The same rebuild with the pointer parked on background. knot rebuilds
+    // this list on search / sort / the editor bridge too, so a resync that
+    // reached for the nearest node would light rows nobody is pointing at.
+    let (mut tree, row, probe, events) = hover_probe_row();
+    let mut ev = EventContext::new();
+
+    // Below the 40px row, still inside the root column.
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(100.0, 150.0),
+        },
+        &mut ev,
+    );
+    assert_ne!(tree.hovered(), Some(probe), "cursor is not over the row");
+    assert!(events.borrow().is_empty(), "probe never entered");
+
+    let (fresh, changed) = rebuild_row_and_resync(&mut tree, &mut ev, row, events.clone());
+
+    assert!(!changed, "nothing hovered was tombstoned → no work");
+    assert_ne!(tree.hovered(), Some(fresh), "cursor is nowhere near it");
+    assert!(
+        events.borrow().is_empty(),
+        "no phantom hover on a rebuild the cursor is clear of"
+    );
+}
+
+#[test]
+fn rebuild_mid_drag_defers_hover_resync_until_the_drag_releases() {
+    // A drag owns the pointer, so hover must not move while one is in flight.
+    // But the resync is *deferred*, not cancelled: the rebuild's claim on a
+    // resync outlives the drag, so the replacement lights up the moment the
+    // capture releases rather than waiting for the user to jiggle the mouse.
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(200.0));
+    let row = tree.add_child(root, Container::row().width(200.0).height(40.0));
+    let probe = tree.add_child(row, HoverProbe::new("star", events.clone()));
+    let input = tree.add_child(root, Input::new().with_value("hello"));
+    tree.compute_layout(200.0, 200.0);
+
+    let mut ev = EventContext::new();
+    let probe_rect = tree.layout_rect(probe);
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(probe_rect.origin.x + 5.0, probe_rect.origin.y + 5.0),
+        },
+        &mut ev,
+    );
+    assert_eq!(tree.hovered(), Some(probe));
+    events.borrow_mut().clear();
+
+    // Start a drag-select in the input. Hover only tracks `MouseMove`, so
+    // the probe stays the hovered node while the input holds the capture.
+    let input_rect = tree.layout_rect(input);
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(input_rect.origin.x + 5.0, input_rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    assert_eq!(
+        tree.pointer_capture(),
+        Some(input),
+        "the drag owns the pointer"
+    );
+    assert_eq!(tree.hovered(), Some(probe), "hover is still on the probe");
+
+    // Drag back over the probe row. The capture routes this to the input, so
+    // hover stays frozen — but it does move `last_pointer_pos`, which is what
+    // the resync will replay once the drag lets go.
+    tree.dispatch_event(
+        &WidgetEvent::MouseMove {
+            position: Point::new(probe_rect.origin.x + 5.0, probe_rect.origin.y + 5.0),
+        },
+        &mut ev,
+    );
+    assert_eq!(
+        tree.hovered(),
+        Some(probe),
+        "a captured move re-resolves no hover"
+    );
+
+    let (fresh, changed) = rebuild_row_and_resync(&mut tree, &mut ev, row, events.clone());
+
+    assert!(!changed, "a captured pointer defers the resync");
+    assert_eq!(
+        tree.hovered(),
+        None,
+        "removal cleared it and nothing re-resolved mid-drag"
+    );
+    assert!(events.borrow().is_empty(), "no hover handed out mid-drag");
+
+    // Release the drag over the probe row. `MouseUp` drops the capture but
+    // resolves no hover of its own — only `MouseMove` does — so the deferred
+    // resync is the only thing that can light the replacement.
+    tree.dispatch_event(
+        &WidgetEvent::MouseUp {
+            position: Point::new(probe_rect.origin.x + 5.0, probe_rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    assert_eq!(
+        tree.pointer_capture(),
+        None,
+        "the drag released the pointer"
+    );
+
+    let changed = tree.resync_hover(&mut ev);
+
+    assert!(changed, "the deferred resync ran once the capture cleared");
+    assert_eq!(
+        tree.hovered(),
+        Some(fresh),
+        "the cursor never moved, so it is still over the replacement"
+    );
+    assert_eq!(
+        *events.borrow(),
+        vec!["star:enter".to_string()],
+        "the replacement lights up without a mouse move"
+    );
+}
+
 // ── Input: multi-line (Phase 25, A-2) ────────────────────────────
 
 /// Build a 400×300 tree, install a single Input as the root's only child,
