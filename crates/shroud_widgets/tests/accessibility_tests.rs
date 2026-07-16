@@ -1,11 +1,12 @@
-//! Accessibility snapshot tests — roles / names / state / focus, and the
+//! Accessibility tests — the perceivable snapshot (roles / names / state /
+//! focus) and the operable path (`perform_access_action` routing), plus the
 //! **secret-safety hard gate**: a secret typed into a `SecureInput` (or held by
-//! a `SecureText`) must never appear anywhere in the a11y snapshot. This is the
-//! widget-layer half of the two-layer guard; the app crate independently
-//! asserts the same for the translated `accesskit::TreeUpdate`
-//! (`feedback_test_translation_layer`).
+//! a `SecureText`) must never appear anywhere in the a11y snapshot, and no
+//! action may put characters into one. This is the widget-layer half of the
+//! two-layer guard; the app crate independently asserts the same for the
+//! translated `accesskit::TreeUpdate` (`feedback_test_translation_layer`).
 
-use shroud_core::{AccessRole, Rect};
+use shroud_core::{AccessAction, AccessRole, Rect};
 use shroud_security::SecureString;
 // AccessEntry / AccessSnapshot / A11Y_WINDOW_ROOT come through the glob (they
 // are re-exported from the crate root).
@@ -214,4 +215,238 @@ fn window_root_bundles_the_tree_and_has_no_dangling_children() {
             );
         }
     }
+}
+
+// ── Composite controls expose their options ───────────────────────
+
+#[test]
+fn segmented_options_are_children_of_the_bar_with_resolvable_ids() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let seg = tree.add_child(root, Segmented::new(["Edit", "Preview"]).selected(1));
+    tree.compute_layout(800.0, 600.0);
+
+    let snap = tree.accessibility_snapshot();
+
+    let bar = find_role(&snap, AccessRole::TabList).expect("Segmented surfaces a TabList node");
+    assert_eq!(bar.children.len(), 2, "the bar owns one node per segment");
+    assert_eq!(
+        bar.children,
+        vec![access_child_id(seg, 0), access_child_id(seg, 1)],
+        "option ids are derived from the owning widget's index"
+    );
+
+    // Each option is emitted as its own entry, in order, with its own state.
+    let tabs: Vec<&AccessEntry> = snap
+        .entries
+        .iter()
+        .filter(|e| e.node.role == AccessRole::Tab)
+        .collect();
+    assert_eq!(tabs.len(), 2);
+    let names: Vec<Option<&str>> = bar
+        .children
+        .iter()
+        .map(|id| {
+            snap.entries
+                .iter()
+                .find(|e| e.id == *id)
+                .and_then(|e| e.node.name.as_deref())
+        })
+        .collect();
+    assert_eq!(names, vec![Some("Edit"), Some("Preview")]);
+
+    // And the ids route back to the owner.
+    assert_eq!(
+        access_target(access_child_id(seg, 1)),
+        AccessTarget::Option {
+            owner: seg,
+            index: 1
+        },
+    );
+}
+
+// ── Operable: actions route to widgets ────────────────────────────
+
+#[test]
+fn screen_reader_click_activates_a_button_and_focuses_it() {
+    let clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let c2 = std::rc::Rc::clone(&clicked);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let button = tree.add_child(root, Button::new("Save").on_click(move |_| c2.set(true)));
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ev = EventContext::new();
+    let handled = tree.perform_access_action(button as u64, AccessAction::Click, &mut ev);
+
+    assert!(handled, "the tree reports the action was performed");
+    assert!(clicked.get(), "the button's click handler ran");
+    assert_eq!(
+        tree.focused(),
+        Some(button),
+        "activating a focusable control focuses it, as a mouse click does"
+    );
+}
+
+#[test]
+fn focus_action_moves_focus_without_activating() {
+    let clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let c2 = std::rc::Rc::clone(&clicked);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let button = tree.add_child(root, Button::new("Save").on_click(move |_| c2.set(true)));
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ev = EventContext::new();
+    assert!(tree.perform_access_action(button as u64, AccessAction::Focus, &mut ev));
+
+    assert_eq!(tree.focused(), Some(button));
+    assert!(!clicked.get(), "focusing must not press the button");
+}
+
+#[test]
+fn focus_action_is_refused_on_a_non_focusable_node() {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let label = tree.add_child(root, TextWidget::new("just text"));
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ev = EventContext::new();
+    assert!(!tree.perform_access_action(label as u64, AccessAction::Focus, &mut ev));
+    assert_eq!(tree.focused(), None);
+}
+
+#[test]
+fn action_on_a_stale_node_id_is_refused() {
+    // An AT reads a snapshot, the tree rebuilds, and the action arrives naming
+    // a slot that is now a tombstone. That is a miss, not a panic.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let button = tree.add_child(root, Button::new("Gone"));
+    tree.compute_layout(800.0, 600.0);
+    tree.remove(button);
+
+    let mut ev = EventContext::new();
+    assert!(!tree.perform_access_action(button as u64, AccessAction::Click, &mut ev));
+    // An id past the end of the arena, and the window root itself.
+    assert!(!tree.perform_access_action(9_999, AccessAction::Click, &mut ev));
+    assert!(!tree.perform_access_action(A11Y_WINDOW_ROOT, AccessAction::Click, &mut ev));
+}
+
+#[test]
+fn a_modal_layer_confines_actions_to_its_subtree() {
+    // The snapshot already tells the AT the background is inert; this is the
+    // enforcement, matching how `dispatch_event` confines pointer and keys.
+    let background_clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let b2 = std::rc::Rc::clone(&background_clicked);
+    let dialog_clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let d2 = std::rc::Rc::clone(&dialog_clicked);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let background = tree.add_child(root, Button::new("Behind").on_click(move |_| b2.set(true)));
+    let layer = tree.push_layer(
+        LayerOptions::modal(),
+        Container::column().width(200.0).height(100.0),
+    );
+    let in_dialog = tree.add_child(layer, Button::new("OK").on_click(move |_| d2.set(true)));
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ev = EventContext::new();
+    assert!(
+        !tree.perform_access_action(background as u64, AccessAction::Click, &mut ev),
+        "a widget behind the modal must be inert"
+    );
+    assert!(!background_clicked.get(), "background handler must not run");
+
+    assert!(tree.perform_access_action(in_dialog as u64, AccessAction::Click, &mut ev));
+    assert!(dialog_clicked.get(), "the dialog's own button still works");
+}
+
+#[test]
+fn an_option_id_selects_that_option_on_its_owner() {
+    let seen = std::rc::Rc::new(std::cell::Cell::new(usize::MAX));
+    let s2 = std::rc::Rc::clone(&seen);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let seg = tree.add_child(
+        root,
+        Segmented::new(["Edit", "Preview", "Split"]).on_change(move |i, _| s2.set(i)),
+    );
+    tree.compute_layout(800.0, 600.0);
+
+    // Target the third segment through its synthetic id — the id the AT reads
+    // out of the snapshot.
+    let mut ev = EventContext::new();
+    let handled = tree.perform_access_action(access_child_id(seg, 2), AccessAction::Click, &mut ev);
+
+    assert!(handled);
+    assert_eq!(
+        seen.get(),
+        2,
+        "the owning widget selected the target option"
+    );
+    assert_eq!(
+        tree.focused(),
+        Some(seg),
+        "focus lands on the group, the ARIA radiogroup pattern"
+    );
+}
+
+#[test]
+fn checkbox_click_action_toggles_through_the_tree() {
+    let state = std::rc::Rc::new(std::cell::Cell::new(false));
+    let s2 = std::rc::Rc::clone(&state);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let cb = tree.add_child(
+        root,
+        Checkbox::new("Remember me").on_change(move |c, _| s2.set(c)),
+    );
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ev = EventContext::new();
+    assert!(tree.perform_access_action(cb as u64, AccessAction::Click, &mut ev));
+    assert!(state.get(), "the checkbox toggled on");
+    assert!(tree.perform_access_action(cb as u64, AccessAction::Click, &mut ev));
+    assert!(!state.get(), "and back off");
+}
+
+// ── Operable meets secret safety ──────────────────────────────────
+
+#[test]
+fn no_action_can_drive_a_secure_input() {
+    // The operable counterpart of the snapshot gate: a masked field exposes a
+    // role and a placeholder, and that is *all* the a11y channel can do with
+    // it. Nothing here may reach its buffer.
+    const SECRET: &str = "hunter2-correct-horse";
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let field = tree.add_child(root, typed_secure_input(SECRET));
+    tree.compute_layout(800.0, 600.0);
+
+    let mut ev = EventContext::new();
+    for action in [
+        AccessAction::Click,
+        AccessAction::Increment,
+        AccessAction::Decrement,
+        AccessAction::SetValue(1.0),
+    ] {
+        assert!(
+            !tree.perform_access_action(field as u64, action, &mut ev),
+            "{action:?} must not be honoured by a secret field"
+        );
+    }
+
+    // Focus is the one thing an AT may do to it — and it still leaks nothing.
+    assert!(tree.perform_access_action(field as u64, AccessAction::Focus, &mut ev));
+    let snap = tree.accessibility_snapshot();
+    assert!(
+        !any_node_leaks(&snap, SECRET),
+        "focusing a secret field must not surface its contents"
+    );
 }

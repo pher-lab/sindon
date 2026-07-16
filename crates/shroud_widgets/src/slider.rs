@@ -20,7 +20,7 @@ use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, Widget
 use crate::interaction::{InteractionState, dim_over};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{AccessNode, AccessRange, AccessRole, Color, Rect, Size};
+use shroud_core::{AccessAction, AccessNode, AccessRange, AccessRole, Color, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Reactive, Signal};
 
@@ -243,6 +243,29 @@ impl Widget for Slider {
                 })
                 .disabled(self.disabled.get()),
         )
+    }
+
+    fn accessibility_action(
+        &mut self,
+        action: AccessAction,
+        _option: Option<usize>,
+        _layout: Rect,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if self.disabled.get() {
+            return EventResult::Ignored;
+        }
+        // Increment / Decrement land on the same nudge the arrow keys use, so
+        // an AT steps by the widget's own step grid. `SetValue` goes through
+        // `commit`, which snaps and clamps it exactly as a drag would — an out
+        // of range value from the AT can't push the slider off its rails.
+        match action {
+            AccessAction::Increment => self.nudge(1.0, ctx),
+            AccessAction::Decrement => self.nudge(-1.0, ctx),
+            AccessAction::SetValue(v) => self.commit(v as f32, ctx),
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
     }
 
     fn style(&self) -> FlexStyle {
@@ -471,6 +494,57 @@ mod tests {
             &mut ctx,
         );
         assert!(!sl.dragging, "release ends the drag");
+    }
+
+    #[test]
+    fn screen_reader_steps_and_sets_the_value() {
+        let mut sl = Slider::new(0.0, 10.0).step(2.0).value(4.0);
+        let mut ctx = EventContext::new();
+
+        // Stepping uses the widget's own step grid — the same nudge the arrow
+        // keys take.
+        let r = sl.accessibility_action(AccessAction::Increment, None, layout(), &mut ctx);
+        assert_eq!(r, EventResult::Consumed);
+        assert_eq!(sl.get(), 6.0, "Increment steps up by one step");
+        sl.accessibility_action(AccessAction::Decrement, None, layout(), &mut ctx);
+        assert_eq!(sl.get(), 4.0, "Decrement steps back down");
+
+        // An absolute set goes through `commit`, so it snaps to the grid.
+        sl.accessibility_action(AccessAction::SetValue(7.0), None, layout(), &mut ctx);
+        assert_eq!(sl.get(), 8.0, "SetValue snaps to the step grid");
+    }
+
+    #[test]
+    fn screen_reader_set_value_is_clamped_to_range() {
+        // An AT is free to ask for anything; the widget's own clamp is what
+        // keeps the value on its rails.
+        let mut sl = Slider::new(0.0, 10.0).value(5.0);
+        let mut ctx = EventContext::new();
+
+        sl.accessibility_action(AccessAction::SetValue(9999.0), None, layout(), &mut ctx);
+        assert_eq!(sl.get(), 10.0, "above max clamps to max");
+        sl.accessibility_action(AccessAction::SetValue(-9999.0), None, layout(), &mut ctx);
+        assert_eq!(sl.get(), 0.0, "below min clamps to min");
+    }
+
+    #[test]
+    fn disabled_slider_refuses_screen_reader_actions() {
+        let mut sl = Slider::new(0.0, 10.0).value(5.0).disabled(true);
+        let mut ctx = EventContext::new();
+
+        for action in [
+            AccessAction::Increment,
+            AccessAction::Decrement,
+            AccessAction::SetValue(9.0),
+            AccessAction::Click,
+        ] {
+            assert_eq!(
+                sl.accessibility_action(action, None, layout(), &mut ctx),
+                EventResult::Ignored,
+                "{action:?} must be inert while disabled"
+            );
+            assert_eq!(sl.get(), 5.0, "{action:?} must not move the value");
+        }
     }
 
     #[test]

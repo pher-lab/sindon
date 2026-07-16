@@ -4,7 +4,7 @@ use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
 use crate::interaction::InteractionState;
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{AccessNode, AccessRole, Color, Rect};
+use shroud_core::{AccessAction, AccessNode, AccessRole, Color, Rect};
 use shroud_layout::FlexStyle;
 
 /// A checkbox with an optional text label.
@@ -113,6 +113,16 @@ impl Checkbox {
         self.state.focused
     }
 
+    /// Flip the checked state and fire `on_change`. The shared path for every
+    /// activation route — a left-mouse press, Space, and a screen reader's
+    /// click — so they behave identically.
+    fn toggle(&mut self, ctx: &mut EventContext) {
+        self.checked = !self.checked;
+        if let Some(handler) = &mut self.on_change {
+            handler(self.checked, ctx);
+        }
+    }
+
     /// Box size based on font size.
     fn box_size(&self, font_size: f32) -> f32 {
         font_size + 2.0
@@ -137,6 +147,20 @@ impl Widget for Checkbox {
             node = node.name(self.label.clone());
         }
         Some(node)
+    }
+
+    fn accessibility_action(
+        &mut self,
+        action: AccessAction,
+        _option: Option<usize>,
+        _layout: Rect,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if action != AccessAction::Click {
+            return EventResult::Ignored;
+        }
+        self.toggle(ctx);
+        EventResult::Consumed
     }
 
     fn style(&self) -> FlexStyle {
@@ -256,10 +280,7 @@ impl Widget for Checkbox {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.checked = !self.checked;
-                if let Some(handler) = &mut self.on_change {
-                    handler(self.checked, ctx);
-                }
+                self.toggle(ctx);
                 EventResult::Consumed
             }
             WidgetEvent::FocusGained => {
@@ -275,10 +296,7 @@ impl Widget for Checkbox {
             // not checkbox toggle), so leave it for the surrounding screen
             // to interpret.
             WidgetEvent::CharInput { ch: ' ' } if self.state.focused => {
-                self.checked = !self.checked;
-                if let Some(handler) = &mut self.on_change {
-                    handler(self.checked, ctx);
-                }
+                self.toggle(ctx);
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,

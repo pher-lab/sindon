@@ -18,7 +18,7 @@ use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, Widget
 use crate::interaction::{InteractionState, dim_over, step_selection};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{AccessNode, AccessRole, Color, Rect, Size};
+use shroud_core::{AccessAction, AccessChild, AccessNode, AccessRole, Color, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Reactive, Signal};
 
@@ -215,16 +215,62 @@ impl Widget for Segmented {
     }
 
     fn accessibility(&self) -> Option<AccessNode> {
-        // MVP (read-only) exposes the whole bar as one node whose name is the
-        // currently-selected label, so a screen reader announces the active
-        // choice. Per-segment `Tab` child nodes (each individually selectable)
-        // are deferred to the operable slice, where each option also needs its
-        // own action target.
+        // The bar itself is the tab list; each segment is a `Tab` child (see
+        // `accessibility_children`). Its name stays the selected label so an AT
+        // that summarises the group still announces the active choice.
         let mut node = AccessNode::new(AccessRole::TabList).disabled(self.disabled.get());
         if let Some(label) = self.labels.get(self.selected_index()) {
             node = node.name(label.clone());
         }
         Some(node)
+    }
+
+    fn accessibility_children(&self, layout: Rect) -> Vec<AccessChild> {
+        let n = self.labels.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        // One node per segment, boxed the way `paint` boxes them, so the AT's
+        // highlight lands on the segment the user hears.
+        let disabled = self.disabled.get();
+        let selected = self.selected_index();
+        let seg_w = layout.size.width / n as f32;
+        self.labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| AccessChild {
+                node: AccessNode::new(AccessRole::Tab)
+                    .name(label.clone())
+                    .selected(i == selected)
+                    .disabled(disabled),
+                bounds: Rect::new(
+                    layout.origin.x + i as f32 * seg_w,
+                    layout.origin.y,
+                    seg_w,
+                    layout.size.height,
+                ),
+            })
+            .collect()
+    }
+
+    fn accessibility_action(
+        &mut self,
+        action: AccessAction,
+        option: Option<usize>,
+        _layout: Rect,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        // Only a segment is clickable — `TabList` is not an activatable role,
+        // so the bar's own node never advertises the action and `option` is
+        // always the real target here.
+        if action != AccessAction::Click || self.disabled.get() {
+            return EventResult::Ignored;
+        }
+        let Some(index) = option.filter(|&i| i < self.labels.len()) else {
+            return EventResult::Ignored;
+        };
+        self.commit(index, ctx);
+        EventResult::Consumed
     }
 
     fn style(&self) -> FlexStyle {
@@ -489,6 +535,70 @@ mod tests {
             2,
             "external write is the source of truth"
         );
+    }
+
+    #[test]
+    fn every_segment_is_exposed_as_its_own_node() {
+        // The point of the per-option children: a screen reader can enumerate
+        // the choices, not just hear the selected one.
+        let s = seg().selected(1);
+        let children = s.accessibility_children(layout());
+        assert_eq!(children.len(), 3, "one node per segment");
+
+        for (i, child) in children.iter().enumerate() {
+            assert_eq!(child.node.role, AccessRole::Tab);
+            assert_eq!(child.node.name.as_deref(), Some(["A", "B", "C"][i]));
+            assert_eq!(
+                child.node.selected,
+                Some(i == 1),
+                "only the selected segment reports selected"
+            );
+            // Bounds match what `paint` draws: even thirds of a 300px bar.
+            assert_eq!(child.bounds.origin.x, i as f32 * 100.0);
+            assert_eq!(child.bounds.size.width, 100.0);
+        }
+    }
+
+    #[test]
+    fn screen_reader_click_selects_the_targeted_segment() {
+        let seen = Rc::new(StdCell::new(usize::MAX));
+        let s2 = Rc::clone(&seen);
+        let mut s = seg().on_change(move |i, _| s2.set(i));
+        let mut ctx = EventContext::new();
+
+        let r = s.accessibility_action(AccessAction::Click, Some(2), layout(), &mut ctx);
+        assert_eq!(r, EventResult::Consumed);
+        assert_eq!(s.selected_index(), 2, "the AT's target segment is selected");
+        assert_eq!(seen.get(), 2, "handler fired as for a mouse click");
+    }
+
+    #[test]
+    fn screen_reader_click_needs_a_real_segment() {
+        let mut s = seg().selected(1);
+        let mut ctx = EventContext::new();
+
+        // The bar itself is a TabList (not activatable), so a click with no
+        // option is not a selection.
+        assert_eq!(
+            s.accessibility_action(AccessAction::Click, None, layout(), &mut ctx),
+            EventResult::Ignored,
+        );
+        // A stale id from a snapshot taken when the bar had more segments.
+        assert_eq!(
+            s.accessibility_action(AccessAction::Click, Some(9), layout(), &mut ctx),
+            EventResult::Ignored,
+        );
+        assert_eq!(s.selected_index(), 1, "selection untouched");
+    }
+
+    #[test]
+    fn disabled_segmented_refuses_the_screen_reader_click() {
+        let mut s = seg().selected(1).disabled(true);
+        let mut ctx = EventContext::new();
+
+        let r = s.accessibility_action(AccessAction::Click, Some(2), layout(), &mut ctx);
+        assert_eq!(r, EventResult::Ignored);
+        assert_eq!(s.selected_index(), 1, "state unchanged");
     }
 
     #[test]

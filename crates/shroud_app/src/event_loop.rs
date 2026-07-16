@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use accesskit_winit::{Adapter, Event as A11yEvent, WindowEvent as A11yWindowEvent};
 
-use crate::a11y::snapshot_to_tree_update;
+use crate::a11y::{action_from_request, snapshot_to_tree_update};
 use shroud_core::{Color, Colors, Point, Rect, Theme};
 use shroud_platform::{PlatformWindow, SecureClipboard, SystemTheme};
 use shroud_reactive::{Reactive, Signal};
@@ -1082,16 +1082,26 @@ impl ShroudEventLoop {
 
     /// Handle an event surfaced by the accessibility adapter.
     ///
-    /// MVP is read-only ("perceivable"): we answer the AT's request for an
-    /// initial tree and keep publishing updates, but do not yet act on
-    /// `ActionRequested` (SR-driven click / focus / value change) — that is the
-    /// operable slice. `AccessibilityDeactivated` needs no teardown: the
-    /// adapter simply goes dormant and `update_if_active` no-ops again.
+    /// `AccessibilityDeactivated` needs no teardown: the adapter simply goes
+    /// dormant and `update_if_active` no-ops again.
+    ///
+    /// An `ActionRequested` the translation doesn't understand, or that names a
+    /// node no widget answers for, is dropped silently — an AT is free to ask
+    /// for anything, and a stale node id is normal (the tree may have rebuilt
+    /// since the AT read the snapshot). The redraw is unconditional on a
+    /// translated action rather than gated on the tree acting: even a refused
+    /// action can have moved focus.
     fn handle_a11y_event(&mut self, event: A11yEvent) {
         match event.window_event {
             A11yWindowEvent::InitialTreeRequested => self.push_a11y_update(),
-            A11yWindowEvent::ActionRequested(_request) => {
-                // Deferred to the operable slice — accept and ignore for now.
+            A11yWindowEvent::ActionRequested(request) => {
+                let Some((node_id, action)) = action_from_request(&request) else {
+                    return;
+                };
+                if let Some(tree) = self.tree.as_mut() {
+                    tree.perform_access_action(node_id, action, &mut self.event_ctx);
+                    self.request_redraw();
+                }
             }
             A11yWindowEvent::AccessibilityDeactivated => {}
         }
