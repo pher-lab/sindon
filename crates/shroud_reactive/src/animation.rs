@@ -26,6 +26,12 @@
 //! bg.set(Color::WHITE); // begins a 200ms fade from the current value
 //! // Container::new().background(bg.clone()) reads the eased value each paint.
 //! ```
+//!
+//! # Testing
+//!
+//! Animations advance on the wall clock, so a test that asserts anything
+//! about a fade *in flight* is racing a real timer. [`test_clock::freeze`]
+//! pins the clock so the test steps time itself.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -42,6 +48,107 @@ thread_local! {
     /// more redraw". Thread-local because the UI runs single-threaded on the
     /// event-loop thread, like `system_theme_signal`.
     static FRAME_REQUESTED: Cell<bool> = const { Cell::new(false) };
+
+    /// When `Some`, animations read this instead of the wall clock. Only
+    /// [`test_clock`] ever sets it; in a real app it stays `None` for the
+    /// process's life and [`now`] is just `Instant::now`. Thread-local for
+    /// the same reason as `FRAME_REQUESTED`, and so a frozen clock in one
+    /// test can't reach a test running concurrently on another thread.
+    static CLOCK_OVERRIDE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// The current time as animations see it: the wall clock, unless a test has
+/// frozen it via [`test_clock`]. Every read of "what time is it" in this
+/// module goes through here — that's what makes a frozen clock total rather
+/// than partial.
+fn now() -> Instant {
+    CLOCK_OVERRIDE
+        .with(|c| c.get())
+        .unwrap_or_else(Instant::now)
+}
+
+/// Freeze the animation clock so tests can observe a fade at a chosen point
+/// instead of racing a real timer.
+///
+/// A transition lasting a fixed wall-clock duration (e.g. `Container`'s 120 ms
+/// hover fade) makes "assert the fade is still in flight" a race: if the test
+/// thread is descheduled past the duration between starting the fade and
+/// painting, the animation has already settled and the assertion fails. That
+/// passes in isolation and fails under load. Freezing the clock removes real
+/// elapsed time from the equation entirely.
+///
+/// This is public because app authors testing their own widgets hit exactly
+/// the same race — nothing in the framework's own runtime touches it.
+///
+/// ```
+/// use std::time::Duration;
+/// use shroud_reactive::animation::{Animated, Easing, test_clock};
+///
+/// let clock = test_clock::freeze();
+/// let a = Animated::new(0.0f32, Duration::from_millis(100), Easing::Linear);
+/// a.set(10.0);
+/// assert!(a.is_animating(), "no time has passed, so it can't have settled");
+///
+/// clock.advance(Duration::from_millis(50));
+/// assert_eq!(a.get(), 5.0, "exactly halfway, every run");
+///
+/// clock.advance(Duration::from_millis(50));
+/// assert!(!a.is_animating());
+/// // Dropping `clock` restores the wall clock.
+/// ```
+pub mod test_clock {
+    use super::{CLOCK_OVERRIDE, Duration, Instant};
+
+    /// Holds the animation clock still until dropped, when the previous clock
+    /// (normally the wall clock) is restored. Restoring on drop — rather than
+    /// leaving the override set — matters because libtest runs tests on the
+    /// main thread when `--test-threads=1`, so a leaked freeze would be
+    /// inherited by every later test on that thread. Unwinding on a failed
+    /// assertion still drops the guard.
+    #[must_use = "the clock unfreezes as soon as the guard is dropped"]
+    pub struct ClockGuard {
+        prev: Option<Instant>,
+    }
+
+    impl ClockGuard {
+        /// Move the frozen clock forward by `by`. Animations advance exactly
+        /// as far as asked — no more, no less, however loaded the machine is.
+        pub fn advance(&self, by: Duration) {
+            CLOCK_OVERRIDE.with(|c| {
+                let frozen = c
+                    .get()
+                    .expect("clock override cleared while a ClockGuard was alive");
+                c.set(Some(frozen + by));
+            });
+        }
+
+        /// The instant the clock currently reads.
+        pub fn now(&self) -> Instant {
+            CLOCK_OVERRIDE
+                .with(|c| c.get())
+                .expect("clock override cleared while a ClockGuard was alive")
+        }
+    }
+
+    impl Drop for ClockGuard {
+        fn drop(&mut self) {
+            CLOCK_OVERRIDE.with(|c| c.set(self.prev));
+        }
+    }
+
+    /// Freeze the clock at the current instant. See the [module
+    /// docs](self) for why.
+    pub fn freeze() -> ClockGuard {
+        freeze_at(Instant::now())
+    }
+
+    /// Freeze the clock at a specific instant. Prefer [`freeze`] unless the
+    /// test needs to place an animation relative to an `Instant` it already
+    /// holds.
+    pub fn freeze_at(at: Instant) -> ClockGuard {
+        let prev = CLOCK_OVERRIDE.with(|c| c.replace(Some(at)));
+        ClockGuard { prev }
+    }
 }
 
 /// Register that an animation still needs another frame. Called internally by
@@ -115,7 +222,7 @@ impl<T: Lerp + Clone> AnimState<T> {
         if self.duration.is_zero() {
             return self.target.clone();
         }
-        let raw = self.start.elapsed().as_secs_f32() / self.duration.as_secs_f32();
+        let raw = self.elapsed().as_secs_f32() / self.duration.as_secs_f32();
         if raw >= 1.0 {
             return self.target.clone();
         }
@@ -124,7 +231,15 @@ impl<T: Lerp + Clone> AnimState<T> {
     }
 
     fn settled(&self) -> bool {
-        self.duration.is_zero() || self.start.elapsed() >= self.duration
+        self.duration.is_zero() || self.elapsed() >= self.duration
+    }
+
+    /// Time since `start` on the animation clock. Saturating rather than
+    /// `Instant::elapsed` because a test may freeze the clock at an instant
+    /// *before* an already-running animation started, which would otherwise
+    /// underflow; reading that as "zero elapsed" is the sensible answer.
+    fn elapsed(&self) -> Duration {
+        now().saturating_duration_since(self.start)
     }
 }
 
@@ -157,9 +272,7 @@ impl<T: Lerp + Clone> Animated<T> {
     pub fn new(initial: T, duration: Duration, easing: Easing) -> Self {
         // Backdate `start` by `duration` so the initial state reads as
         // already complete (settled), with no spurious startup vote.
-        let start = Instant::now()
-            .checked_sub(duration)
-            .unwrap_or_else(Instant::now);
+        let start = now().checked_sub(duration).unwrap_or_else(now);
         Self {
             state: Rc::new(RefCell::new(AnimState {
                 from: initial.clone(),
@@ -178,7 +291,7 @@ impl<T: Lerp + Clone> Animated<T> {
         let mut s = self.state.borrow_mut();
         s.from = s.value();
         s.target = target;
-        s.start = Instant::now();
+        s.start = now();
     }
 
     /// Jump immediately to `value` with no interpolation — the animation is
@@ -192,9 +305,7 @@ impl<T: Lerp + Clone> Animated<T> {
         s.target = value;
         // Backdate `start` past `duration` so `settled()` holds and `value()`
         // short-circuits to `target`: no interpolation, no vote.
-        s.start = Instant::now()
-            .checked_sub(s.duration)
-            .unwrap_or_else(Instant::now);
+        s.start = now().checked_sub(s.duration).unwrap_or_else(now);
     }
 
     /// Read the current eased value. While the animation is still in flight
@@ -274,15 +385,78 @@ mod tests {
 
     #[test]
     fn set_starts_animation_and_votes_for_a_frame() {
+        // Frozen clock: "just after set" means exactly t=0, not "t≈0 if this
+        // thread isn't descheduled" — otherwise a stall past the 100ms
+        // duration settles the animation and the vote never happens.
+        let _clock = test_clock::freeze();
         reset_frame_request();
         let a = Animated::new(0.0f32, Duration::from_millis(100), Easing::Linear);
         a.set(10.0);
-        // Immediately after set, we're at t≈0 → value near `from`, still
-        // animating, and the read must have voted.
-        let v = a.get();
-        assert!((0.0..2.0).contains(&v), "value just after set was {v}");
+        assert_eq!(a.get(), 0.0, "at t=0 the value is still `from`");
         assert!(a.is_animating());
         assert!(frame_requested(), "an in-flight get must request a frame");
+    }
+
+    #[test]
+    fn frozen_clock_holds_an_animation_mid_flight() {
+        let clock = test_clock::freeze();
+        let a = Animated::new(0.0f32, Duration::from_millis(100), Easing::Linear);
+        a.set(100.0);
+
+        clock.advance(Duration::from_millis(25));
+        assert_eq!(a.get(), 25.0, "linear easing, a quarter of the way");
+        assert!(a.is_animating());
+
+        clock.advance(Duration::from_millis(75));
+        assert_eq!(a.get(), 100.0, "arrived exactly on the target");
+        assert!(!a.is_animating(), "the duration has fully elapsed");
+    }
+
+    #[test]
+    fn frozen_clock_stops_real_time_from_advancing_an_animation() {
+        let _clock = test_clock::freeze();
+        let a = Animated::new(0.0f32, Duration::from_millis(1), Easing::Linear);
+        a.set(1.0);
+        // A 1ms animation would settle instantly on the wall clock. Sleeping
+        // well past it must change nothing: only `advance` moves the clock.
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(a.get(), 0.0);
+        assert!(
+            a.is_animating(),
+            "real time must not advance a frozen clock"
+        );
+    }
+
+    #[test]
+    fn dropping_the_guard_restores_the_wall_clock() {
+        let a = {
+            let clock = test_clock::freeze();
+            let a = Animated::new(0.0f32, Duration::from_millis(1), Easing::Linear);
+            a.set(1.0);
+            clock.advance(Duration::from_micros(1));
+            assert!(a.is_animating(), "frozen mid-flight");
+            a
+        };
+        // The guard is gone, so `elapsed` is measured against the real clock
+        // again — and the 1ms duration is long past.
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            !a.is_animating(),
+            "unfreezing must let real time settle the animation"
+        );
+    }
+
+    #[test]
+    fn freezing_before_a_running_animation_starts_reads_as_zero_elapsed() {
+        // `freeze_at` an instant that predates the animation's `start` makes
+        // `now - start` negative; that must saturate to zero rather than
+        // panic on `Instant` subtraction overflow.
+        let before = Instant::now();
+        let a = Animated::new(0.0f32, Duration::from_millis(100), Easing::Linear);
+        a.set(10.0);
+        let _clock = test_clock::freeze_at(before);
+        assert_eq!(a.get(), 0.0);
+        assert!(a.is_animating());
     }
 
     #[test]
