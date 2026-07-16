@@ -61,6 +61,26 @@ impl FocusReason {
             FocusReason::Restored { visible } => visible,
         }
     }
+
+    /// Whether focus acquired this way should scroll the widget into view —
+    /// see [`WidgetTree::reveal_pending_focus`](crate::tree::WidgetTree).
+    ///
+    /// A near-twin of [`shows_ring`](Self::shows_ring), but a different
+    /// question, so the two are kept apart: a ring says "focus is here", a
+    /// reveal says "focus went somewhere you can't see". `Restored` is where
+    /// they part company.
+    pub fn scrolls_into_view(self) -> bool {
+        match self {
+            // The user pointed at the widget, so it is on screen already.
+            FocusReason::Pointer => false,
+            // These can land anywhere in the tree, including well outside a
+            // scrolled viewport — the reason the reveal exists at all.
+            FocusReason::Keyboard | FocusReason::Programmatic => true,
+            // Focus did not really move: the widget is where the user left it.
+            // Scrolling would turn an invisible rebuild into a visible jump.
+            FocusReason::Restored { .. } => false,
+        }
+    }
 }
 
 /// Tree-global focus state.
@@ -139,6 +159,23 @@ mod tests {
         assert!(!FocusReason::Pointer.shows_ring());
         assert!(FocusReason::Keyboard.shows_ring());
         assert!(FocusReason::Programmatic.shows_ring());
+    }
+
+    #[test]
+    fn restored_focus_shows_its_old_ring_but_never_scrolls() {
+        // The one reason where "paint a ring" and "scroll into view" disagree:
+        // a rebuild that restores a keyboard focus keeps the ring, yet must not
+        // move the viewport under the user.
+        assert!(FocusReason::Restored { visible: true }.shows_ring());
+        assert!(!FocusReason::Restored { visible: true }.scrolls_into_view());
+        assert!(!FocusReason::Restored { visible: false }.scrolls_into_view());
+    }
+
+    #[test]
+    fn only_pointer_focus_skips_the_reveal() {
+        assert!(!FocusReason::Pointer.scrolls_into_view());
+        assert!(FocusReason::Keyboard.scrolls_into_view());
+        assert!(FocusReason::Programmatic.scrolls_into_view());
     }
 
     #[test]

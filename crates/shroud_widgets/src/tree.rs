@@ -104,6 +104,19 @@ pub struct WidgetTree {
     /// so an unconsumed stash can never be picked up by a later, unrelated
     /// rebuild.
     dropped_focus_visible: Option<bool>,
+    /// Widget that focus moved to for a reason that should bring it on screen
+    /// ([`FocusReason::scrolls_into_view`]), consumed by
+    /// [`Self::reveal_pending_focus`] at the end of the next layout pass.
+    ///
+    /// Deferred rather than done at the focus call because the reveal is pure
+    /// rect arithmetic and focus can be applied before the tree has ever been
+    /// laid out — `focus_initially` on a freshly built screen runs *before* the
+    /// first `compute_layout`, where every rect still reads zero.
+    ///
+    /// Assigned (not or-ed) on every focus change, so a later focus that must
+    /// not scroll — a click landing elsewhere — cancels an earlier request
+    /// instead of leaving it to fire against the wrong widget.
+    pending_reveal: Option<usize>,
     /// Active overlay layers (modals, dropdowns, context menus), painted
     /// in push order over the main root. Topmost layer (last push) gets
     /// event priority. While `layers` is non-empty, the main tree
@@ -279,6 +292,7 @@ impl WidgetTree {
             focus: FocusManager::new(),
             pending_initial_focus: None,
             dropped_focus_visible: None,
+            pending_reveal: None,
             layers: Vec::new(),
             root_replaced: false,
             viewport: (0.0, 0.0),
@@ -958,6 +972,7 @@ impl WidgetTree {
         }
 
         self.sync_scroll_view_content_heights();
+        self.reveal_pending_focus();
     }
 
     /// Returns whether the node at `idx` holds a `ScrollView` widget. Used
@@ -1138,6 +1153,7 @@ impl WidgetTree {
         }
 
         self.sync_scroll_view_content_heights();
+        self.reveal_pending_focus();
     }
 
     /// Walk every live widget; for each [`ReactiveChildren`], compare its
@@ -1275,6 +1291,48 @@ impl WidgetTree {
                 // a now-too-large offset back so the top isn't scrolled out of
                 // view. Growing content leaves the offset alone.
                 sv.clamp_scroll(viewport_h);
+            }
+        }
+    }
+
+    /// Scroll every `ScrollView` ancestor of the pending-reveal widget so that
+    /// widget sits inside their viewports — the "Tab followed the focus"
+    /// behavior. A no-op unless a focus change armed a request (see
+    /// [`Self::pending_reveal`]).
+    ///
+    /// Runs at the tail of the layout pass, after
+    /// [`Self::sync_scroll_view_content_heights`], because both of its inputs
+    /// are only valid there: the rects it measures come from the layout that
+    /// just ran, and the clamp it relies on needs the content extents that
+    /// pass publishes.
+    fn reveal_pending_focus(&mut self) {
+        let Some(idx) = self.pending_reveal.take() else {
+            return;
+        };
+        // The target may have been removed between the focus and this layout.
+        let Some(node) = self.node(idx) else { return };
+        let target = self.layout.absolute_rect(node.layout_node);
+        let mut parent = node.parent;
+        // Scroll settled by the scroll ancestors already revealed. An outer
+        // viewport sees the target displaced by every scroll between them, so
+        // each step folds in what the previous one landed on.
+        let mut inner_scroll = 0.0f32;
+
+        while let Some(a) = parent {
+            let Some(anode) = self.node(a) else { break };
+            parent = anode.parent;
+            if !Self::is_scroll_view_idx(&self.nodes, a) {
+                continue;
+            }
+            let view = self.layout.absolute_rect(anode.layout_node);
+            // Both rects come from the same un-scrolled layout frame, so their
+            // difference is where this viewport would show the target at scroll
+            // 0 — i.e. the target's position in the view's content space.
+            let top = target.origin.y - inner_scroll - view.origin.y;
+            let Some(anode) = self.node_mut(a) else { break };
+            let widget_any: &mut dyn std::any::Any = anode.widget.as_mut();
+            if let Some(sv) = widget_any.downcast_mut::<ScrollView>() {
+                inner_scroll += sv.reveal_span(top, target.size.height, view.size.height);
             }
         }
     }
@@ -1961,9 +2019,14 @@ impl WidgetTree {
                                     // dispatch, so no frame shows an empty gap —
                                     // the "flicker" a real down→up wait exposes.
                                     // The trailing real MouseUp arrives with the
-                                    // new menu already up, lands outside it (menus
-                                    // anchor below/around their trigger, not over
-                                    // it), and is harmlessly swallowed.
+                                    // new menu already up and fires nothing,
+                                    // wherever it lands: outside the menu it is
+                                    // swallowed, and inside it every activatable
+                                    // widget needs a press first — `release`
+                                    // without one is `Release::Idle` (see
+                                    // [`InteractionState`]). So this does not rely
+                                    // on where a menu anchors relative to its
+                                    // trigger.
                                     let release = WidgetEvent::MouseUp {
                                         position: point,
                                         button: MouseButton::Left,
@@ -2185,6 +2248,11 @@ impl WidgetTree {
         // click on an already-keyboard-focused widget drops its ring) —
         // this is before the no-op early return below.
         self.focus.set_visible(new.is_some() && reason.shows_ring());
+        // Arm the scroll-into-view for the same reason, and for the same
+        // "even if focus didn't move" logic: Tab with a single stop re-focuses
+        // the widget it is already on, and the user still expects to be shown
+        // where that is.
+        self.pending_reveal = new.filter(|_| reason.scrolls_into_view());
         if prev == new {
             return prev;
         }
