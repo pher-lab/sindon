@@ -36,12 +36,30 @@ pub enum FocusReason {
     /// Treated like keyboard navigation (ring shown) since the user did
     /// not point at the widget themselves.
     Programmatic,
+    /// Focus is being handed back to the *same logical widget* after a
+    /// rebuild replaced its node — see
+    /// [`WidgetTree::refocus_initially`](crate::tree::WidgetTree::refocus_initially).
+    ///
+    /// Focus did not really move here: the widget the user was on is still
+    /// the widget they are on, it just lives at a new index. So the ring
+    /// state is not re-derived from a reason at all — it carries the flag
+    /// focus already had, which is what keeps a rebuild invisible to the
+    /// `:focus-visible` heuristic. Deriving it instead would light a ring
+    /// on a widget the user reached by pointing at it.
+    Restored {
+        /// The `:focus-visible` flag in effect before the rebuild.
+        visible: bool,
+    },
 }
 
 impl FocusReason {
     /// Whether a focus ring should be painted for focus acquired this way.
     pub fn shows_ring(self) -> bool {
-        !matches!(self, FocusReason::Pointer)
+        match self {
+            FocusReason::Pointer => false,
+            FocusReason::Keyboard | FocusReason::Programmatic => true,
+            FocusReason::Restored { visible } => visible,
+        }
     }
 }
 

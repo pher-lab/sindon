@@ -5970,6 +5970,177 @@ fn focus_initially_skips_silently_when_target_tombstoned() {
     assert!(events.borrow().is_empty());
 }
 
+// ── refocus_initially: focus survives a self-triggered rebuild ─────
+//
+// The knot pin toggle: a row's own button rebuilds the list it lives in, so
+// it activates itself out of existence and `remove` drops focus with it.
+// Space-pinning a note therefore dumped the user back to the top of the tab
+// order. `refocus_initially` lets the builder hand focus to the replacement
+// *as it was* — the ring state has to come along or the fix trades a lost
+// ring for a spurious one on the mouse path.
+
+/// One button in a rebuildable row. Returns (tree, row, button).
+fn rebuildable_button_row() -> (WidgetTree, usize, usize) {
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(200.0).height(60.0));
+    let row = tree.add_child(root, Container::row().width(200.0).height(30.0));
+    let btn = tree.add_child(row, Button::new("*"));
+    tree.compute_layout(200.0, 60.0);
+    (tree, row, btn)
+}
+
+/// Rebuild `row`'s children into a single fresh button that claims focus
+/// back, mirroring what knot's `add_row` does. Returns the new index.
+fn rebuild_row_refocusing(tree: &mut WidgetTree, ev: &mut EventContext, row: usize) -> usize {
+    let fresh = Rc::new(Cell::new(usize::MAX));
+    let fresh_setter = Rc::clone(&fresh);
+    ev.rebuild_children(row, move |tree, row| {
+        let b = tree.add_child(row, Button::new("*"));
+        fresh_setter.set(b);
+        tree.refocus_initially(b);
+    });
+    tree.apply_pending_commands(ev);
+    tree.compute_layout(200.0, 60.0);
+    tree.flush_pending_focus(ev);
+    fresh.get()
+}
+
+#[test]
+fn refocus_initially_restores_keyboard_focus_across_a_rebuild() {
+    // The Space-pin path end to end: Tab to the button (ring on), rebuild
+    // the row out from under it, and the replacement must come up focused
+    // *and* ringed — the user never left it.
+    let (mut tree, row, btn) = rebuildable_button_row();
+    let mut ev = EventContext::new();
+
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Tab),
+        },
+        &mut ev,
+    );
+    assert_eq!(tree.focused(), Some(btn), "Tab focuses the button");
+    assert!(tree.focus_visible(), "Tab focus shows a ring");
+
+    let fresh = rebuild_row_refocusing(&mut tree, &mut ev, row);
+
+    assert_ne!(fresh, btn, "the rebuild really did allocate a new node");
+    assert_eq!(tree.focused(), Some(fresh), "focus follows to the new node");
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(
+        ring_count(&ctx),
+        1,
+        "keyboard focus keeps its ring across the rebuild"
+    );
+}
+
+#[test]
+fn refocus_initially_keeps_pointer_focus_ringless() {
+    // The other half, and the reason this isn't just `focus_initially`:
+    // the same restore driven by a *mouse* pin must not light a ring the
+    // user never had. `focus_initially` here would paint one.
+    let (mut tree, row, btn) = rebuildable_button_row();
+    let mut ev = EventContext::new();
+
+    let r = tree.layout_rect(btn);
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(
+                r.origin.x + r.size.width / 2.0,
+                r.origin.y + r.size.height / 2.0,
+            ),
+            button: MouseButton::Left,
+        },
+        &mut ev,
+    );
+    assert_eq!(tree.focused(), Some(btn), "click focuses the button");
+    assert!(!tree.focus_visible(), "click-to-focus stays ringless");
+
+    let fresh = rebuild_row_refocusing(&mut tree, &mut ev, row);
+
+    assert_eq!(tree.focused(), Some(fresh), "focus follows to the new node");
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    assert_eq!(
+        ring_count(&ctx),
+        0,
+        "a restored pointer focus must not sprout a ring"
+    );
+}
+
+#[test]
+fn refocus_initially_does_not_steal_focus_when_none_was_lost() {
+    // A builder arms this for its "should be refocused" row without
+    // checking whether that row was focused at all — knot's rebuild also
+    // runs on search / sort / the editor refresh bridge. With focus parked
+    // elsewhere (or nowhere), the restore must decline rather than yank.
+    let (mut tree, row, _btn) = rebuildable_button_row();
+    let outside = tree.add_child(tree.root().unwrap(), Button::new("elsewhere"));
+    tree.compute_layout(200.0, 60.0);
+
+    let mut ev = EventContext::new();
+    tree.focus(Some(outside), &mut ev);
+    assert_eq!(tree.focused(), Some(outside));
+
+    // Rebuilding a row that never held focus tombstones nothing focused,
+    // so there is no ring state to claim and the arm no-ops.
+    let fresh = rebuild_row_refocusing(&mut tree, &mut ev, row);
+
+    assert_eq!(
+        tree.focused(),
+        Some(outside),
+        "focus stays where the user left it"
+    );
+    assert_ne!(tree.focused(), Some(fresh));
+}
+
+#[test]
+fn refocus_initially_ignores_a_stale_drop_from_an_earlier_frame() {
+    // The stash is frame-scoped: `flush_pending_focus` drops it every
+    // redraw. Without that, a removal nobody restored would leave a live
+    // flag that an unrelated rebuild could claim frames later — restoring
+    // focus to a widget the user never touched.
+    let (mut tree, row, btn) = rebuildable_button_row();
+    let mut ev = EventContext::new();
+
+    // Frame 1: focus the button, then remove it without any restore.
+    tree.focus(Some(btn), &mut ev);
+    tree.remove(btn);
+    assert_eq!(tree.focused(), None, "removal drops focus");
+    tree.flush_pending_focus(&mut ev); // end of frame 1 — stash expires here
+
+    // Frame 2: an unrelated rebuild arms a restore. Nothing was lost this
+    // frame, so it must decline.
+    let fresh = rebuild_row_refocusing(&mut tree, &mut ev, row);
+
+    assert_eq!(
+        tree.focused(),
+        None,
+        "a stale drop must not resurrect focus on an unrelated rebuild"
+    );
+    assert_ne!(tree.focused(), Some(fresh));
+}
+
+#[test]
+fn focus_initially_shows_a_ring_where_refocus_initially_defers() {
+    // Guards the distinction between the two entrypoints. `focus_initially`
+    // is a genuine focus *move* (boot, screen transition) so it always
+    // rings; if it ever started deferring to prior state, the boot path
+    // would come up ringless.
+    let (mut tree, _row, btn) = rebuildable_button_row();
+    let mut ev = EventContext::new();
+
+    tree.focus_initially(btn);
+    tree.flush_pending_focus(&mut ev);
+
+    assert_eq!(tree.focused(), Some(btn));
+    assert!(
+        tree.focus_visible(),
+        "programmatic initial focus rings regardless of history"
+    );
+}
+
 #[test]
 fn event_context_focus_command_dispatches_on_drain() {
     // EventContext::focus enqueues TreeCommand::Focus; the drain loop
