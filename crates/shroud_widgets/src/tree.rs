@@ -1879,6 +1879,52 @@ impl WidgetTree {
             return EventResult::Consumed;
         }
 
+        // ↓ / ↑ step *into* a layer that owns the keyboard but has nothing
+        // in it focused. That is the state every menu opens in: opening
+        // deliberately leaves focus out on the trigger (pre-focusing a row
+        // would highlight it, which native menus don't), and keys go to the
+        // layer's subtree — so the arrows reach no listener at all and the
+        // one thing they can sensibly mean here is what Tab means, enter the
+        // layer. `Backward` enters at the last stop, matching Shift+Tab and a
+        // native menu opened with ↑.
+        //
+        // Gated on focus being *outside* the layer, which is what keeps this
+        // from shadowing any widget that wants the arrows for itself: a
+        // focused `MenuItem` steps rows with them, an `Input` in a modal moves
+        // its caret, and both keep them, because the moment focus is inside
+        // the guard is false and the event routes normally.
+        //
+        // Only the arrows, deliberately — not Enter. Entering is navigation
+        // and shows the user where they landed; activating a row nobody has
+        // seen highlighted is a different thing entirely (see
+        // `menu_keyboard_tests::an_unfocused_menu_swallows_enter_...`).
+        if layer_active {
+            let dir = match event {
+                WidgetEvent::KeyDown {
+                    key: Key::Named(NamedKey::ArrowDown),
+                } => Some(FocusDirection::Forward),
+                WidgetEvent::KeyDown {
+                    key: Key::Named(NamedKey::ArrowUp),
+                } => Some(FocusDirection::Backward),
+                _ => None,
+            };
+            if let Some(dir) = dir {
+                let layer_root = self
+                    .topmost_interactive_layer()
+                    .expect("layer_active implies an interactive layer")
+                    .root;
+                let focus_inside = self
+                    .focus
+                    .focused()
+                    .map(|f| self.ancestors_inclusive(Some(f)).contains(&layer_root))
+                    .unwrap_or(false);
+                if !focus_inside {
+                    self.advance_focus(dir, event_ctx);
+                    return EventResult::Consumed;
+                }
+            }
+        }
+
         // Pointer capture: a widget that began a drag (e.g. an `Input`
         // mid-selection) receives every `MouseMove` / `MouseUp` directly,
         // ahead of hit-testing and the layer routing below, so the drag keeps

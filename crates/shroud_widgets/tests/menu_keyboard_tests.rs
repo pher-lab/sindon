@@ -197,6 +197,85 @@ fn arrow_keys_walk_the_same_ring_as_tab() {
 }
 
 #[test]
+fn arrow_down_steps_into_an_open_menu() {
+    // ↓ is a menu's native way *in*, not just around. It has to be the tree's
+    // job: the trigger holds focus but sits outside the layer, so it cannot
+    // receive the key, and no row is focused yet to receive it either — left
+    // alone the keystroke reaches no listener at all.
+    let (mut tree, _first, trigger, _fired) = menu_app();
+    let mut ctx = EventContext::new();
+    let rows = open(&mut tree, &mut ctx, trigger);
+
+    press(&mut tree, &mut ctx, NamedKey::ArrowDown);
+
+    assert_eq!(
+        tree.focused(),
+        Some(rows[0]),
+        "ArrowDown steps into the menu at the first row"
+    );
+    assert!(tree.focus_visible(), "and shows where it landed");
+}
+
+#[test]
+fn arrow_up_steps_into_an_open_menu_at_the_last_row() {
+    // The mirror, matching Shift+Tab and a native menu opened with ↑.
+    let (mut tree, _first, trigger, _fired) = menu_app();
+    let mut ctx = EventContext::new();
+    let rows = open(&mut tree, &mut ctx, trigger);
+
+    press(&mut tree, &mut ctx, NamedKey::ArrowUp);
+
+    assert_eq!(tree.focused(), Some(rows[2]));
+}
+
+#[test]
+fn stepping_in_with_an_arrow_does_not_shadow_a_field_that_wants_it() {
+    // The guard on the step-in rule: it fires only while focus is *outside*
+    // the layer. A modal's own field must keep the arrows for its caret, and
+    // the moment focus is inside, the rule stops applying and the event routes
+    // to the widget as usual.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(400.0));
+    let trigger = tree.add_child(
+        root,
+        Button::new("open").on_click(|ctx| {
+            ctx.push_layer(
+                LayerOptions::modal(),
+                Container::column().width(200.0).height(100.0),
+                |tree, layer| {
+                    tree.add_child(layer, Button::new("a"));
+                    tree.add_child(layer, Button::new("b"));
+                },
+            );
+        }),
+    );
+    layout(&mut tree);
+    let mut ctx = EventContext::new();
+
+    click(&mut tree, &mut ctx, trigger);
+    frame(&mut tree, &mut ctx);
+    let stops = tree.focusable_in_tab_order();
+
+    // Focus is outside → the arrow steps in.
+    press(&mut tree, &mut ctx, NamedKey::ArrowDown);
+    assert_eq!(
+        tree.focused(),
+        Some(stops[0]),
+        "sanity: the arrow stepped in"
+    );
+
+    // Focus is now inside. A `Button` ignores arrows, so nothing moves — the
+    // tree must not step focus on its behalf, or a field that *does* want the
+    // key would never see it.
+    press(&mut tree, &mut ctx, NamedKey::ArrowDown);
+    assert_eq!(
+        tree.focused(),
+        Some(stops[0]),
+        "once focus is inside the layer, the arrows belong to the focused widget"
+    );
+}
+
+#[test]
 fn enter_fires_the_focused_row() {
     let (mut tree, _first, trigger, fired) = menu_app();
     let mut ctx = EventContext::new();
