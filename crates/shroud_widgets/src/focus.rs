@@ -115,6 +115,16 @@ pub struct FocusManager {
     /// `:focus-visible` heuristic). Meaningless when `focused` is `None`,
     /// and forced to `false` whenever focus clears.
     visible: bool,
+    /// Where Tab resumes from while nothing is focused — the web platform's
+    /// *sequential focus navigation starting point*.
+    ///
+    /// Set to the widget the user last clicked that could not take focus;
+    /// [`WidgetTree::advance_focus`](crate::tree::WidgetTree::advance_focus)
+    /// resolves it to a position in tab order. Mutually exclusive with
+    /// `focused` by construction — focus, when there is any, *is* the
+    /// starting point, so [`set`](Self::set) drops this whenever a widget
+    /// takes focus.
+    nav_start: Option<usize>,
 }
 
 impl FocusManager {
@@ -122,6 +132,7 @@ impl FocusManager {
         Self {
             focused: None,
             visible: false,
+            nav_start: None,
         }
     }
 
@@ -137,11 +148,18 @@ impl FocusManager {
     /// Clearing focus (`idx == None`) also drops the visible flag; a new
     /// focus leaves visibility untouched here — the caller sets it via
     /// [`set_visible`](Self::set_visible) from the focus reason.
+    ///
+    /// Focusing a widget also drops any
+    /// [`nav_start`](Self::nav_start): the focused widget is where Tab
+    /// resumes from, so a stale start point would compete with it. Clearing
+    /// focus leaves it alone, so the click that cleared focus can record one.
     pub fn set(&mut self, idx: Option<usize>) -> Option<usize> {
         let prev = self.focused;
         self.focused = idx;
         if idx.is_none() {
             self.visible = false;
+        } else {
+            self.nav_start = None;
         }
         prev
     }
@@ -156,6 +174,25 @@ impl FocusManager {
     /// tree's focus entrypoint right after [`set`](Self::set).
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
+    }
+
+    /// Where Tab resumes from while nothing is focused, or `None` to start
+    /// from the end of the tab order the direction points at.
+    ///
+    /// Only ever meaningful when [`focused`](Self::focused) is `None`.
+    pub fn nav_start(&self) -> Option<usize> {
+        self.nav_start
+    }
+
+    /// Record (or clear, with `None`) the widget Tab should resume from —
+    /// see [`nav_start`](Self::nav_start). Called by the tree's click-to-focus
+    /// path when a click lands on something that cannot take focus.
+    ///
+    /// The index is stored raw and resolved lazily, so a widget removed
+    /// afterwards needs no bookkeeping here: node indices are never reused,
+    /// so the worst case is a lookup that finds nothing and falls back.
+    pub fn set_nav_start(&mut self, idx: Option<usize>) {
+        self.nav_start = idx;
     }
 
     /// Clear focus if it currently points at `idx`. Called when a widget
@@ -207,6 +244,25 @@ mod tests {
         fm.set(Some(3));
         fm.set_visible(true);
         assert!(fm.visible());
+    }
+
+    #[test]
+    fn focus_and_nav_start_are_never_both_set() {
+        // The two answer the same question ("where does Tab step from?"), so
+        // a focused widget must retire any start point rather than compete
+        // with it. Clearing focus leaves it alone — the click that cleared
+        // focus is exactly the one that wants to record a start point, and it
+        // does so right after.
+        let mut fm = FocusManager::new();
+        fm.set_nav_start(Some(7));
+        assert_eq!(fm.nav_start(), Some(7));
+
+        fm.set(Some(3));
+        assert_eq!(fm.nav_start(), None, "focusing retires the start point");
+
+        fm.set(None);
+        fm.set_nav_start(Some(9));
+        assert_eq!(fm.nav_start(), Some(9), "clearing focus keeps one");
     }
 
     #[test]

@@ -2137,6 +2137,16 @@ impl WidgetTree {
             });
             // Pointer-driven focus: suppress the ring (:focus-visible).
             self.focus_with_reason(new_focus, FocusReason::Pointer, event_ctx);
+            if new_focus.is_none() {
+                // A click on something that cannot take focus still says where
+                // the user is. Focus clears, but the *place* survives as the
+                // start point for the next Tab — otherwise clicking a note's
+                // background sends Tab back to the top of the app, and the user
+                // learns not to trust it. `hit` is `None` only for a click that
+                // lands outside the tree entirely, which names no place, so
+                // assigning it through is right: no anchor, ends of the order.
+                self.focus.set_nav_start(hit);
+            }
         }
 
         self.dispatch_to_node(target, shifted, event_ctx)
@@ -2182,7 +2192,27 @@ impl WidgetTree {
     /// for callers that want to implement custom traversal on top of
     /// the primitive set.
     pub fn focusable_in_tab_order(&self) -> Vec<usize> {
+        self.tab_order_with_cut(None).0
+    }
+
+    /// Tab order, plus where `nav_start` falls within it.
+    ///
+    /// The cut is a *caret between* tab stops, not a stop itself: it counts
+    /// the focusables that precede `nav_start` in tree order, so a cut of `k`
+    /// means Tab goes to `order[k]` and Shift+Tab to `order[k - 1]`. That is
+    /// the shape the web platform gives its sequential focus navigation
+    /// starting point, and it is the reason a non-focusable widget can name a
+    /// position in an order it does not appear in.
+    ///
+    /// `None` when `nav_start` is `None`, or when the node it names is gone,
+    /// hidden, or outside the active subtree (e.g. behind a layer opened
+    /// since the click) — callers then fall back to the ends of the order.
+    ///
+    /// One walk produces both so the two can never disagree about which
+    /// subtree to start from or which branches are visible.
+    fn tab_order_with_cut(&self, nav_start: Option<usize>) -> (Vec<usize>, Option<usize>) {
         let mut out = Vec::new();
+        let mut cut = None;
         // Trap Tab inside the active interactive layer, skipping any
         // click-through tooltip painted on top (it owns no focus).
         let start = self
@@ -2190,15 +2220,27 @@ impl WidgetTree {
             .map(|l| l.root)
             .or(self.root);
         if let Some(root) = start {
-            self.collect_focusable(root, &mut out);
+            self.collect_focusable(root, nav_start, &mut out, &mut cut);
         }
-        out
+        (out, cut)
     }
 
-    fn collect_focusable(&self, idx: usize, out: &mut Vec<usize>) {
+    fn collect_focusable(
+        &self,
+        idx: usize,
+        nav_start: Option<usize>,
+        out: &mut Vec<usize>,
+        cut: &mut Option<usize>,
+    ) {
         let Some(node) = self.node(idx) else { return };
         if !node.widget.visible() {
             return;
+        }
+        // Before the push below: the cut sits *ahead of* this node, so a
+        // (hypothetical) focusable start point would be the next stop rather
+        // than one that has already gone by.
+        if nav_start == Some(idx) {
+            *cut = Some(out.len());
         }
         if node.widget.focusable() {
             out.push(idx);
@@ -2207,7 +2249,7 @@ impl WidgetTree {
         // child lists are short enough that this is cheap.
         let children: Vec<usize> = node.children.clone();
         for c in children {
-            self.collect_focusable(c, out);
+            self.collect_focusable(c, nav_start, out, cut);
         }
     }
 
@@ -2219,6 +2261,13 @@ impl WidgetTree {
     /// one; both events go through the same `event` path as input
     /// events, so handlers can queue tree mutations via `event_ctx`.
     ///
+    /// With nothing focused the step starts from the last click that could
+    /// not take focus — clicking a note's background and pressing Tab
+    /// continues into that note, rather than restarting at the top of the
+    /// window. Failing that (no click yet, or one whose target has since
+    /// been removed, hidden, or shut behind a layer) it starts from the end
+    /// `dir` comes from: first stop for `Forward`, last for `Backward`.
+    ///
     /// Invoked by the tree's own Tab routing — callers rarely need
     /// this directly, but it is public so tests and custom shortcut
     /// bindings can reuse the traversal policy.
@@ -2227,14 +2276,30 @@ impl WidgetTree {
         dir: FocusDirection,
         event_ctx: &mut EventContext,
     ) -> Option<usize> {
-        let order = self.focusable_in_tab_order();
+        let (order, cut) = self.tab_order_with_cut(self.focus.nav_start());
         if order.is_empty() {
             return None;
         }
 
         let next = match (self.focus.focused(), dir) {
-            (None, FocusDirection::Forward) => order[0],
-            (None, FocusDirection::Backward) => *order.last().unwrap(),
+            // Nothing focused, but the user clicked something along the way:
+            // resume from where they pointed instead of the top of the order.
+            // `cut` is a position *between* stops, so the two directions read
+            // it symmetrically, and the modulo gives the same wrap as a step
+            // off either end.
+            (None, dir) => match cut {
+                Some(c) => {
+                    let n = order.len();
+                    match dir {
+                        FocusDirection::Forward => order[c % n],
+                        FocusDirection::Backward => order[(c + n - 1) % n],
+                    }
+                }
+                None => match dir {
+                    FocusDirection::Forward => order[0],
+                    FocusDirection::Backward => *order.last().unwrap(),
+                },
+            },
             (Some(cur), dir) => {
                 // Look up `cur` in the fresh order: it may not appear
                 // if the widget was hidden or marked non-focusable
