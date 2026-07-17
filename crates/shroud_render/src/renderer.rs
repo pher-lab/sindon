@@ -250,6 +250,11 @@ pub struct Renderer {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
+    // Physical pixels per logical pixel. The surface is sized in physical
+    // pixels (the GPU knows nothing else), but everything shroud hands the
+    // renderer — rect bounds, glyph origins, image rects — arrives in logical
+    // pixels. This factor is the only bridge between the two.
+    scale_factor: f32,
     // Rect pipeline
     rect_pipeline: wgpu::RenderPipeline,
     // Text pipeline
@@ -282,6 +287,10 @@ pub struct Renderer {
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
+        // Read before the window is moved into the surface. The event loop
+        // pushes a fresh value every frame; this only has to be right for the
+        // first one.
+        let scale_factor = window.scale_factor() as f32;
 
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         desc.backends = wgpu::Backends::all();
@@ -559,6 +568,7 @@ impl Renderer {
             queue,
             surface,
             surface_config,
+            scale_factor,
             rect_pipeline,
             text_pipeline,
             text_bind_group_layout,
@@ -574,9 +584,37 @@ impl Renderer {
         }
     }
 
-    /// Get the current surface dimensions (width, height).
+    /// Get the current surface dimensions (width, height) in physical pixels.
     pub fn surface_size(&self) -> (u32, u32) {
         (self.surface_config.width, self.surface_config.height)
+    }
+
+    /// The surface size in *logical* pixels — physical divided by the scale
+    /// factor. This is the space widgets are laid out and painted in, so it is
+    /// the divisor every vertex builder uses when mapping a coordinate into
+    /// NDC. Keeping that conversion here rather than at each call site is what
+    /// makes rects, text and images scale together: a DPI change moves this one
+    /// number and every geometry path follows it.
+    pub fn logical_surface_size(&self) -> (f32, f32) {
+        (
+            self.surface_config.width as f32 / self.scale_factor,
+            self.surface_config.height as f32 / self.scale_factor,
+        )
+    }
+
+    /// Physical pixels per logical pixel.
+    pub fn scale_factor(&self) -> f32 {
+        self.scale_factor
+    }
+
+    /// Update the scale factor. The event loop pushes the window's current
+    /// value every frame: winit re-reports it when the window moves to a
+    /// monitor with different scaling, so a per-frame push is all that
+    /// dragging between displays needs.
+    pub fn set_scale_factor(&mut self, scale: f32) {
+        if scale > 0.0 {
+            self.scale_factor = scale;
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -899,6 +937,8 @@ impl Renderer {
 
         let surface_w = self.surface_config.width;
         let surface_h = self.surface_config.height;
+        // Clip rects arrive logical; the scissor addresses the framebuffer.
+        let scale = self.scale_factor;
 
         let mut encoder = self
             .device
@@ -933,7 +973,7 @@ impl Renderer {
                     pass.set_vertex_buffer(0, batch.rect_vb.slice(..));
                     pass.set_index_buffer(batch.rect_ib.slice(..), wgpu::IndexFormat::Uint16);
                     for b in &batch.rect_batches {
-                        apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
+                        apply_scissor(&mut pass, b.clip_rect, scale, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
                         pass.draw_indexed(b.index_start..end, 0, 0..1);
                     }
@@ -951,7 +991,7 @@ impl Renderer {
                             .get(&b.image_id)
                             .expect("image was not uploaded before draw");
                         pass.set_bind_group(0, &gpu.bind_group, &[]);
-                        apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
+                        apply_scissor(&mut pass, b.clip_rect, scale, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
                         pass.draw_indexed(b.index_start..end, 0, 0..1);
                     }
@@ -963,7 +1003,7 @@ impl Renderer {
                     pass.set_vertex_buffer(0, batch.text_vb.slice(..));
                     pass.set_index_buffer(batch.text_ib.slice(..), wgpu::IndexFormat::Uint16);
                     for b in &batch.text_batches {
-                        apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
+                        apply_scissor(&mut pass, b.clip_rect, scale, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
                         pass.draw_indexed(b.index_start..end, 0, 0..1);
                     }
@@ -978,7 +1018,7 @@ impl Renderer {
                     pass.set_vertex_buffer(0, batch.color_vb.slice(..));
                     pass.set_index_buffer(batch.color_ib.slice(..), wgpu::IndexFormat::Uint16);
                     for b in &batch.color_batches {
-                        apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
+                        apply_scissor(&mut pass, b.clip_rect, scale, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
                         pass.draw_indexed(b.index_start..end, 0, 0..1);
                     }
@@ -990,7 +1030,7 @@ impl Renderer {
                     pass.set_vertex_buffer(0, batch.sec_vb.slice(..));
                     pass.set_index_buffer(batch.sec_ib.slice(..), wgpu::IndexFormat::Uint16);
                     for b in &batch.sec_batches {
-                        apply_scissor(&mut pass, b.clip_rect, surface_w, surface_h);
+                        apply_scissor(&mut pass, b.clip_rect, scale, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
                         pass.draw_indexed(b.index_start..end, 0, 0..1);
                     }
@@ -1068,8 +1108,7 @@ impl Renderer {
     }
 
     fn build_rect_geometry(&self, rects: &[DrawRect]) -> (Vec<Vertex>, Vec<u16>, Vec<DrawBatch>) {
-        let w = self.surface_config.width as f32;
-        let h = self.surface_config.height as f32;
+        let (w, h) = self.logical_surface_size();
 
         let mut vertices = Vec::with_capacity(rects.len() * 4);
         let mut indices = Vec::with_capacity(rects.len() * 6);
@@ -1167,8 +1206,7 @@ impl Renderer {
         glyphs: &[DrawGlyph],
         atlas: &TextureAtlas,
     ) -> (Vec<TextVertex>, Vec<u16>, Vec<DrawBatch>) {
-        let sw = self.surface_config.width as f32;
-        let sh = self.surface_config.height as f32;
+        let (sw, sh) = self.logical_surface_size();
         let aw = atlas.width();
         let ah = atlas.height();
 
@@ -1285,8 +1323,7 @@ impl Renderer {
         &self,
         images: &[DrawImage],
     ) -> (Vec<TextVertex>, Vec<u16>, Vec<ImageBatch>) {
-        let sw = self.surface_config.width as f32;
-        let sh = self.surface_config.height as f32;
+        let (sw, sh) = self.logical_surface_size();
 
         let mut vertices = Vec::with_capacity(images.len() * 4);
         let mut indices = Vec::with_capacity(images.len() * 6);
@@ -1356,13 +1393,29 @@ fn rotate_about(x: f32, y: f32, cx: f32, cy: f32, sin: f32, cos: f32) -> (f32, f
 }
 
 /// Apply a scissor rectangle to the render pass, clamped to the surface bounds.
-fn apply_scissor(pass: &mut wgpu::RenderPass, clip: Option<Rect>, surface_w: u32, surface_h: u32) {
+///
+/// `clip` arrives in logical pixels like every other coordinate the renderer is
+/// handed, but `set_scissor_rect` addresses the framebuffer — physical pixels.
+/// This is the third boundary that must speak physical (with the NDC divisor and
+/// the accessibility tree), and unlike those two it cannot borrow the divisor
+/// trick: the scissor is an absolute rect, not a ratio, so it needs the multiply
+/// spelled out. Getting this wrong clips a ScrollView to a quarter of its area
+/// at 200% while everything else looks right.
+fn apply_scissor(
+    pass: &mut wgpu::RenderPass,
+    clip: Option<Rect>,
+    scale: f32,
+    surface_w: u32,
+    surface_h: u32,
+) {
     let (x, y, w, h) = match clip {
         Some(r) => {
-            let x0 = r.origin.x.max(0.0).min(surface_w as f32) as u32;
-            let y0 = r.origin.y.max(0.0).min(surface_h as f32) as u32;
-            let x1 = (r.origin.x + r.size.width).max(0.0).min(surface_w as f32) as u32;
-            let y1 = (r.origin.y + r.size.height).max(0.0).min(surface_h as f32) as u32;
+            let (px, py) = (r.origin.x * scale, r.origin.y * scale);
+            let (pw, ph) = (r.size.width * scale, r.size.height * scale);
+            let x0 = px.max(0.0).min(surface_w as f32) as u32;
+            let y0 = py.max(0.0).min(surface_h as f32) as u32;
+            let x1 = (px + pw).max(0.0).min(surface_w as f32) as u32;
+            let y1 = (py + ph).max(0.0).min(surface_h as f32) as u32;
             (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
         }
         None => (0, 0, surface_w, surface_h),
