@@ -31,12 +31,16 @@
 //! Windows-only (`VirtualQueryEx` + `ReadProcessMemory`). Linux /
 //! macOS equivalents would need their own walker; not in scope today.
 //!
-//! **Run serially** (`--test-threads=1`). Each test counts a canary across the
-//! *whole process's* memory; a second scanner running concurrently inflates
-//! the baseline with its own scratch buffers, flaking the "typing added a
-//! copy" precondition (not the residue==0 assertion). CI enforces this.
+//! Both tests count a canary across the *whole process's* memory, so no two
+//! scans may overlap in time: a live scanner's scratch holds a copy of the
+//! last window it read, and this test's canary sitting in *someone else's*
+//! scratch is indistinguishable from a real leak. The scratch is therefore
+//! process-wide and every scan holds it for the whole walk — see `Scratch`.
+//! Nothing here depends on `--test-threads=1`.
 
 #![cfg(windows)]
+
+use std::sync::{Mutex, OnceLock};
 
 use shroud_core::{Point, Rect};
 use shroud_widgets::{
@@ -124,27 +128,68 @@ struct ScanReport {
     match_details: Vec<MatchDetail>,
 }
 
-/// Scanner with a fixed-address scratch buffer.
+/// The one scratch buffer in this process, at a fixed address, behind a lock.
 ///
-/// The walk never reads a window that overlaps the scratch's own address
-/// range. `ReadProcessMemory` with overlapping src/dst is a plain forward
-/// copy — NOT a no-op — so reading the chunk that contains the scratch
-/// smears the sliver `[window_start, scratch_start)` across the whole
-/// window with period `scratch_start - window_start`, replicating any real
-/// canary in that sliver into `floor(64K/period)` phantom matches. That was
-/// the 2026-07 CI-only "residue after drop" flake: dropping the widget tree
-/// resized the scratch's heap region, shifting the chunk grid so the needle
-/// Vec (allocated just before the scratch, hence nearby on the heap) landed
-/// in the sliver with a small period. Skipping the scratch loses nothing:
-/// it only ever holds copies of memory that is counted at its real address.
+/// A match found inside a scratch is a phantom by construction: a scratch only
+/// ever holds a copy of a window the walk already counted at its real address.
+/// There are two ways a scan can end up reading one, and both produced flakes:
+///
+/// 1. **Its own** (fixed 2026-07, `2aba6f2`). `ReadProcessMemory` with
+///    overlapping src/dst is a plain forward copy — NOT a no-op — so reading
+///    the chunk that contains the scratch smears the sliver
+///    `[window_start, scratch_start)` across the whole window with period
+///    `scratch_start - window_start`, replicating any real canary in that
+///    sliver into `floor(64K/period)` phantom matches. That was the CI-only
+///    "residue after drop" flake: dropping the widget tree resized the
+///    scratch's heap region, shifting the chunk grid so the needle Vec
+///    (allocated just before the scratch, hence nearby on the heap) landed in
+///    the sliver with a small period.
+///
+/// 2. **A sibling's** (fixed 2026-07-17). Both tests in this binary scan, and
+///    libtest runs them on parallel threads, so their scratches were allocated
+///    back-to-back on the heap. Each scanner hopped over its own and then read
+///    its sibling's mid-churn, counting the sibling's snapshot of this test's
+///    canary. Being a torn read of a moving buffer, the phantom count wobbled
+///    with how the two walks interleaved: landing on `baseline` flaked the
+///    `typing_copies >= 1` sanity check, while landing on a later phase fired
+///    the paint/residue **security** asserts with a false "the secret leaked"
+///    message. Only reproducible under load (`cargo test -p shroud_widgets`).
+///
+/// One process-wide scratch, held for the whole walk, closes both: there is a
+/// single range to skip, and no other scan can be writing into it while we
+/// read. Skipping it loses no detection power — the bytes it holds are counted
+/// at their real address by the window that owns them.
+struct Scratch {
+    buf: Mutex<Box<[u8]>>,
+    start: usize,
+    end: usize,
+}
+
+fn scratch() -> &'static Scratch {
+    static SCRATCH: OnceLock<Scratch> = OnceLock::new();
+    SCRATCH.get_or_init(|| {
+        let buf = vec![0u8; 1 << 16].into_boxed_slice();
+        // Boxing pins the allocation, so this range is stable for the life of
+        // the process even as the Box moves into the Mutex.
+        let (start, len) = (buf.as_ptr() as usize, buf.len());
+        Scratch {
+            buf: Mutex::new(buf),
+            start,
+            end: start + len,
+        }
+    })
+}
+
+/// Handle to the shared scratch, held across a test's phases so no allocation
+/// or free of the scratch (or of its containing heap region) can shift the
+/// chunk grid between one scan and the next.
 struct Scanner {
-    buf: Box<[u8]>,
+    scratch: &'static Scratch,
 }
 
 impl Scanner {
     fn new() -> Self {
-        let buf = vec![0u8; 1 << 16].into_boxed_slice();
-        Self { buf }
+        Self { scratch: scratch() }
     }
 }
 
@@ -156,7 +201,16 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
     let mut addr: usize = 0;
     // Conservative user-mode upper bound on x64 Windows.
     let max_addr: usize = 0x7FFF_FFFE_0000;
-    let buf = &mut scanner.buf;
+    // Hold the process-wide scratch for the entire walk. A concurrent scan
+    // would be churning canary copies through memory we are counting.
+    let mut guard = scanner
+        .scratch
+        .buf
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let buf = &mut *guard;
+    let scratch_start = scanner.scratch.start;
+    let scratch_end = scanner.scratch.end;
 
     while addr < max_addr {
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
@@ -181,14 +235,12 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
             // To catch a match that straddles a chunk boundary, the next
             // chunk overlaps the previous by (needle.len() - 1) bytes.
             let overlap = needle.len() - 1;
-            let scratch_start = buf.as_ptr() as usize;
-            let scratch_end = scratch_start + buf.len();
             while offset < region_size {
                 let read_start = region_base + offset;
                 // Never read a window that overlaps the scratch itself: an
                 // overlapping ReadProcessMemory forward-copies over its own
                 // source, smearing the sliver before the scratch into
-                // phantom canary copies (see the Scanner doc). Hop over it.
+                // phantom canary copies (see the Scratch doc). Hop over it.
                 if read_start >= scratch_start && read_start < scratch_end {
                     offset = (scratch_end - region_base).min(region_size);
                     continue;
@@ -259,8 +311,8 @@ fn scan_self_for(scanner: &mut Scanner, needle: &[u8]) -> ScanReport {
 /// inside the scanner's own scratch buffer — those are scanner artifacts by
 /// construction (the scratch only ever holds copies of other memory).
 fn dump_match_forensics(label: &str, report: &ScanReport, scanner: &Scanner) {
-    let scratch_start = scanner.buf.as_ptr() as usize;
-    let scratch_end = scratch_start + scanner.buf.len();
+    let scratch_start = scanner.scratch.start;
+    let scratch_end = scanner.scratch.end;
     eprintln!("  {label}: {} match(es)", report.matches);
     for d in &report.match_details {
         let tag = if d.addr >= scratch_start && d.addr < scratch_end {
@@ -385,8 +437,8 @@ fn secure_input_clear_leaves_no_canary_in_memory() {
     );
     eprintln!(
         "scratch=[{:#014x}..{:#014x}) needle@{:#014x}",
-        scanner.buf.as_ptr() as usize,
-        scanner.buf.as_ptr() as usize + scanner.buf.len(),
+        scanner.scratch.start,
+        scanner.scratch.end,
         canary.as_ptr() as usize
     );
     dump_match_forensics("baseline", &baseline, &scanner);
@@ -516,8 +568,8 @@ fn secure_input_reveal_paint_leaves_no_canary() {
     );
     eprintln!(
         "scratch=[{:#014x}..{:#014x}) needle@{:#014x}",
-        scanner.buf.as_ptr() as usize,
-        scanner.buf.as_ptr() as usize + scanner.buf.len(),
+        scanner.scratch.start,
+        scanner.scratch.end,
         canary.as_ptr() as usize
     );
     dump_match_forensics("baseline", &baseline, &scanner);

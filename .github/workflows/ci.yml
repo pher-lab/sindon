@@ -128,10 +128,14 @@ jobs:
     # nondeterministic hosted runner without ever weakening the residue==0
     # assertion:
     #
-    #  1. `--test-threads=1` — each test walks *this whole process's* memory
-    #     counting a canary; two scanners in parallel inflate each other's
-    #     absolute count, flaking the "typing added a copy" precondition. Serial
-    #     execution removes that cross-scanner pollution.
+    #  1. `--test-threads=1` — belt-and-braces only, as of 2026-07-17. Each test
+    #     walks *this whole process's* memory counting a canary, and two
+    #     scanners running in parallel used to read each other's scratch buffer
+    #     and count the sibling's snapshot of their own canary. That is now
+    #     fixed where it belongs — the scratch is process-wide and every scan
+    #     holds it, so concurrent scans cannot happen (see the `Scratch` doc in
+    #     zeroize_verification.rs). Serial execution is no longer what makes
+    #     these tests correct; it is kept because it costs nothing.
     #  2. Retry the run up to 3 times (fresh process each attempt). A *real*
     #     residue leak is deterministic — the plaintext is physically present
     #     every run — so it fails all three and is still caught; only
@@ -150,7 +154,7 @@ jobs:
     # intermittent retention path (e.g. an eviction-dependent cache) that the
     # retry would otherwise silently mask — investigate, don't ignore.
     #
-    # Do not remove either layer.
+    # Do not remove the retry layer.
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
