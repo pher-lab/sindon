@@ -12,6 +12,7 @@
 //! layout.
 
 use shroud_core::{Point, Theme};
+use shroud_reactive::animation::test_clock::{self, ClockGuard};
 use shroud_text::TextEngine;
 use shroud_widgets::event::{EventContext, Key, MouseButton, NamedKey, WidgetEvent};
 use shroud_widgets::tree::WidgetTree;
@@ -22,14 +23,20 @@ const VIEWPORT_H: f32 = 200.0;
 
 /// A scroll viewport with more buttons than fit in it. Returns the tree, the
 /// ScrollView index, and every button index in tab order.
-fn scrolling_list() -> (WidgetTree, usize, Vec<usize>) {
+///
+/// Scrolling glides on the wall clock, so anything that reads the *displayed*
+/// offset is racing a real timer; the returned guard holds the clock still and
+/// must outlive the tree's use. Assertions here are about where the scroll is
+/// heading (the target), not how it gets there.
+fn scrolling_list() -> (WidgetTree, usize, Vec<usize>, ClockGuard) {
+    let clock = test_clock::freeze();
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(400.0).height(VIEWPORT_H));
     let sv = tree.add_child(root, ScrollView::new().width(400.0).height(VIEWPORT_H));
     let buttons = (0..12)
         .map(|i| tree.add_child(sv, Button::new(format!("B{i}"))))
         .collect();
-    (tree, sv, buttons)
+    (tree, sv, buttons, clock)
 }
 
 /// One frame's worth of layout — including the post-layout pass that consumes
@@ -72,7 +79,7 @@ fn is_visible(tree: &WidgetTree, sv: usize, idx: usize) -> bool {
 
 #[test]
 fn tab_onto_an_offscreen_widget_scrolls_it_into_view() {
-    let (mut tree, sv, buttons) = scrolling_list();
+    let (mut tree, sv, buttons, _clock) = scrolling_list();
     frame(&mut tree);
 
     // Sanity: the list really does overflow, i.e. the last button starts below
@@ -107,7 +114,7 @@ fn tab_onto_an_offscreen_widget_scrolls_it_into_view() {
 fn every_tab_stop_is_visible_when_focus_lands_on_it() {
     // The guarantee is per-stop, not just at the end: walking the whole list
     // must never leave focus somewhere the user can't see.
-    let (mut tree, sv, buttons) = scrolling_list();
+    let (mut tree, sv, buttons, _clock) = scrolling_list();
     frame(&mut tree);
     let mut ctx = EventContext::new();
 
@@ -138,7 +145,7 @@ fn every_tab_stop_is_visible_when_focus_lands_on_it() {
 fn tab_within_the_visible_area_does_not_scroll() {
     // The reveal moves the minimum distance, which for an already-visible
     // target is nothing at all — otherwise every Tab would jitter the view.
-    let (mut tree, sv, _) = scrolling_list();
+    let (mut tree, sv, _, _clock) = scrolling_list();
     frame(&mut tree);
     let mut ctx = EventContext::new();
 
@@ -150,7 +157,7 @@ fn tab_within_the_visible_area_does_not_scroll() {
 fn clicking_a_widget_does_not_scroll_the_view() {
     // Pointer focus must not reveal: the user pointed at the widget, so it is
     // on screen by definition, and scrolling under a click is disorienting.
-    let (mut tree, sv, buttons) = scrolling_list();
+    let (mut tree, sv, buttons, _clock) = scrolling_list();
     frame(&mut tree);
     let mut ctx = EventContext::new();
 
@@ -197,7 +204,7 @@ fn programmatic_focus_before_the_first_layout_still_reveals() {
     // the first `compute_layout` of a new screen, when every rect still reads
     // zero. A reveal computed at the focus call would silently do nothing; it
     // has to wait for the layout pass.
-    let (mut tree, sv, buttons) = scrolling_list();
+    let (mut tree, sv, buttons, _clock) = scrolling_list();
     let last = *buttons.last().unwrap();
 
     tree.focus_initially(last);
@@ -216,7 +223,7 @@ fn programmatic_focus_before_the_first_layout_still_reveals() {
 fn a_removed_target_cancels_the_reveal() {
     // Focus, then delete the widget before the frame lands. The reveal must
     // drop the request rather than measure a tombstoned slot.
-    let (mut tree, sv, buttons) = scrolling_list();
+    let (mut tree, sv, buttons, _clock) = scrolling_list();
     frame(&mut tree);
     let mut ctx = EventContext::new();
 

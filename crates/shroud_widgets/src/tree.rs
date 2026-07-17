@@ -467,8 +467,10 @@ impl WidgetTree {
     pub fn pop_top_layer(&mut self) -> Option<usize> {
         let entry = self.layers.pop()?;
         let root = entry.root;
+        let had_focus = self.focus.focused();
         self.remove(root);
         self.hover_dirty = true;
+        self.return_focus_to_opener(&entry, had_focus);
         Some(root)
     }
 
@@ -483,10 +485,62 @@ impl WidgetTree {
         let Some(pos) = self.layers.iter().position(|l| l.root == root) else {
             return false;
         };
-        self.layers.remove(pos);
+        let entry = self.layers.remove(pos);
+        let had_focus = self.focus.focused();
         self.remove(root);
         self.hover_dirty = true;
+        self.return_focus_to_opener(&entry, had_focus);
         true
+    }
+
+    /// Hand focus back to the widget that opened a just-popped layer, when the
+    /// pop is what took focus away.
+    ///
+    /// A dialog's own fields go down with its subtree, and [`Self::remove`]
+    /// drops focus with them — leaving focus nowhere, so the next Tab restarts
+    /// at the top of the window and the user loses their place. The trigger is
+    /// where they logically are once the layer is gone, and the tree already
+    /// knows which widget that is: the layer stamped its opener at push.
+    ///
+    /// `had_focus` is the focus from *before* the removal, so this only fires
+    /// when this pop is what cleared it. That matters twice over: a layer whose
+    /// content never held focus (a menu — `MenuItem` is deliberately not a tab
+    /// stop) must leave focus wherever the user actually left it, and the ring
+    /// flag stashed by `remove` is only ours to claim when our own removal
+    /// stashed it.
+    ///
+    /// Deferred through the same one-shot pending slot as
+    /// [`Self::focus_initially`], because the pop entrypoints are public and
+    /// have no [`EventContext`] to dispatch `FocusGained` with.
+    fn return_focus_to_opener(&mut self, entry: &LayerEntry, had_focus: Option<usize>) {
+        // Focus survived the pop (it was outside the layer) — nothing to hand
+        // back, and stealing it to the trigger would be a bug of its own.
+        if had_focus.is_none() || self.focus.focused().is_some() {
+            return;
+        }
+        let Some(visible) = self.dropped_focus_visible.take() else {
+            return;
+        };
+        // No opener: pushed at boot or by a test, so there is nothing to
+        // return to. Focus stays cleared.
+        let Some(opener) = entry.opener else { return };
+        // The trigger may not have outlived its own layer — a row's menu whose
+        // action rebuilt that very row. Indices are never recycled (`remove`
+        // tombstones the slot for good), so a live index is always the same
+        // widget it was at push, never an unrelated one that took its place.
+        if !self.contains(opener) {
+            return;
+        }
+        // A pure-pointer trigger (`Container::on_press`, by design not a tab
+        // stop — see `Button::on_click_rect` for the a11y-complete counterpart)
+        // is not somewhere keyboard focus can live: it paints no ring and drops
+        // straight out of the tab order, so the next Tab would restart at the
+        // top of the window anyway. Leave focus cleared rather than park it
+        // somewhere that only looks restored.
+        if !self.widget(opener).focusable() {
+            return;
+        }
+        self.pending_initial_focus = Some((opener, FocusReason::Returned { visible }));
     }
 
     /// Number of currently active overlay layers.

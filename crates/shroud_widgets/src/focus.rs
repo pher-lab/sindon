@@ -50,6 +50,20 @@ pub enum FocusReason {
         /// The `:focus-visible` flag in effect before the rebuild.
         visible: bool,
     },
+    /// Focus is being handed back to the widget that *opened* a layer, after
+    /// that layer was dismissed with focus still inside it — see
+    /// [`WidgetTree::pop_layer`](crate::tree::WidgetTree::pop_layer).
+    ///
+    /// Distinct from [`Restored`](Self::Restored): focus really is moving, to a
+    /// different widget than the one that had it. What carries over is not the
+    /// widget but the *mode* the user was in — the ring flag of the focus the
+    /// layer took away. Someone who tabbed through a dialog and pressed Escape
+    /// is still navigating by keyboard when they land back on the trigger, and
+    /// someone who clicked their way through it is still not.
+    Returned {
+        /// The `:focus-visible` flag of the focus the dismissed layer held.
+        visible: bool,
+    },
 }
 
 impl FocusReason {
@@ -58,7 +72,7 @@ impl FocusReason {
         match self {
             FocusReason::Pointer => false,
             FocusReason::Keyboard | FocusReason::Programmatic => true,
-            FocusReason::Restored { visible } => visible,
+            FocusReason::Restored { visible } | FocusReason::Returned { visible } => visible,
         }
     }
 
@@ -79,6 +93,11 @@ impl FocusReason {
             // Focus did not really move: the widget is where the user left it.
             // Scrolling would turn an invisible rebuild into a visible jump.
             FocusReason::Restored { .. } => false,
+            // Focus does move here, to a trigger that is usually still on
+            // screen — but "usually" is not a guarantee (a layer can be opened
+            // by a shortcut, from anywhere), and landing focus somewhere unseen
+            // is the very thing the reveal exists to prevent.
+            FocusReason::Returned { .. } => true,
         }
     }
 }
