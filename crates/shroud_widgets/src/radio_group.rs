@@ -349,8 +349,8 @@ impl Widget for RadioGroup {
                 for glyph in &shaped.glyphs {
                     if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                         ctx.draw_glyph(
-                            label_x as i32 + glyph.x,
-                            text_y as i32 + glyph.y,
+                            label_x + glyph.x,
+                            text_y + glyph.y,
                             image,
                             color,
                             glyph.cache_key,

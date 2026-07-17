@@ -115,8 +115,8 @@ impl Widget for SecureText {
             .unwrap_or(ctx.theme.typography.body.line_height);
         let color = self.color.unwrap_or(ctx.theme.colors.on_background);
         let layout_width = layout.size.width;
-        let origin_x = layout.origin.x as i32;
-        let origin_y = layout.origin.y as i32;
+        let origin_x = layout.origin.x;
+        let origin_y = layout.origin.y;
 
         (self.text_fn)(&mut |text: &str| {
             if text.is_empty() {

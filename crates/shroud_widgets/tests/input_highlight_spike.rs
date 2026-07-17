@@ -18,7 +18,7 @@ const TEXT: &str = "let count = 42";
 /// Lay out and paint a single `Input`, returning each painted glyph's screen
 /// position and color. `DrawGlyph` isn't `Clone` (it owns a bitmap), so project
 /// to the fields the assertions need.
-fn paint_glyphs(input: Input) -> Vec<(i32, i32, Color)> {
+fn paint_glyphs(input: Input) -> Vec<(f32, f32, Color)> {
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(400.0).height(120.0));
     tree.add_child(root, input);
@@ -75,7 +75,7 @@ fn attaching_a_highlighter_does_not_move_any_glyph() {
             .highlighter(move |_| vec![(0, 3, red), (4, 9, red)]),
     );
 
-    let positions = |v: &[(i32, i32, Color)]| v.iter().map(|g| (g.0, g.1)).collect::<Vec<_>>();
+    let positions = |v: &[(f32, f32, Color)]| v.iter().map(|g| (g.0, g.1)).collect::<Vec<_>>();
     assert_eq!(
         positions(&plain),
         positions(&highlighted),

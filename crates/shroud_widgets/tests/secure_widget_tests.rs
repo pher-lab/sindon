@@ -860,7 +860,7 @@ fn secure_input_padding_x_insets_the_text() {
         paint_secure_input(SecureInput::new().placeholder("X").padding_x(24.0)).glyphs[0].x;
     assert_eq!(
         padded_x - def_x,
-        16,
+        16.0,
         "padding_x(24) insets the text 16px past the default 8 (def={def_x}, padded={padded_x})"
     );
 }

@@ -58,7 +58,7 @@ fn translated_tree_update_never_carries_a_secret() {
     tree.compute_layout(800.0, 600.0);
 
     let snapshot = tree.accessibility_snapshot();
-    let update = snapshot_to_tree_update(&snapshot);
+    let update = snapshot_to_tree_update(&snapshot, 1.0);
     let dump = format!("{update:?}");
 
     assert!(

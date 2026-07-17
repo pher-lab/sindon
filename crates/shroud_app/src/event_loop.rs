@@ -1115,10 +1115,19 @@ impl ShroudEventLoop {
     /// listening. Bounds come from the last layout pass, so callers should
     /// invoke this after layout (the redraw path does).
     fn push_a11y_update(&mut self) {
+        // Read the scale before borrowing the adapter / tree: the translation
+        // converts the snapshot's logical bounds to the physical ones accesskit
+        // expects, and it has to be the same factor this frame's layout ran
+        // against or the screen reader's highlight lands off the widget.
+        let scale = self
+            .renderer
+            .as_ref()
+            .map(|r| r.scale_factor())
+            .unwrap_or(1.0);
         let (Some(adapter), Some(tree)) = (self.adapter.as_mut(), self.tree.as_ref()) else {
             return;
         };
-        adapter.update_if_active(|| snapshot_to_tree_update(&tree.accessibility_snapshot()));
+        adapter.update_if_active(|| snapshot_to_tree_update(&tree.accessibility_snapshot(), scale));
     }
 }
 
@@ -1383,7 +1392,17 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
 
             // ── Mouse events ─────────────────────────────────────
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_position = Point::new(position.x as f32, position.y as f32);
+                // winit reports the cursor in physical pixels, but the tree
+                // hit-tests in logical ones. Convert at this single write site
+                // so every reader of `cursor_position` is already in tree
+                // space — the same discipline the clip / hover paths follow.
+                let scale = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.scale_factor())
+                    .unwrap_or(1.0);
+                self.cursor_position =
+                    Point::new(position.x as f32 / scale, position.y as f32 / scale);
                 if let Some(tree) = &mut self.tree {
                     tree.dispatch_event(
                         &WidgetEvent::MouseMove {
@@ -1423,8 +1442,20 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             // ── Scroll events ────────────────────────────────────
             WindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {
+                    // Lines are a count, not a length: one notch should move
+                    // the same 40 logical pixels at any scale, so this arm is
+                    // deliberately scale-free.
                     winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 40.0, y * 40.0),
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                    // A pixel delta (precision touchpads) is *physical*, and
+                    // the tree scrolls in logical units.
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                        let scale = self
+                            .renderer
+                            .as_ref()
+                            .map(|r| r.scale_factor())
+                            .unwrap_or(1.0);
+                        (pos.x as f32 / scale, pos.y as f32 / scale)
+                    }
                 };
 
                 if let Some(tree) = &mut self.tree {
@@ -1573,9 +1604,29 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 // one more redraw if anything is still moving.
                 shroud_reactive::animation::reset_frame_request();
 
-                let size = self.renderer.as_ref().unwrap().surface_size();
+                // Push the window's current scale factor before laying out.
+                // Reading it per frame instead of caching it at startup is
+                // what makes dragging the window to a monitor with different
+                // scaling work: winit re-reports the value and the next frame
+                // lays out against the new logical size, with no other
+                // plumbing involved.
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor())
+                    .unwrap_or(1.0);
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_scale_factor(scale);
+                }
+                // Layout runs in logical pixels; only the surface itself is
+                // physical.
+                let size = self.renderer.as_ref().unwrap().logical_surface_size();
                 let tree = self.tree.as_mut().unwrap();
                 let paint_ctx = self.paint_ctx.as_mut().unwrap();
+                // Before layout, which shapes text through `measure`: the text
+                // engine rasterizes glyphs at this scale and caches the shaped
+                // output under it.
+                paint_ctx.text_engine.set_scale(scale);
 
                 // Reset the shape tally so the perf log's `shapes=` column
                 // counts this frame only. Cheap; runs even with logging off.
@@ -1618,8 +1669,8 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 // fixed-width wrapper around leaves.
                 let perf_layout_start = Instant::now();
                 tree.compute_layout_with_measure(
-                    size.0 as f32,
-                    size.1 as f32,
+                    size.0,
+                    size.1,
                     &mut paint_ctx.text_engine,
                     &paint_ctx.theme,
                 );
@@ -1635,8 +1686,8 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 // where a pop actually changed what is hovered.
                 if tree.resync_hover(&mut self.event_ctx) {
                     tree.compute_layout_with_measure(
-                        size.0 as f32,
-                        size.1 as f32,
+                        size.0,
+                        size.1,
                         &mut paint_ctx.text_engine,
                         &paint_ctx.theme,
                     );

@@ -456,8 +456,8 @@ impl Widget for TextWidget {
         for glyph in &shaped.glyphs {
             if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                 ctx.draw_glyph(
-                    layout.origin.x as i32 + glyph.x,
-                    layout.origin.y as i32 + glyph.y,
+                    layout.origin.x + glyph.x,
+                    layout.origin.y + glyph.y,
                     image,
                     glyph.color.unwrap_or(color),
                     glyph.cache_key,
@@ -605,8 +605,8 @@ fn paint_plain(
         for glyph in &to_paint.glyphs {
             if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                 ctx.draw_glyph(
-                    layout.origin.x as i32 + glyph.x,
-                    layout.origin.y as i32 + glyph.y,
+                    layout.origin.x + glyph.x,
+                    layout.origin.y + glyph.y,
                     image,
                     color,
                     glyph.cache_key,
@@ -635,8 +635,8 @@ fn paint_plain(
     for glyph in &shaped.glyphs {
         if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
             ctx.draw_glyph(
-                layout.origin.x as i32 + glyph.x,
-                layout.origin.y as i32 + glyph.y,
+                layout.origin.x + glyph.x,
+                layout.origin.y + glyph.y,
                 image,
                 color,
                 glyph.cache_key,

@@ -63,7 +63,7 @@ fn to_role(role: AccessRole) -> Role {
 /// Always carries a full node set plus the `Tree` root and current focus —
 /// accesskit diffs it internally, so re-sending the full tree each active
 /// frame is correct and simplest.
-pub fn snapshot_to_tree_update(snapshot: &AccessSnapshot) -> TreeUpdate {
+pub fn snapshot_to_tree_update(snapshot: &AccessSnapshot, scale: f32) -> TreeUpdate {
     let mut nodes = Vec::with_capacity(snapshot.entries.len());
 
     for entry in &snapshot.entries {
@@ -133,14 +133,20 @@ pub fn snapshot_to_tree_update(snapshot: &AccessSnapshot) -> TreeUpdate {
             node.set_children(children);
         }
 
-        // Bounds in physical-pixel viewport coordinates (the space our layout
-        // runs in). accesskit `Rect` is (x0, y0, x1, y1).
+        // accesskit wants physical-pixel bounds: the platform adapter adds the
+        // window's client origin (also physical) and hands the result straight
+        // to the screen reader, applying no scale of its own. Layout runs in
+        // logical pixels, so this is the one place that converts. The multiply
+        // was absent while layout was itself physical — it was an identity,
+        // not an exemption.
+        // accesskit `Rect` is (x0, y0, x1, y1).
         let b = entry.bounds;
+        let (x0, y0) = (b.origin.x * scale, b.origin.y * scale);
         node.set_bounds(AkRect::new(
-            b.origin.x as f64,
-            b.origin.y as f64,
-            (b.origin.x + b.size.width) as f64,
-            (b.origin.y + b.size.height) as f64,
+            x0 as f64,
+            y0 as f64,
+            (x0 + b.size.width * scale) as f64,
+            (y0 + b.size.height * scale) as f64,
         ));
 
         nodes.push((NodeId(entry.id), node));
@@ -214,7 +220,7 @@ mod tests {
             focus_id: A11Y_WINDOW_ROOT,
             entries: vec![entry],
         };
-        snapshot_to_tree_update(&snap).nodes.remove(0).1
+        snapshot_to_tree_update(&snap, 1.0).nodes.remove(0).1
     }
 
     fn one_node_update(node: AccessNode) -> TreeUpdate {
@@ -223,7 +229,7 @@ mod tests {
             focus_id: A11Y_WINDOW_ROOT,
             entries: vec![entry(1, node)],
         };
-        snapshot_to_tree_update(&snap)
+        snapshot_to_tree_update(&snap, 1.0)
     }
 
     #[test]
@@ -358,7 +364,38 @@ mod tests {
             focus_id: 7,
             entries: vec![entry(7, AccessNode::new(AccessRole::Button).name("Go"))],
         };
-        let update = snapshot_to_tree_update(&snap);
+        let update = snapshot_to_tree_update(&snap, 1.0);
         assert_eq!(update.focus, NodeId(7));
+    }
+
+    #[test]
+    fn bounds_convert_from_logical_to_physical() {
+        // The AT is handed physical pixels: the platform adapter adds the
+        // window's client origin and applies no scale of its own. A widget laid
+        // out at logical (10, 20) sized 100x40 must therefore reach accesskit as
+        // (20, 40)-(220, 120) on a 200% display. The multiply reads as a no-op
+        // at 100%, which is exactly how it stayed missing for as long as layout
+        // was itself physical — so pin it at a scale where it isn't one.
+        let mut e = entry(1, AccessNode::new(AccessRole::Button).name("Go"));
+        e.bounds = Rect {
+            origin: Point { x: 10.0, y: 20.0 },
+            size: Size {
+                width: 100.0,
+                height: 40.0,
+            },
+        };
+        let snap = AccessSnapshot {
+            root_id: A11Y_WINDOW_ROOT,
+            focus_id: A11Y_WINDOW_ROOT,
+            entries: vec![e],
+        };
+
+        let update = snapshot_to_tree_update(&snap, 2.0);
+
+        assert_eq!(
+            update.nodes[0].1.bounds(),
+            Some(AkRect::new(20.0, 40.0, 220.0, 120.0)),
+            "logical bounds must be scaled into physical pixels for the AT"
+        );
     }
 }

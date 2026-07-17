@@ -57,6 +57,21 @@ impl PlatformWindow {
         self.window.inner_size()
     }
 
+    /// How many physical pixels make up one logical pixel on this window's
+    /// current monitor — 2.0 at 200% scaling, 1.5 at 150%, 1.0 at 100%.
+    ///
+    /// shroud lays out and paints in *logical* pixels: a widget authored as
+    /// 40 units tall stays visually 40 units tall at any scale, and this
+    /// factor is applied only at the two boundaries that must speak physical
+    /// pixels — the render surface (see `shroud_render`) and the OS
+    /// accessibility tree (see `shroud_app::a11y`). Read it fresh each frame
+    /// rather than caching: winit updates it when the window moves to a
+    /// monitor with a different scale, so a per-frame read is what makes
+    /// dragging between displays work with no extra plumbing.
+    pub fn scale_factor(&self) -> f32 {
+        self.window.scale_factor() as f32
+    }
+
     /// Request a redraw.
     pub fn request_redraw(&self) {
         self.window.request_redraw();
