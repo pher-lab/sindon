@@ -198,9 +198,10 @@ fn a_dialog_clicked_through_returns_a_ringless_trigger() {
 
 #[test]
 fn dismissing_a_menu_leaves_outside_focus_alone() {
-    // A menu's rows are deliberately not tab stops, so focus never enters the
-    // layer and the pop does not clear it. The trigger must not yank focus off
-    // whatever the user actually had.
+    // A menu's rows are tab stops, but the user need never step onto one: open
+    // a menu and dismiss it and focus is still out where it was. The pop did
+    // not clear it, so the restore must not fire and drag the user to the
+    // trigger.
     let mut tree = WidgetTree::new();
     let root = tree.set_root(Container::column().width(400.0).height(400.0));
     let elsewhere = tree.add_child(root, Button::new("elsewhere"));

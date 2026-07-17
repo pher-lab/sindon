@@ -9,9 +9,12 @@
 //! Selection writes back to the bound `Signal<usize>`, which apps observe
 //! via paint-time reads or a [`Memo`](shroud_reactive::Memo).
 //!
-//! Keyboard nav inside the popover (arrow keys, type-ahead) is deferred to
-//! Phase 22.5 — for now, Enter/Space on the focused trigger toggles the
-//! popover and selection is mouse-only.
+//! Enter / Space on the focused trigger toggles the popover. Selection from
+//! the keyboard is then the popover's own: its rows are
+//! [`MenuItem`]s, which are tab stops, so Tab / ↓ steps into the list and
+//! Enter chooses — see that widget's docs. Escape hands focus back to the
+//! trigger. Type-ahead (jump to the option whose label starts with the typed
+//! letter) is not implemented.
 
 use std::cell::Cell;
 use std::rc::Rc;

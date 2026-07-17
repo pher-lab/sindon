@@ -4,12 +4,34 @@
 //! Theme-driven: hover highlight uses `theme.hover.bg`, label uses
 //! `theme.colors.on_surface`. Apps that need destructive styling (red
 //! "Delete" row etc.) can override via [`MenuItem::text_color`].
+//!
+//! # Keyboard
+//!
+//! A row is a tab stop, so a menu's rows *are* the tab order of the layer
+//! they live in: Tab / Shift+Tab and ↓ / ↑ walk the same ring (the arrows
+//! delegate to [`EventContext::advance_focus`]), and Enter / Space activate
+//! the focused row exactly as [`Button`](crate::Button) does.
+//!
+//! This is what makes an open menu reachable at all. Keyboard events are
+//! routed to the topmost interactive layer's subtree, so while a menu is up
+//! the trigger behind it cannot receive them — if no row could take focus,
+//! every keystroke would land nowhere and the menu would be mouse-only.
+//! Rows being focusable is also what arms the tree's return-focus-to-trigger
+//! path on dismiss (see [`WidgetTree::pop_layer`](crate::tree::WidgetTree)),
+//! which only fires when the layer is what held focus.
+//!
+//! Note this departs from the ARIA menu pattern, where rows carry
+//! `tabindex="-1"` and only the arrows move a roving focus. That pattern
+//! assumes Tab is *reserved* for closing the menu; here Tab is trapped inside
+//! the layer like a modal's, so the two keys agreeing is what a user gets by
+//! trying either.
 
-use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
+use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
+use crate::focus::FocusDirection;
 use crate::interaction::{InteractionState, Release};
 use crate::paint::PaintContext;
 use crate::widget::{MeasureContext, Widget};
-use shroud_core::{Color, Rect, Size};
+use shroud_core::{AccessAction, AccessNode, AccessRole, Color, Rect, Size};
 use shroud_layout::FlexStyle;
 use shroud_reactive::Reactive;
 
@@ -47,8 +69,7 @@ pub struct MenuItem {
     /// list is empty) with no event to flip it. Dims the label and swallows
     /// activation — the clearing discipline lives in [`InteractionState`].
     disabled: Reactive<bool>,
-    /// Hover / press flags — a menu row is not individually focusable, so the
-    /// `focused` flag of [`InteractionState`] goes unused here.
+    /// Hover / press / focus flags — see [`InteractionState`].
     state: InteractionState,
 }
 
@@ -85,9 +106,55 @@ impl MenuItem {
         self.disabled = v.into();
         self
     }
+
+    /// Whether the row currently has keyboard focus.
+    pub fn is_focused(&self) -> bool {
+        self.state.focused
+    }
+
+    /// Fire the click handler. The one activation path behind mouse-release,
+    /// Enter / Space, and a screen reader's press — each caller does its own
+    /// `disabled` gating first.
+    fn activate(&mut self, ctx: &mut EventContext) {
+        if let Some(handler) = &mut self.on_click {
+            handler(ctx);
+        }
+    }
 }
 
 impl Widget for MenuItem {
+    fn focusable(&self) -> bool {
+        // A disabled row is inert, so it drops out of the Tab order too —
+        // matching `Button`, and keeping ↓ from parking on a row that will
+        // not fire.
+        !self.disabled.get()
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        Some(
+            AccessNode::new(AccessRole::MenuItem)
+                .name(self.label.clone())
+                .disabled(self.disabled.get()),
+        )
+    }
+
+    fn accessibility_action(
+        &mut self,
+        action: AccessAction,
+        _option: Option<usize>,
+        _layout: Rect,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        // A screen reader's "press" is the third activation route, joining
+        // mouse-release and Enter/Space on the shared `activate` path — and it
+        // is inert while disabled, exactly like the other two.
+        if action != AccessAction::Click || self.disabled.get() {
+            return EventResult::Ignored;
+        }
+        self.activate(ctx);
+        EventResult::Consumed
+    }
+
     fn style(&self) -> FlexStyle {
         // Measured-leaf invariant (see `Button::style`): no style `min_size` on
         // a widget that also reports its size via `measure`, or Taffy
@@ -145,10 +212,21 @@ impl Widget for MenuItem {
             };
         }
 
-        // Suppress the hover fill while disabled — a row disabled while the
+        // The active row — the one Enter would fire, or a click would. A menu
+        // marks it by filling the row rather than ringing it: that is what every
+        // native menu does, and a ring inset into a 28px row reads as clutter.
+        // So keyboard focus reuses the hover fill instead of `paint_focus_ring`.
+        //
+        // Gated on `focus_visible` like any ring, which is also what keeps the
+        // fill from lying: pointer focus (a click that is about to fire the row
+        // anyway) leaves it alone, and a context menu popped up under the cursor
+        // still starts with nothing pre-highlighted — the same promise
+        // `WidgetTree::resync_hover` makes for hover.
+        let focus_active = self.state.focused && ctx.focus_visible();
+        // Suppress the fill while disabled — a row disabled while the
         // pointer sits on it keeps `hovered` (no event flips a reactive signal),
         // so gate on `disabled` too rather than relying on the flag alone.
-        let bg = if self.state.hovered && !disabled {
+        let bg = if (self.state.hovered || focus_active) && !disabled {
             hover_bg
         } else {
             Color::TRANSPARENT
@@ -190,14 +268,16 @@ impl Widget for MenuItem {
                 self.state.leave();
                 EventResult::Consumed
             }
+            WidgetEvent::FocusLost => {
+                self.state.focus_lost();
+                EventResult::Ignored
+            }
             WidgetEvent::MouseUp {
                 button: MouseButton::Left,
                 ..
             } => match self.state.release(disabled) {
                 Release::Fire => {
-                    if let Some(handler) = &mut self.on_click {
-                        handler(ctx);
-                    }
+                    self.activate(ctx);
                     EventResult::Consumed
                 }
                 Release::Cancelled => EventResult::Consumed,
@@ -207,6 +287,38 @@ impl Widget for MenuItem {
             _ if disabled => EventResult::Ignored,
             WidgetEvent::MouseEnter => {
                 self.state.enter(disabled);
+                EventResult::Consumed
+            }
+            WidgetEvent::FocusGained => {
+                self.state.focus_gained(disabled);
+                EventResult::Ignored
+            }
+            // Keyboard activation, matching `Button`: Enter arrives as a named
+            // key, Space through the character pipeline.
+            WidgetEvent::KeyDown {
+                key: Key::Named(NamedKey::Enter),
+            } if self.state.focused => {
+                self.activate(ctx);
+                EventResult::Consumed
+            }
+            WidgetEvent::CharInput { ch: ' ' } if self.state.focused => {
+                self.activate(ctx);
+                EventResult::Consumed
+            }
+            // ↓ / ↑ are a menu's native way between rows. They mean exactly what
+            // Tab / Shift+Tab mean here — a menu's rows are the tab order of its
+            // layer — so hand them to the tree rather than deriving a sibling
+            // index this row cannot see (see `EventContext::advance_focus`).
+            WidgetEvent::KeyDown {
+                key: Key::Named(NamedKey::ArrowDown),
+            } if self.state.focused => {
+                ctx.advance_focus(FocusDirection::Forward);
+                EventResult::Consumed
+            }
+            WidgetEvent::KeyDown {
+                key: Key::Named(NamedKey::ArrowUp),
+            } if self.state.focused => {
+                ctx.advance_focus(FocusDirection::Backward);
                 EventResult::Consumed
             }
             WidgetEvent::MouseDown {

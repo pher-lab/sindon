@@ -504,10 +504,11 @@ impl WidgetTree {
     ///
     /// `had_focus` is the focus from *before* the removal, so this only fires
     /// when this pop is what cleared it. That matters twice over: a layer whose
-    /// content never held focus (a menu — `MenuItem` is deliberately not a tab
-    /// stop) must leave focus wherever the user actually left it, and the ring
-    /// flag stashed by `remove` is only ours to claim when our own removal
-    /// stashed it.
+    /// content never held focus (a menu the user opened and dismissed without
+    /// ever stepping into — focus is still out on the trigger, or wherever a
+    /// right-click left it) must leave focus where the user actually left it,
+    /// and the ring flag stashed by `remove` is only ours to claim when our own
+    /// removal stashed it.
     ///
     /// Deferred through the same one-shot pending slot as
     /// [`Self::focus_initially`], because the pop entrypoints are public and
@@ -938,6 +939,9 @@ impl WidgetTree {
                 }
                 TreeCommand::PopTopLayer => {
                     self.pop_top_layer();
+                }
+                TreeCommand::AdvanceFocus { dir } => {
+                    self.advance_focus(dir, event_ctx);
                 }
             }
         }
@@ -1873,6 +1877,52 @@ impl WidgetTree {
             };
             self.advance_focus(dir, event_ctx);
             return EventResult::Consumed;
+        }
+
+        // ↓ / ↑ step *into* a layer that owns the keyboard but has nothing
+        // in it focused. That is the state every menu opens in: opening
+        // deliberately leaves focus out on the trigger (pre-focusing a row
+        // would highlight it, which native menus don't), and keys go to the
+        // layer's subtree — so the arrows reach no listener at all and the
+        // one thing they can sensibly mean here is what Tab means, enter the
+        // layer. `Backward` enters at the last stop, matching Shift+Tab and a
+        // native menu opened with ↑.
+        //
+        // Gated on focus being *outside* the layer, which is what keeps this
+        // from shadowing any widget that wants the arrows for itself: a
+        // focused `MenuItem` steps rows with them, an `Input` in a modal moves
+        // its caret, and both keep them, because the moment focus is inside
+        // the guard is false and the event routes normally.
+        //
+        // Only the arrows, deliberately — not Enter. Entering is navigation
+        // and shows the user where they landed; activating a row nobody has
+        // seen highlighted is a different thing entirely (see
+        // `menu_keyboard_tests::an_unfocused_menu_swallows_enter_...`).
+        if layer_active {
+            let dir = match event {
+                WidgetEvent::KeyDown {
+                    key: Key::Named(NamedKey::ArrowDown),
+                } => Some(FocusDirection::Forward),
+                WidgetEvent::KeyDown {
+                    key: Key::Named(NamedKey::ArrowUp),
+                } => Some(FocusDirection::Backward),
+                _ => None,
+            };
+            if let Some(dir) = dir {
+                let layer_root = self
+                    .topmost_interactive_layer()
+                    .expect("layer_active implies an interactive layer")
+                    .root;
+                let focus_inside = self
+                    .focus
+                    .focused()
+                    .map(|f| self.ancestors_inclusive(Some(f)).contains(&layer_root))
+                    .unwrap_or(false);
+                if !focus_inside {
+                    self.advance_focus(dir, event_ctx);
+                    return EventResult::Consumed;
+                }
+            }
         }
 
         // Pointer capture: a widget that began a drag (e.g. an `Input`
