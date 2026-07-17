@@ -104,6 +104,19 @@ pub struct WidgetTree {
     /// so an unconsumed stash can never be picked up by a later, unrelated
     /// rebuild.
     dropped_focus_visible: Option<bool>,
+    /// Widget that focus moved to for a reason that should bring it on screen
+    /// ([`FocusReason::scrolls_into_view`]), consumed by
+    /// [`Self::reveal_pending_focus`] at the end of the next layout pass.
+    ///
+    /// Deferred rather than done at the focus call because the reveal is pure
+    /// rect arithmetic and focus can be applied before the tree has ever been
+    /// laid out — `focus_initially` on a freshly built screen runs *before* the
+    /// first `compute_layout`, where every rect still reads zero.
+    ///
+    /// Assigned (not or-ed) on every focus change, so a later focus that must
+    /// not scroll — a click landing elsewhere — cancels an earlier request
+    /// instead of leaving it to fire against the wrong widget.
+    pending_reveal: Option<usize>,
     /// Active overlay layers (modals, dropdowns, context menus), painted
     /// in push order over the main root. Topmost layer (last push) gets
     /// event priority. While `layers` is non-empty, the main tree
@@ -279,6 +292,7 @@ impl WidgetTree {
             focus: FocusManager::new(),
             pending_initial_focus: None,
             dropped_focus_visible: None,
+            pending_reveal: None,
             layers: Vec::new(),
             root_replaced: false,
             viewport: (0.0, 0.0),
@@ -453,8 +467,10 @@ impl WidgetTree {
     pub fn pop_top_layer(&mut self) -> Option<usize> {
         let entry = self.layers.pop()?;
         let root = entry.root;
+        let had_focus = self.focus.focused();
         self.remove(root);
         self.hover_dirty = true;
+        self.return_focus_to_opener(&entry, had_focus);
         Some(root)
     }
 
@@ -469,10 +485,62 @@ impl WidgetTree {
         let Some(pos) = self.layers.iter().position(|l| l.root == root) else {
             return false;
         };
-        self.layers.remove(pos);
+        let entry = self.layers.remove(pos);
+        let had_focus = self.focus.focused();
         self.remove(root);
         self.hover_dirty = true;
+        self.return_focus_to_opener(&entry, had_focus);
         true
+    }
+
+    /// Hand focus back to the widget that opened a just-popped layer, when the
+    /// pop is what took focus away.
+    ///
+    /// A dialog's own fields go down with its subtree, and [`Self::remove`]
+    /// drops focus with them — leaving focus nowhere, so the next Tab restarts
+    /// at the top of the window and the user loses their place. The trigger is
+    /// where they logically are once the layer is gone, and the tree already
+    /// knows which widget that is: the layer stamped its opener at push.
+    ///
+    /// `had_focus` is the focus from *before* the removal, so this only fires
+    /// when this pop is what cleared it. That matters twice over: a layer whose
+    /// content never held focus (a menu — `MenuItem` is deliberately not a tab
+    /// stop) must leave focus wherever the user actually left it, and the ring
+    /// flag stashed by `remove` is only ours to claim when our own removal
+    /// stashed it.
+    ///
+    /// Deferred through the same one-shot pending slot as
+    /// [`Self::focus_initially`], because the pop entrypoints are public and
+    /// have no [`EventContext`] to dispatch `FocusGained` with.
+    fn return_focus_to_opener(&mut self, entry: &LayerEntry, had_focus: Option<usize>) {
+        // Focus survived the pop (it was outside the layer) — nothing to hand
+        // back, and stealing it to the trigger would be a bug of its own.
+        if had_focus.is_none() || self.focus.focused().is_some() {
+            return;
+        }
+        let Some(visible) = self.dropped_focus_visible.take() else {
+            return;
+        };
+        // No opener: pushed at boot or by a test, so there is nothing to
+        // return to. Focus stays cleared.
+        let Some(opener) = entry.opener else { return };
+        // The trigger may not have outlived its own layer — a row's menu whose
+        // action rebuilt that very row. Indices are never recycled (`remove`
+        // tombstones the slot for good), so a live index is always the same
+        // widget it was at push, never an unrelated one that took its place.
+        if !self.contains(opener) {
+            return;
+        }
+        // A pure-pointer trigger (`Container::on_press`, by design not a tab
+        // stop — see `Button::on_click_rect` for the a11y-complete counterpart)
+        // is not somewhere keyboard focus can live: it paints no ring and drops
+        // straight out of the tab order, so the next Tab would restart at the
+        // top of the window anyway. Leave focus cleared rather than park it
+        // somewhere that only looks restored.
+        if !self.widget(opener).focusable() {
+            return;
+        }
+        self.pending_initial_focus = Some((opener, FocusReason::Returned { visible }));
     }
 
     /// Number of currently active overlay layers.
@@ -958,6 +1026,7 @@ impl WidgetTree {
         }
 
         self.sync_scroll_view_content_heights();
+        self.reveal_pending_focus();
     }
 
     /// Returns whether the node at `idx` holds a `ScrollView` widget. Used
@@ -1138,6 +1207,7 @@ impl WidgetTree {
         }
 
         self.sync_scroll_view_content_heights();
+        self.reveal_pending_focus();
     }
 
     /// Walk every live widget; for each [`ReactiveChildren`], compare its
@@ -1275,6 +1345,48 @@ impl WidgetTree {
                 // a now-too-large offset back so the top isn't scrolled out of
                 // view. Growing content leaves the offset alone.
                 sv.clamp_scroll(viewport_h);
+            }
+        }
+    }
+
+    /// Scroll every `ScrollView` ancestor of the pending-reveal widget so that
+    /// widget sits inside their viewports — the "Tab followed the focus"
+    /// behavior. A no-op unless a focus change armed a request (see
+    /// [`Self::pending_reveal`]).
+    ///
+    /// Runs at the tail of the layout pass, after
+    /// [`Self::sync_scroll_view_content_heights`], because both of its inputs
+    /// are only valid there: the rects it measures come from the layout that
+    /// just ran, and the clamp it relies on needs the content extents that
+    /// pass publishes.
+    fn reveal_pending_focus(&mut self) {
+        let Some(idx) = self.pending_reveal.take() else {
+            return;
+        };
+        // The target may have been removed between the focus and this layout.
+        let Some(node) = self.node(idx) else { return };
+        let target = self.layout.absolute_rect(node.layout_node);
+        let mut parent = node.parent;
+        // Scroll settled by the scroll ancestors already revealed. An outer
+        // viewport sees the target displaced by every scroll between them, so
+        // each step folds in what the previous one landed on.
+        let mut inner_scroll = 0.0f32;
+
+        while let Some(a) = parent {
+            let Some(anode) = self.node(a) else { break };
+            parent = anode.parent;
+            if !Self::is_scroll_view_idx(&self.nodes, a) {
+                continue;
+            }
+            let view = self.layout.absolute_rect(anode.layout_node);
+            // Both rects come from the same un-scrolled layout frame, so their
+            // difference is where this viewport would show the target at scroll
+            // 0 — i.e. the target's position in the view's content space.
+            let top = target.origin.y - inner_scroll - view.origin.y;
+            let Some(anode) = self.node_mut(a) else { break };
+            let widget_any: &mut dyn std::any::Any = anode.widget.as_mut();
+            if let Some(sv) = widget_any.downcast_mut::<ScrollView>() {
+                inner_scroll += sv.reveal_span(top, target.size.height, view.size.height);
             }
         }
     }
@@ -1961,9 +2073,14 @@ impl WidgetTree {
                                     // dispatch, so no frame shows an empty gap —
                                     // the "flicker" a real down→up wait exposes.
                                     // The trailing real MouseUp arrives with the
-                                    // new menu already up, lands outside it (menus
-                                    // anchor below/around their trigger, not over
-                                    // it), and is harmlessly swallowed.
+                                    // new menu already up and fires nothing,
+                                    // wherever it lands: outside the menu it is
+                                    // swallowed, and inside it every activatable
+                                    // widget needs a press first — `release`
+                                    // without one is `Release::Idle` (see
+                                    // [`InteractionState`]). So this does not rely
+                                    // on where a menu anchors relative to its
+                                    // trigger.
                                     let release = WidgetEvent::MouseUp {
                                         position: point,
                                         button: MouseButton::Left,
@@ -2185,6 +2302,11 @@ impl WidgetTree {
         // click on an already-keyboard-focused widget drops its ring) —
         // this is before the no-op early return below.
         self.focus.set_visible(new.is_some() && reason.shows_ring());
+        // Arm the scroll-into-view for the same reason, and for the same
+        // "even if focus didn't move" logic: Tab with a single stop re-focuses
+        // the widget it is already on, and the user still expects to be shown
+        // where that is.
+        self.pending_reveal = new.filter(|_| reason.scrolls_into_view());
         if prev == new {
             return prev;
         }

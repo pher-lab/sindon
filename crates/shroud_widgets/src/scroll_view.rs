@@ -231,6 +231,48 @@ impl ScrollView {
         (self.effective_content_height() - viewport_height).max(0.0)
     }
 
+    /// Scroll the minimum distance that brings the vertical span
+    /// `[top, top + height]` inside the viewport, and return the resulting
+    /// scroll target.
+    ///
+    /// `top` is measured in *content* space — the frame the children's layout
+    /// rects live in, before [`Widget::scroll_offset`] shifts them — so a
+    /// caller converts a descendant's rect with `descendant.y - viewport.y`.
+    ///
+    /// A span that is already fully visible does not move: the current target
+    /// is only clamped into the range of offsets that satisfy both edges. When
+    /// the span is taller than the viewport that range inverts (every offset
+    /// between the bounds leaves it covering the viewport entirely), which the
+    /// same clamp handles once the bounds are ordered — a covering span stays
+    /// put, and one that is off-screen is pulled in by its nearest edge.
+    ///
+    /// Retargets the same glide wheel scrolling uses: this is a response to a
+    /// user gesture (Tab), so the content slides rather than teleports.
+    pub(crate) fn reveal_span(&mut self, top: f32, height: f32, viewport_height: f32) -> f32 {
+        let cur = self.scroll_y();
+        // A zero-height viewport means the tree has not laid this view out
+        // yet; every bound below would be nonsense, so keep the offset.
+        if viewport_height <= 0.0 {
+            return cur;
+        }
+        // The offsets that put the span's top edge at the viewport top, and
+        // its bottom edge at the viewport bottom, respectively.
+        let at_top = top;
+        let at_bottom = top + height - viewport_height;
+        let (lo, hi) = if at_bottom <= at_top {
+            (at_bottom, at_top)
+        } else {
+            (at_top, at_bottom)
+        };
+        let new = cur
+            .clamp(lo, hi)
+            .clamp(0.0, self.max_scroll_y(viewport_height));
+        if new != cur {
+            self.drive_scroll(new);
+        }
+        new
+    }
+
     /// Re-clamp the scroll offset to the current content/viewport. The tree
     /// calls this after each layout pass (see
     /// `WidgetTree::sync_scroll_view_content_heights`) so that when the content
@@ -367,5 +409,96 @@ impl Widget for ScrollView {
             return EventResult::Consumed;
         }
         EventResult::Ignored
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 1000px of content in a 200px viewport, so there is room to scroll in
+    /// both directions from any offset the tests park at.
+    fn view(scroll: f32) -> ScrollView {
+        let mut sv = ScrollView::new().content_height(1000.0);
+        sv.drive_scroll(scroll);
+        sv
+    }
+
+    #[test]
+    fn a_visible_span_is_left_alone() {
+        // Sitting at 300, the viewport shows content 300..500. A span inside
+        // that is already visible: revealing it must not move anything.
+        let mut sv = view(300.0);
+        assert_eq!(sv.reveal_span(350.0, 40.0, 200.0), 300.0);
+        assert_eq!(sv.scroll_y(), 300.0);
+    }
+
+    #[test]
+    fn a_span_below_the_viewport_scrolls_its_bottom_edge_into_view() {
+        // Span at 520..560 is past the bottom (viewport ends at 500). The
+        // minimum move puts its bottom edge on the viewport bottom, which
+        // leaves it *just* visible rather than jumping it to the top.
+        let mut sv = view(300.0);
+        assert_eq!(sv.reveal_span(520.0, 40.0, 200.0), 360.0);
+        assert_eq!(sv.scroll_y(), 360.0);
+    }
+
+    #[test]
+    fn a_span_above_the_viewport_scrolls_its_top_edge_into_view() {
+        let mut sv = view(300.0);
+        assert_eq!(sv.reveal_span(100.0, 40.0, 200.0), 100.0);
+        assert_eq!(sv.scroll_y(), 100.0);
+    }
+
+    #[test]
+    fn revealing_the_first_span_reaches_the_very_top() {
+        // The top edge of the content must be reachable — the case where Tab
+        // wraps back around to the first widget.
+        let mut sv = view(300.0);
+        assert_eq!(sv.reveal_span(0.0, 40.0, 200.0), 0.0);
+    }
+
+    #[test]
+    fn the_reveal_never_scrolls_past_the_content_bounds() {
+        // A span at the very end must not scroll past max (content - viewport
+        // = 800), and one that would demand a negative offset clamps at 0.
+        let mut sv = view(0.0);
+        assert_eq!(sv.reveal_span(960.0, 40.0, 200.0), 800.0);
+
+        let mut sv = view(500.0);
+        // A span taller than the whole content can't be satisfied at the
+        // bottom; the clamp keeps the offset legal.
+        assert_eq!(sv.reveal_span(0.0, 1000.0, 200.0), 500.0);
+    }
+
+    #[test]
+    fn a_span_taller_than_the_viewport_stays_put_while_it_covers() {
+        // 400px span at 200..600 with the viewport at 300..500: the span
+        // already fills the viewport, so there is no "more visible" to get to
+        // and the offset must not move.
+        let mut sv = view(300.0);
+        assert_eq!(sv.reveal_span(200.0, 400.0, 200.0), 300.0);
+    }
+
+    #[test]
+    fn a_span_taller_than_the_viewport_is_pulled_in_by_its_nearest_edge() {
+        // Same 400px span, but the viewport is above it (0..200). Aligning its
+        // top is the nearest way in.
+        let mut sv = view(0.0);
+        assert_eq!(sv.reveal_span(200.0, 400.0, 200.0), 200.0);
+
+        // ...and from below (viewport 700..900), its bottom.
+        let mut sv = view(700.0);
+        assert_eq!(sv.reveal_span(200.0, 400.0, 200.0), 400.0);
+    }
+
+    #[test]
+    fn an_unlaid_out_viewport_is_not_scrolled() {
+        // Focus can be applied before the first layout pass; a zero-height
+        // viewport must be treated as "no information", not as a reason to
+        // reset the offset.
+        let mut sv = view(300.0);
+        assert_eq!(sv.reveal_span(500.0, 40.0, 0.0), 300.0);
+        assert_eq!(sv.scroll_y(), 300.0);
     }
 }

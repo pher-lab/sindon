@@ -50,6 +50,20 @@ pub enum FocusReason {
         /// The `:focus-visible` flag in effect before the rebuild.
         visible: bool,
     },
+    /// Focus is being handed back to the widget that *opened* a layer, after
+    /// that layer was dismissed with focus still inside it — see
+    /// [`WidgetTree::pop_layer`](crate::tree::WidgetTree::pop_layer).
+    ///
+    /// Distinct from [`Restored`](Self::Restored): focus really is moving, to a
+    /// different widget than the one that had it. What carries over is not the
+    /// widget but the *mode* the user was in — the ring flag of the focus the
+    /// layer took away. Someone who tabbed through a dialog and pressed Escape
+    /// is still navigating by keyboard when they land back on the trigger, and
+    /// someone who clicked their way through it is still not.
+    Returned {
+        /// The `:focus-visible` flag of the focus the dismissed layer held.
+        visible: bool,
+    },
 }
 
 impl FocusReason {
@@ -58,7 +72,32 @@ impl FocusReason {
         match self {
             FocusReason::Pointer => false,
             FocusReason::Keyboard | FocusReason::Programmatic => true,
-            FocusReason::Restored { visible } => visible,
+            FocusReason::Restored { visible } | FocusReason::Returned { visible } => visible,
+        }
+    }
+
+    /// Whether focus acquired this way should scroll the widget into view —
+    /// see [`WidgetTree::reveal_pending_focus`](crate::tree::WidgetTree).
+    ///
+    /// A near-twin of [`shows_ring`](Self::shows_ring), but a different
+    /// question, so the two are kept apart: a ring says "focus is here", a
+    /// reveal says "focus went somewhere you can't see". `Restored` is where
+    /// they part company.
+    pub fn scrolls_into_view(self) -> bool {
+        match self {
+            // The user pointed at the widget, so it is on screen already.
+            FocusReason::Pointer => false,
+            // These can land anywhere in the tree, including well outside a
+            // scrolled viewport — the reason the reveal exists at all.
+            FocusReason::Keyboard | FocusReason::Programmatic => true,
+            // Focus did not really move: the widget is where the user left it.
+            // Scrolling would turn an invisible rebuild into a visible jump.
+            FocusReason::Restored { .. } => false,
+            // Focus does move here, to a trigger that is usually still on
+            // screen — but "usually" is not a guarantee (a layer can be opened
+            // by a shortcut, from anywhere), and landing focus somewhere unseen
+            // is the very thing the reveal exists to prevent.
+            FocusReason::Returned { .. } => true,
         }
     }
 }
@@ -139,6 +178,23 @@ mod tests {
         assert!(!FocusReason::Pointer.shows_ring());
         assert!(FocusReason::Keyboard.shows_ring());
         assert!(FocusReason::Programmatic.shows_ring());
+    }
+
+    #[test]
+    fn restored_focus_shows_its_old_ring_but_never_scrolls() {
+        // The one reason where "paint a ring" and "scroll into view" disagree:
+        // a rebuild that restores a keyboard focus keeps the ring, yet must not
+        // move the viewport under the user.
+        assert!(FocusReason::Restored { visible: true }.shows_ring());
+        assert!(!FocusReason::Restored { visible: true }.scrolls_into_view());
+        assert!(!FocusReason::Restored { visible: false }.scrolls_into_view());
+    }
+
+    #[test]
+    fn only_pointer_focus_skips_the_reveal() {
+        assert!(!FocusReason::Pointer.scrolls_into_view());
+        assert!(FocusReason::Keyboard.scrolls_into_view());
+        assert!(FocusReason::Programmatic.scrolls_into_view());
     }
 
     #[test]
