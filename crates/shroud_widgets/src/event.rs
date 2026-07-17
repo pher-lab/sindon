@@ -1,5 +1,6 @@
 //! Event types and dispatch context.
 
+use crate::focus::FocusDirection;
 use crate::layer::{LayerAnchor, LayerOptions};
 use crate::tree::WidgetTree;
 use crate::widget::Widget;
@@ -194,6 +195,12 @@ pub(crate) enum TreeCommand {
     /// Pop whichever layer is currently on top. No-op when no layer is
     /// active.
     PopTopLayer,
+    /// Step focus to the next / previous widget in tab order, exactly as
+    /// Tab / Shift+Tab would. Lets a widget delegate a navigation key it
+    /// received to the tree, which is the only thing that knows the order.
+    AdvanceFocus {
+        dir: FocusDirection,
+    },
 }
 
 /// Keyboard modifier state at the time of an event.
@@ -434,6 +441,23 @@ impl EventContext {
     /// `FocusLost`; no widget gains focus afterwards.
     pub fn blur(&mut self) {
         self.commands.push(TreeCommand::Focus { target: None });
+    }
+
+    /// Queue a focus *step* — the same move Tab (`Forward`) and Shift+Tab
+    /// (`Backward`) make, including the wrap at either end.
+    ///
+    /// For widgets that own a navigation key the tree does not intercept, and
+    /// want it to mean "go to the next stop". A [`MenuItem`](crate::MenuItem)
+    /// maps the arrow keys onto this: a menu's rows are its tab order, so
+    /// ↑/↓ and Shift+Tab/Tab should walk the same ring, and the tree is the
+    /// only thing that knows what that ring contains.
+    ///
+    /// Prefer this over computing a sibling index and calling
+    /// [`Self::focus`]: the order is a whole-subtree fact (visibility
+    /// cascades, layer traps, nested containers), so a widget that derives
+    /// its own neighbour will disagree with Tab sooner or later.
+    pub fn advance_focus(&mut self, dir: FocusDirection) {
+        self.commands.push(TreeCommand::AdvanceFocus { dir });
     }
 
     /// Open a new overlay layer. `root_widget` provides the layer's root

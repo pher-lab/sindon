@@ -504,10 +504,11 @@ impl WidgetTree {
     ///
     /// `had_focus` is the focus from *before* the removal, so this only fires
     /// when this pop is what cleared it. That matters twice over: a layer whose
-    /// content never held focus (a menu — `MenuItem` is deliberately not a tab
-    /// stop) must leave focus wherever the user actually left it, and the ring
-    /// flag stashed by `remove` is only ours to claim when our own removal
-    /// stashed it.
+    /// content never held focus (a menu the user opened and dismissed without
+    /// ever stepping into — focus is still out on the trigger, or wherever a
+    /// right-click left it) must leave focus where the user actually left it,
+    /// and the ring flag stashed by `remove` is only ours to claim when our own
+    /// removal stashed it.
     ///
     /// Deferred through the same one-shot pending slot as
     /// [`Self::focus_initially`], because the pop entrypoints are public and
@@ -938,6 +939,9 @@ impl WidgetTree {
                 }
                 TreeCommand::PopTopLayer => {
                     self.pop_top_layer();
+                }
+                TreeCommand::AdvanceFocus { dir } => {
+                    self.advance_focus(dir, event_ctx);
                 }
             }
         }

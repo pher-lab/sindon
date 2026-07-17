@@ -50,6 +50,7 @@ fn to_role(role: AccessRole) -> Role {
         AccessRole::Slider => Role::Slider,
         AccessRole::TabList => Role::TabList,
         AccessRole::Tab => Role::Tab,
+        AccessRole::MenuItem => Role::MenuItem,
         AccessRole::TextInput => Role::TextInput,
         AccessRole::PasswordInput => Role::PasswordInput,
         AccessRole::ScrollView => Role::ScrollView,

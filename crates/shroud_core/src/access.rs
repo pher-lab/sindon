@@ -56,6 +56,8 @@ pub enum AccessRole {
     TabList,
     /// One option within a [`TabList`](AccessRole::TabList).
     Tab,
+    /// One row of a menu — a dropdown's option list, a context menu.
+    MenuItem,
     /// An editable single- or multi-line text field.
     TextInput,
     /// A masked secret entry field. Its characters are never exposed; a
@@ -84,6 +86,7 @@ impl AccessRole {
                 | AccessRole::RadioButton
                 | AccessRole::Switch
                 | AccessRole::Tab
+                | AccessRole::MenuItem
         )
     }
 }
