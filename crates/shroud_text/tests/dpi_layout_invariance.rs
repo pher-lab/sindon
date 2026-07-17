@@ -122,3 +122,65 @@ fn scale_selects_a_different_rasterization() {
          stretched 100% bitmap"
     );
 }
+
+/// The four invariants above are pinned at an *integer* scale (2.0), where "one
+/// physical pixel expressed logically" is a tidy ½. But the common laptop case
+/// is 125% / 150%, and a non-integer scale snaps placement onto a grid whose
+/// logical pitch isn't a round fraction — so it exercises the rounding the
+/// integer case hides. The same three promises must hold: identical shaping,
+/// logical placement, and a distinct rasterization.
+///
+/// The load-bearing subtlety is the tolerance, and getting it wrong the first
+/// time is instructive. The 100% reference is itself snapped — to the integer
+/// (logical) grid — and the scaled run is snapped to a `1/scale` grid, so the
+/// two can legitimately straddle the same true position by up to *half of each
+/// grid's pitch*: `0.5 + 0.5/scale` logical pixels. At 1.25 that's 0.9; a value
+/// snapping 68.0 → 67.2 (a full physical pixel apart) is that quantization, not
+/// drift. Tighten this to `1.0/scale` and it flakes on the fractional monitors
+/// this whole file exists to protect; the systematic origin-slide bug the y-test
+/// guards would still be caught, because that moves text by many pixels, not a
+/// fraction of one.
+#[test]
+fn fractional_scales_keep_layout_logical() {
+    for scale in [1.25_f32, 1.5] {
+        let mut engine = TextEngine::new();
+        let at_100 = engine.shape_text(TEXT, 16.0, 20.0, Some(400.0));
+        let logical: Vec<(f32, f32)> = at_100.glyphs.iter().map(|g| (g.x, g.y)).collect();
+        let key_at_100 = at_100.glyphs[0].cache_key;
+
+        engine.set_scale(scale);
+        let scaled = engine.shape_text(TEXT, 16.0, 20.0, Some(400.0));
+
+        // Shaping is logical, so the returned extent is byte-identical to 100%;
+        // only the rasterization downstream changes.
+        assert_eq!(
+            scaled.width, at_100.width,
+            "shaping must not depend on a {scale}x display scale"
+        );
+        assert_eq!(scaled.height, at_100.height, "line count moved at {scale}x");
+        assert_eq!(
+            scaled.glyphs.len(),
+            at_100.glyphs.len(),
+            "the same text must produce the same glyphs at {scale}x"
+        );
+
+        let tol = 0.5 + 0.5 / scale;
+        for (glyph, (lx, ly)) in scaled.glyphs.iter().zip(&logical) {
+            assert!(
+                (glyph.x - lx).abs() <= tol,
+                "glyph x drifted from {lx} to {} at {scale}x (tol {tol})",
+                glyph.x
+            );
+            assert!(
+                (glyph.y - ly).abs() <= tol,
+                "glyph y drifted from {ly} to {} at {scale}x (tol {tol})",
+                glyph.y
+            );
+        }
+
+        assert_ne!(
+            scaled.glyphs[0].cache_key, key_at_100,
+            "a {scale}x glyph must rasterize to its own bitmap, not a stretched 100%"
+        );
+    }
+}
