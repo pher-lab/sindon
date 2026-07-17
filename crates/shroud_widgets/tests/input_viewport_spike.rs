@@ -147,7 +147,11 @@ fn mouse_wheel_scrolls_the_viewport() {
     // First paint: reveal scrolls to the caret (bottom), so the top lines sit
     // above the viewport (very negative y once the offset is applied).
     let before = paint(&tree);
-    let min_y_before = before.glyphs.iter().map(|g| g.y).min().unwrap();
+    let min_y_before = before
+        .glyphs
+        .iter()
+        .map(|g| g.y)
+        .fold(f32::INFINITY, f32::min);
 
     // Scroll up hard; the wheel does not set the reveal flag, so it sticks.
     let mut ev = EventContext::new();
@@ -161,7 +165,11 @@ fn mouse_wheel_scrolls_the_viewport() {
     );
 
     let after = paint(&tree);
-    let min_y_after = after.glyphs.iter().map(|g| g.y).min().unwrap();
+    let min_y_after = after
+        .glyphs
+        .iter()
+        .map(|g| g.y)
+        .fold(f32::INFINITY, f32::min);
     assert!(
         min_y_after > min_y_before,
         "scrolling up must move content down (min glyph y rises): \
@@ -179,7 +187,11 @@ fn mouse_wheel_glides_with_a_transition() {
 
     // First paint snaps the caret-reveal to the bottom (reveal always snaps).
     let before = paint(&tree);
-    let min_y_before = before.glyphs.iter().map(|g| g.y).min().unwrap();
+    let min_y_before = before
+        .glyphs
+        .iter()
+        .map(|g| g.y)
+        .fold(f32::INFINITY, f32::min);
 
     let mut ev = EventContext::new();
     tree.dispatch_event(
@@ -192,12 +204,16 @@ fn mouse_wheel_glides_with_a_transition() {
     );
 
     let after = paint(&tree);
-    let min_y_after = after.glyphs.iter().map(|g| g.y).min().unwrap();
+    let min_y_after = after
+        .glyphs
+        .iter()
+        .map(|g| g.y)
+        .fold(f32::INFINITY, f32::min);
     // Scrolling up moves content down, so min glyph y rises — but over a 10s
     // glide the first frame advances only a few px, nowhere near the ~full
     // viewport jump an instant scroll to the top would produce.
     assert!(
-        min_y_after >= min_y_before && min_y_after < min_y_before + 100,
+        min_y_after >= min_y_before && min_y_after < min_y_before + 100.0,
         "a 10s-transition wheel scroll should barely move the content on the \
          next frame (eased, not instant): before={min_y_before} after={min_y_after}"
     );
@@ -418,7 +434,7 @@ fn text_clears_the_scrollbar_lane() {
 
     let track_x = rect.right() - 1.0 - SCROLLBAR_WIDTH - SCROLLBAR_INSET;
     for g in &ctx.glyphs {
-        let right = g.x as f32 + g.image.width as f32;
+        let right = g.x + g.image.width as f32;
         assert!(
             right <= track_x,
             "no glyph may enter the scrollbar lane: right={right} track_x={track_x}"

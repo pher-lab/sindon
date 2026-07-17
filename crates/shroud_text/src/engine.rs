@@ -13,10 +13,17 @@ use std::hash::{Hash, Hasher};
 pub struct ShapedGlyph {
     /// Cache key for rasterization lookup.
     pub cache_key: cosmic_text::CacheKey,
-    /// Pixel X position (integer, after subpixel binning).
-    pub x: i32,
-    /// Pixel Y position (integer, after subpixel binning).
-    pub y: i32,
+    /// Logical-pixel X position, relative to the shaped run's origin.
+    ///
+    /// Fractional by construction on a HiDPI display: placement is computed on
+    /// the *physical* pixel grid (that snapping is what keeps glyphs crisp) and
+    /// then divided back into logical space, so a glyph can legitimately land on
+    /// a half-pixel. Callers add their logical origin and the renderer
+    /// multiplies the scale back in, which returns the glyph to the exact device
+    /// pixel it was rasterized for.
+    pub x: f32,
+    /// Logical-pixel Y position (the baseline). See [`x`](Self::x).
+    pub y: f32,
     /// Per-glyph color override. `Some` only when the glyph came from a
     /// `TextSpan` with a color set in [`TextEngine::shape_rich`]; the
     /// single-attrs `shape_text` / `shape_text_attrs` paths always emit `None`
@@ -292,9 +299,21 @@ fn hash_attrs(attrs: &TextAttrs, h: &mut DefaultHasher) {
     style_tag.hash(h);
 }
 
-fn hash_metrics(font_size: f32, line_height: f32, max_width: Option<f32>, h: &mut DefaultHasher) {
+fn hash_metrics(
+    font_size: f32,
+    line_height: f32,
+    max_width: Option<f32>,
+    scale: f32,
+    h: &mut DefaultHasher,
+) {
     font_size.to_bits().hash(h);
     line_height.to_bits().hash(h);
+    // The shaped output carries glyph cache keys stamped with `font_size *
+    // scale`, so an entry shaped for one display is the wrong bitmap on
+    // another. Layout would be identical — only the rasterization differs —
+    // which is exactly the kind of miss that survives a review: the text is in
+    // the right place, just soft.
+    scale.to_bits().hash(h);
     match max_width {
         Some(w) => {
             1u8.hash(h);
@@ -312,12 +331,13 @@ fn shape_key_plain(
     line_height: f32,
     max_width: Option<f32>,
     attrs: &TextAttrs,
+    scale: f32,
 ) -> u64 {
     let mut h = DefaultHasher::new();
     0u8.hash(&mut h);
     text.hash(&mut h);
     hash_attrs(attrs, &mut h);
-    hash_metrics(font_size, line_height, max_width, &mut h);
+    hash_metrics(font_size, line_height, max_width, scale, &mut h);
     h.finish()
 }
 
@@ -329,6 +349,7 @@ fn shape_key_rich(
     font_size: f32,
     line_height: f32,
     max_width: Option<f32>,
+    scale: f32,
 ) -> u64 {
     let mut h = DefaultHasher::new();
     1u8.hash(&mut h);
@@ -349,7 +370,7 @@ fn shape_key_rich(
         s.decoration.underline.hash(&mut h);
         s.decoration.strikethrough.hash(&mut h);
     }
-    hash_metrics(font_size, line_height, max_width, &mut h);
+    hash_metrics(font_size, line_height, max_width, scale, &mut h);
     h.finish()
 }
 
@@ -361,6 +382,16 @@ pub struct TextEngine {
     font_system: FontSystem,
     swash_cache: SwashCache,
     shape_cache: ShapeCache,
+    /// Physical pixels per logical pixel, pushed by the app each frame.
+    ///
+    /// Shaping itself stays in logical units — metrics, wrap width, caret
+    /// geometry and the reported width/height are all scale-free, so a DPI
+    /// change cannot move a caret or re-wrap a paragraph. The factor is used
+    /// only when placing glyphs: `LayoutGlyph::physical` snaps each one to the
+    /// physical pixel grid and stamps the scaled size into its cache key, so
+    /// the rasterizer produces a bitmap at device resolution instead of a
+    /// logical-size one stretched to fit.
+    scale: f32,
     /// Full buffer shapes performed since the last
     /// [`take_shape_stats`](Self::take_shape_stats) drain, and the time spent
     /// in them. Always-on (two counter bumps per shape); read per frame by the
@@ -382,8 +413,26 @@ impl TextEngine {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
             shape_cache: ShapeCache::new(),
+            scale: 1.0,
             shape_count: 0,
             shape_ns: 0,
+        }
+    }
+
+    /// Physical pixels per logical pixel.
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// Set the scale glyphs rasterize at. The app pushes the window's current
+    /// value each frame.
+    ///
+    /// Shaped output is cached under this factor (glyph cache keys carry the
+    /// scaled size), so changing it selects fresh entries rather than reusing
+    /// bitmaps rasterized for the old display.
+    pub fn set_scale(&mut self, scale: f32) {
+        if scale > 0.0 {
+            self.scale = scale;
         }
     }
 
@@ -528,7 +577,7 @@ impl TextEngine {
         max_width: Option<f32>,
         attrs: &TextAttrs,
     ) -> ShapedText {
-        let key = shape_key_plain(text, font_size, line_height, max_width, attrs);
+        let key = shape_key_plain(text, font_size, line_height, max_width, attrs, self.scale);
         if let Some(hit) = self.shape_cache.get(key) {
             return hit;
         }
@@ -599,7 +648,7 @@ impl TextEngine {
         attrs: &TextAttrs,
     ) -> ShapedText {
         let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
-        extract_shaped_plain(&buffer, font_size)
+        extract_shaped_plain(&buffer, font_size, self.scale)
     }
 
     /// Shape an inline rich-text run made of `spans`.
@@ -624,7 +673,7 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> ShapedText {
-        let key = shape_key_rich(spans, font_size, line_height, max_width);
+        let key = shape_key_rich(spans, font_size, line_height, max_width, self.scale);
         if let Some(hit) = self.shape_cache.get(key) {
             return hit;
         }
@@ -686,7 +735,7 @@ impl TextEngine {
         max_width: Option<f32>,
     ) -> ShapedText {
         let buffer = self.build_rich_buffer(spans, font_size, line_height, max_width);
-        extract_shaped_rich(&buffer, spans, font_size)
+        extract_shaped_rich(&buffer, spans, font_size, self.scale)
     }
 
     /// Compute the visual position of the cursor sitting at the *end* of
@@ -1128,7 +1177,7 @@ impl TextEngine {
         underline_range: (usize, usize),
     ) -> ComposedBlock {
         let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
-        let shaped = extract_shaped_plain(&buffer, font_size);
+        let shaped = extract_shaped_plain(&buffer, font_size, self.scale);
 
         // Preedit underline (the non-trailing selection body) and caret —
         // both off the same buffer.
@@ -1165,7 +1214,7 @@ impl TextEngine {
         attrs: &TextAttrs,
     ) -> EditBuffer {
         let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
-        let shaped = extract_shaped_plain(&buffer, font_size);
+        let shaped = extract_shaped_plain(&buffer, font_size, self.scale);
         EditBuffer { buffer, shaped }
     }
 
@@ -1182,7 +1231,7 @@ impl TextEngine {
         max_width: Option<f32>,
     ) -> EditBuffer {
         let buffer = self.build_rich_buffer(spans, font_size, line_height, max_width);
-        let shaped = extract_shaped_rich(&buffer, spans, font_size);
+        let shaped = extract_shaped_rich(&buffer, spans, font_size, self.scale);
         EditBuffer { buffer, shaped }
     }
 
@@ -1405,7 +1454,7 @@ fn stable_baseline(line_top: f32, line_height: f32, font_size: f32) -> f32 {
 /// `shape_text_attrs_uncached` and the single-shape editing paths
 /// ([`ComposedBlock`], [`EditBuffer`]) so their glyphs match the standalone
 /// shape bit-for-bit.
-fn extract_shaped_plain(buffer: &Buffer, font_size: f32) -> ShapedText {
+fn extract_shaped_plain(buffer: &Buffer, font_size: f32, scale: f32) -> ShapedText {
     let mut glyphs = Vec::new();
     let mut total_width: f32 = 0.0;
     let mut total_height: f32 = 0.0;
@@ -1424,11 +1473,26 @@ fn extract_shaped_plain(buffer: &Buffer, font_size: f32) -> ShapedText {
         // `image.top` from `glyph.y`, so this is still a baseline Y.
         let baseline = stable_baseline(run.line_top, run.line_height, font_size);
         for glyph in run.glyphs.iter() {
-            let physical = glyph.physical((0.0, baseline), 1.0);
+            // `scale` makes text crisp above 100%: it snaps the glyph to the
+            // physical pixel grid and stamps `font_size * scale` into the cache
+            // key, so the rasterizer renders the outline at device resolution.
+            // Shaping stays logical, so nothing here moves a line break or a
+            // caret — only how finely the same glyph is drawn.
+            //
+            // The offset must be *pre-scaled*: `physical()` multiplies the
+            // glyph's own position by `scale` but adds the offset as-is (it
+            // expects a physical pen origin), so a logical baseline here would
+            // survive the later divide-by-scale at half value and drag every
+            // glyph upward. `x` is 0, which is why only the baseline shows it.
+            let physical = glyph.physical((0.0, baseline * scale), scale);
             glyphs.push(ShapedGlyph {
                 cache_key: physical.cache_key,
-                x: physical.x,
-                y: physical.y,
+                // Back into logical space. The scale survives in `cache_key`,
+                // which is what the rasterizer reads, so the bitmap is still cut
+                // at device resolution — only the *coordinate* is logical, which
+                // it must be: callers add a logical origin to it.
+                x: physical.x as f32 / scale,
+                y: physical.y as f32 / scale,
                 color: None,
             });
         }
@@ -1446,7 +1510,12 @@ fn extract_shaped_plain(buffer: &Buffer, font_size: f32) -> ShapedText {
 /// Rich twin of [`extract_shaped_plain`]: glyphs carry per-span colors, and
 /// per-span / per-line boxes plus decoration lines are grouped back together
 /// via the glyph `metadata` (= span index) planted at buffer build time.
-fn extract_shaped_rich(buffer: &Buffer, spans: &[TextSpan], font_size: f32) -> ShapedText {
+fn extract_shaped_rich(
+    buffer: &Buffer,
+    spans: &[TextSpan],
+    font_size: f32,
+    scale: f32,
+) -> ShapedText {
     let mut glyphs = Vec::new();
     let mut span_boxes: Vec<SpanBox> = Vec::new();
     let mut decoration_lines: Vec<DecorationLine> = Vec::new();
@@ -1468,11 +1537,26 @@ fn extract_shaped_rich(buffer: &Buffer, spans: &[TextSpan], font_size: f32) -> S
         let mut group: Option<(usize, f32, f32)> = None; // (span, min_x, max_x)
         for glyph in run.glyphs.iter() {
             let color = glyph.color_opt.map(cosmic_to_shroud);
-            let physical = glyph.physical((0.0, baseline), 1.0);
+            // `scale` makes text crisp above 100%: it snaps the glyph to the
+            // physical pixel grid and stamps `font_size * scale` into the cache
+            // key, so the rasterizer renders the outline at device resolution.
+            // Shaping stays logical, so nothing here moves a line break or a
+            // caret — only how finely the same glyph is drawn.
+            //
+            // The offset must be *pre-scaled*: `physical()` multiplies the
+            // glyph's own position by `scale` but adds the offset as-is (it
+            // expects a physical pen origin), so a logical baseline here would
+            // survive the later divide-by-scale at half value and drag every
+            // glyph upward. `x` is 0, which is why only the baseline shows it.
+            let physical = glyph.physical((0.0, baseline * scale), scale);
             glyphs.push(ShapedGlyph {
                 cache_key: physical.cache_key,
-                x: physical.x,
-                y: physical.y,
+                // Back into logical space. The scale survives in `cache_key`,
+                // which is what the rasterizer reads, so the bitmap is still cut
+                // at device resolution — only the *coordinate* is logical, which
+                // it must be: callers add a logical origin to it.
+                x: physical.x as f32 / scale,
+                y: physical.y as f32 / scale,
                 color,
             });
 

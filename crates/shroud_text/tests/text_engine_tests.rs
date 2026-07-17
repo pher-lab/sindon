@@ -46,7 +46,7 @@ fn shape_text_glyph_y_includes_baseline() {
     // be at least 10 px below the block top; near-zero means the offset is lost.
     let baseline = result.glyphs[0].y;
     assert!(
-        baseline > 10,
+        baseline > 10.0,
         "glyph.y ({}) looks like we forgot to add line_y — should be the baseline Y",
         baseline
     );
@@ -770,7 +770,7 @@ fn shape_rich_underline_sits_below_the_baseline() {
         "one underline on one line, got {:?}",
         shaped.decoration_lines
     );
-    let baseline = shaped.glyphs[0].y as f32;
+    let baseline = shaped.glyphs[0].y;
     let line = shaped.decoration_lines[0];
     assert!(
         line.rect.origin.y > baseline,
@@ -796,7 +796,7 @@ fn shape_rich_strikethrough_crosses_above_the_baseline() {
     let mut engine = TextEngine::new();
     let shaped = engine.shape_rich(&[TextSpan::new("Hello").strikethrough()], 32.0, 40.0, None);
     assert_eq!(shaped.decoration_lines.len(), 1);
-    let baseline = shaped.glyphs[0].y as f32;
+    let baseline = shaped.glyphs[0].y;
     let line = shaped.decoration_lines[0];
     assert!(
         line.rect.origin.y < baseline,

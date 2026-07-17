@@ -351,8 +351,8 @@ impl Widget for Switch {
                 for glyph in &shaped.glyphs {
                     if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                         ctx.draw_glyph(
-                            label_x as i32 + glyph.x,
-                            label_y as i32 + glyph.y,
+                            label_x + glyph.x,
+                            label_y + glyph.y,
                             image,
                             label_col,
                             glyph.cache_key,

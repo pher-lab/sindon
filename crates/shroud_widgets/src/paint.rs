@@ -286,16 +286,16 @@ impl PaintContext {
     /// Draw a pre-rasterized glyph at the given position (standard atlas).
     pub fn draw_glyph(
         &mut self,
-        x: i32,
-        y: i32,
+        x: f32,
+        y: f32,
         image: GlyphImage,
         color: Color,
         cache_key: shroud_text::CacheKey,
     ) {
         let (ox, oy) = self.current_offset();
         self.glyphs.push(DrawGlyph {
-            x: x + ox as i32,
-            y: y + oy as i32,
+            x: x + ox,
+            y: y + oy,
             image,
             color,
             cache_key,
@@ -325,16 +325,16 @@ impl PaintContext {
     /// Use this for glyphs from `SecureText` / `SecureInput` widgets.
     pub fn draw_secure_glyph(
         &mut self,
-        x: i32,
-        y: i32,
+        x: f32,
+        y: f32,
         image: GlyphImage,
         color: Color,
         cache_key: shroud_text::CacheKey,
     ) {
         let (ox, oy) = self.current_offset();
         self.secure_glyphs.push(DrawGlyph {
-            x: x + ox as i32,
-            y: y + oy as i32,
+            x: x + ox,
+            y: y + oy,
             image,
             color,
             cache_key,

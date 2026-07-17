@@ -141,10 +141,10 @@ pub struct GlyphRotation {
 
 /// A positioned glyph to draw. Produced by the text engine, consumed by the renderer.
 pub struct DrawGlyph {
-    /// Screen X position (pixels, top-left origin).
-    pub x: i32,
-    /// Screen Y position (pixels, top-left origin).
-    pub y: i32,
+    /// Screen X position (logical pixels, top-left origin).
+    pub x: f32,
+    /// Screen Y position (logical pixels, top-left origin).
+    pub y: f32,
     /// Rasterized glyph image.
     pub image: GlyphImage,
     /// Text color.
@@ -1223,11 +1223,18 @@ impl Renderer {
             let base = vertices.len() as u16;
             let index_start = indices.len() as u32;
 
-            // Screen-space position incorporating bearing offsets
-            let px = (glyph.x + glyph.image.left) as f32;
-            let py = (glyph.y - glyph.image.top) as f32;
-            let pw = glyph.image.width as f32;
-            let ph = glyph.image.height as f32;
+            // The position is logical like everything else here; the bitmap's
+            // bearings and extent are the lone exception, measured in the
+            // physical pixels it was rasterized at. Divide only those — the NDC
+            // map below multiplies the scale back in, landing the bitmap on
+            // exactly the device pixels it was cut for (1:1 texels, which is
+            // what "crisp" means). Mixing the two spaces is what collapses text
+            // toward the origin.
+            let inv_scale = 1.0 / self.scale_factor;
+            let px = glyph.x + glyph.image.left as f32 * inv_scale;
+            let py = glyph.y - glyph.image.top as f32 * inv_scale;
+            let pw = glyph.image.width as f32 * inv_scale;
+            let ph = glyph.image.height as f32 * inv_scale;
 
             // Four corners in screen pixels (TL, TR, BR, BL), optionally
             // rotated rigidly about the glyph's pivot. Rotation happens in

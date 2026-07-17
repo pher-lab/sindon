@@ -1216,7 +1216,7 @@ fn input_padding_x_insets_the_text() {
     let padded_x = paint_input(Input::new().with_value("X").padding_x(24.0)).glyphs[0].x;
     assert_eq!(
         padded_x - def_x,
-        16,
+        16.0,
         "padding_x(24) insets the text 16px past the default 8 (def={def_x}, padded={padded_x})"
     );
 }
@@ -7081,7 +7081,8 @@ fn text_wrap_kicks_in_when_narrower_than_natural() {
     let mut ctx = PaintContext::new(theme);
     tree.paint(&mut ctx);
 
-    let unique_ys: std::collections::BTreeSet<i32> = ctx.glyphs.iter().map(|g| g.y).collect();
+    let unique_ys: std::collections::BTreeSet<i32> =
+        ctx.glyphs.iter().map(|g| g.y.round() as i32).collect();
     assert!(
         unique_ys.len() >= 2,
         "wrapped text should produce glyphs on at least two baselines; \
@@ -7215,7 +7216,7 @@ fn truncate_true_long_text_does_not_overflow_layout_width() {
     let max_right = ctx
         .glyphs
         .iter()
-        .map(|g| g.x as f32 + g.image.width as f32 + g.image.left as f32)
+        .map(|g| g.x + g.image.width as f32 + g.image.left as f32)
         .fold(0.0_f32, f32::max);
     assert!(
         max_right <= right_edge,

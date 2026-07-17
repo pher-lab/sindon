@@ -227,7 +227,7 @@ fn menu_item_label_is_inset_by_horizontal_padding() {
     let mut ctx = shroud_widgets::paint::PaintContext::default();
     tree.paint(&mut ctx);
     assert!(!ctx.glyphs.is_empty(), "label should paint glyphs");
-    let min_x = ctx.glyphs.iter().map(|g| g.x).min().unwrap() as f32;
+    let min_x = ctx.glyphs.iter().map(|g| g.x).fold(f32::INFINITY, f32::min);
     let inset = min_x - r.origin.x;
     assert!(
         inset >= 9.0,

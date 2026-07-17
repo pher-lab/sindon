@@ -706,8 +706,8 @@ impl Widget for Button {
             for glyph in &shaped.glyphs {
                 if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                     ctx.draw_glyph(
-                        text_x as i32 + glyph.x,
-                        text_y as i32 + glyph.y,
+                        text_x + glyph.x,
+                        text_y + glyph.y,
                         image,
                         text_color,
                         glyph.cache_key,

@@ -1610,16 +1610,23 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 // scaling work: winit re-reports the value and the next frame
                 // lays out against the new logical size, with no other
                 // plumbing involved.
-                if let (Some(window), Some(renderer)) =
-                    (self.window.as_ref(), self.renderer.as_mut())
-                {
-                    renderer.set_scale_factor(window.scale_factor());
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor())
+                    .unwrap_or(1.0);
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_scale_factor(scale);
                 }
                 // Layout runs in logical pixels; only the surface itself is
                 // physical.
                 let size = self.renderer.as_ref().unwrap().logical_surface_size();
                 let tree = self.tree.as_mut().unwrap();
                 let paint_ctx = self.paint_ctx.as_mut().unwrap();
+                // Before layout, which shapes text through `measure`: the text
+                // engine rasterizes glyphs at this scale and caches the shaped
+                // output under it.
+                paint_ctx.text_engine.set_scale(scale);
 
                 // Reset the shape tally so the perf log's `shapes=` column
                 // counts this frame only. Cheap; runs even with logging off.
