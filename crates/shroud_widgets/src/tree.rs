@@ -534,10 +534,12 @@ impl WidgetTree {
         // A pure-pointer trigger (`Container::on_press`, by design not a tab
         // stop — see `Button::on_click_rect` for the a11y-complete counterpart)
         // is not somewhere keyboard focus can live: it paints no ring and drops
-        // straight out of the tab order, so the next Tab would restart at the
-        // top of the window anyway. Leave focus cleared rather than park it
-        // somewhere that only looks restored.
+        // straight out of the tab order, so parking focus there would only look
+        // restored. The *place* still is somewhere the user is, though: anchor
+        // sequential navigation to it, exactly as a click on the trigger would
+        // have, so the next Tab resumes beside it instead of at the top.
         if !self.widget(opener).focusable() {
+            self.focus.set_nav_start(Some(opener));
             return;
         }
         self.pending_initial_focus = Some((opener, FocusReason::Returned { visible }));

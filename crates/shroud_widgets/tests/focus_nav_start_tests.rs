@@ -29,6 +29,22 @@ fn layout(tree: &mut WidgetTree) {
     tree.compute_layout_with_measure(400.0, 600.0, &mut engine, &theme);
 }
 
+/// The event loop applies a queued focus at the top of each redraw; nothing in
+/// a dispatch does it, so tests have to turn the frame over too.
+fn frame(tree: &mut WidgetTree, ctx: &mut EventContext) {
+    tree.flush_pending_focus(ctx);
+    layout(tree);
+}
+
+fn escape(tree: &mut WidgetTree, ctx: &mut EventContext) {
+    tree.dispatch_event(
+        &WidgetEvent::KeyDown {
+            key: Key::Named(NamedKey::Escape),
+        },
+        ctx,
+    );
+}
+
 fn tab(tree: &mut WidgetTree, ctx: &mut EventContext) {
     tree.dispatch_event(
         &WidgetEvent::KeyDown {
@@ -272,6 +288,66 @@ fn removing_the_clicked_widget_falls_back_to_the_top() {
         app.tree.focused(),
         Some(app.header),
         "an anchor that no longer exists must degrade to the old behavior"
+    );
+}
+
+#[test]
+fn a_pointer_only_trigger_anchors_tab_when_its_layer_closes() {
+    // Where this meets the layer-dismiss return: focus cannot go back to a
+    // `Container::on_press` trigger, because by design it is not a tab stop.
+    // The place still can, and it is the same place a click on the trigger
+    // would have anchored — so the pop leaves an anchor rather than nothing.
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(600.0));
+    let _header = tree.add_child(root, Button::new("header"));
+    let trigger = tree.add_child(
+        root,
+        Container::column()
+            .width(400.0)
+            .height(40.0)
+            .on_press(|_, ctx| {
+                ctx.push_layer(
+                    LayerOptions::modal(),
+                    Container::column().width(200.0).height(100.0),
+                    |tree, layer| {
+                        tree.add_child(layer, Button::new("field"));
+                    },
+                );
+            }),
+    );
+    let footer = tree.add_child(root, Button::new("footer"));
+    layout(&mut tree);
+
+    let mut ctx = EventContext::new();
+    let r = tree.layout_rect(trigger);
+    click_at(
+        &mut tree,
+        &mut ctx,
+        Point::new(r.origin.x + 2.0, r.origin.y + 2.0),
+    );
+    frame(&mut tree, &mut ctx);
+    assert_eq!(tree.layer_count(), 1, "sanity: the press opened the layer");
+
+    // Tab into the layer first: the field taking focus retires the anchor the
+    // click on the trigger left, so only the pop can put one back — otherwise
+    // this would pass on the click alone.
+    tab(&mut tree, &mut ctx);
+    assert!(tree.focused().is_some(), "sanity: Tab entered the layer");
+    escape(&mut tree, &mut ctx);
+    frame(&mut tree, &mut ctx);
+
+    assert_eq!(tree.layer_count(), 0, "sanity: Escape dismissed the layer");
+    assert_eq!(
+        tree.focused(),
+        None,
+        "a pointer-only trigger is not somewhere focus can live"
+    );
+
+    tab(&mut tree, &mut ctx);
+    assert_eq!(
+        tree.focused(),
+        Some(footer),
+        "Tab should resume past the trigger, not restart at the header"
     );
 }
 
