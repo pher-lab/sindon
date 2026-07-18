@@ -319,15 +319,43 @@ impl PaintContext {
         cache_key: shroud_text::CacheKey,
     ) {
         let (ox, oy) = self.current_offset();
+        let rotation = self.current_rotation();
+        let (x, y) = self.snap_glyph_origin(x + ox, y + oy, rotation.is_some());
         self.glyphs.push(DrawGlyph {
-            x: x + ox,
-            y: y + oy,
+            x,
+            y,
             image,
             color,
             cache_key,
             clip_rect: self.current_clip(),
-            rotation: self.current_rotation(),
+            rotation,
         });
+    }
+
+    /// Snap a glyph's *composited* origin to the device-pixel grid, unless the
+    /// glyph is being rotated.
+    ///
+    /// The text engine rasterizes glyphs at device resolution and quantizes
+    /// each glyph's run-relative position to a whole device pixel, baking the
+    /// sub-pixel remainder into the bitmap (the subpixel bin — see
+    /// `shroud_text`). That keeps a run crisp *only while its origin also sits
+    /// on the grid*. But a widget's run origin is a raw logical layout
+    /// coordinate, and flex centering, `grow`, and gaps routinely land a
+    /// `Text` / `Button` label on a fractional pixel — even at 100% DPI — which
+    /// smears the crisp bitmap across two pixels (uniformly soft labels, while
+    /// `Input`, which already snapped its own origin, stayed sharp). Snapping
+    /// the composited origin shifts the whole run by one sub-pixel amount, so
+    /// every glyph lands on the grid; because the run-relative advances are
+    /// already whole device pixels, inter-glyph spacing is preserved exactly.
+    /// Rotated glyphs (icon chevrons) are placed by rotation math about a
+    /// pivot, so leave them untouched. View-only: hit-testing and selection
+    /// read the unsnapped shaped geometry, matching the caret's rule.
+    fn snap_glyph_origin(&self, x: f32, y: f32, rotated: bool) -> (f32, f32) {
+        if rotated {
+            (x, y)
+        } else {
+            (self.snap_device_px(x), self.snap_device_px(y))
+        }
     }
 
     /// Record a draw call for `image` at the given rect, tinted by
@@ -358,14 +386,16 @@ impl PaintContext {
         cache_key: shroud_text::CacheKey,
     ) {
         let (ox, oy) = self.current_offset();
+        let rotation = self.current_rotation();
+        let (x, y) = self.snap_glyph_origin(x + ox, y + oy, rotation.is_some());
         self.secure_glyphs.push(DrawGlyph {
-            x: x + ox,
-            y: y + oy,
+            x,
+            y,
             image,
             color,
             cache_key,
             clip_rect: self.current_clip(),
-            rotation: self.current_rotation(),
+            rotation,
         });
     }
 
@@ -755,5 +785,40 @@ mod tests {
         ctx.text_engine.set_scale(1.0);
         assert_eq!(ctx.snap_device_px(10.3), 10.0);
         assert_eq!(ctx.snap_device_px(10.7), 11.0);
+    }
+
+    #[test]
+    fn glyph_origin_snaps_to_the_device_grid_when_upright() {
+        // A `Text`/`Button` label whose flex-centered layout origin lands on a
+        // fractional pixel (common even at 100% DPI) must have its crisp,
+        // device-resolution bitmap placed on a whole device pixel, or it smears
+        // uniformly — the "everything but Input is soft" report. The advances
+        // are already whole device pixels, so snapping the origin is all it
+        // takes.
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let mut ctx = PaintContext::default();
+            ctx.text_engine.set_scale(scale);
+            for raw in [(12.4_f32, 7.6_f32), (100.37, 42.5), (0.49, 255.9)] {
+                let (sx, sy) = ctx.snap_glyph_origin(raw.0, raw.1, false);
+                for (label, v) in [("x", sx), ("y", sy)] {
+                    let phys = v * scale;
+                    assert!(
+                        (phys - phys.round()).abs() < 1e-3,
+                        "scale {scale}: snapped {label} {v} = {phys} phys px, off the grid",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_glyph_origin_is_left_unsnapped() {
+        // Icon chevrons are positioned by rotation math about a pivot; snapping
+        // their origin would fight that geometry, so a rotated glyph keeps its
+        // exact composited position.
+        let mut ctx = PaintContext::default();
+        ctx.text_engine.set_scale(1.25);
+        let (x, y) = ctx.snap_glyph_origin(12.4, 7.6, true);
+        assert_eq!((x, y), (12.4, 7.6));
     }
 }
