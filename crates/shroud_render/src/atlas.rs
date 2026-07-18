@@ -7,8 +7,14 @@
 use shroud_text::CacheKey;
 use std::collections::HashMap;
 
-/// Default atlas dimensions (1024x1024 R8Unorm).
-pub const DEFAULT_ATLAS_SIZE: u32 = 1024;
+/// Default atlas dimensions (2048x2048 R8Unorm).
+///
+/// Sized generously so a large working set (a document with many distinct
+/// CJK glyphs, multiplied by subpixel bins, rasterized at HiDPI device
+/// resolution) fits without churn. If it ever does fill, the renderer evicts
+/// and re-uploads (see the upload path in `renderer.rs`) rather than blanking
+/// new glyphs — the size just makes that self-heal rare.
+pub const DEFAULT_ATLAS_SIZE: u32 = 2048;
 
 /// Padding between glyphs to prevent bleeding.
 const GLYPH_PADDING: u32 = 1;

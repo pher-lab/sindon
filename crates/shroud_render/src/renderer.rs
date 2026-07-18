@@ -800,19 +800,60 @@ impl Renderer {
         // to the R8 atlas, color emoji to the RGBA color atlas. The two never
         // collide because each glyph routes to exactly one atlas, so the
         // geometry builders can read membership back to split the draw.
+        //
+        // Self-heal on a full atlas: `upload` returns `None` when the atlas
+        // can't fit a (non-empty) glyph. The atlas is cumulative and never
+        // evicts, so a long-lived session eventually fills it and every *new*
+        // glyph would silently blank forever. If that happens, evict the whole
+        // atlas and re-upload this frame's glyphs into the fresh space. Done at
+        // most once per atlas per frame — with per-viewport culling a frame's
+        // working set fits comfortably, so one pass heals it; a set that still
+        // overflows an empty atlas keeps the few overflow glyphs blank rather
+        // than looping forever. (`None` also means a zero-size glyph — a space —
+        // so gate the "full" signal on a non-empty bitmap.)
+        let mut mask_full = false;
+        let mut color_full = false;
         for glyph in glyphs {
-            let atlas = if glyph.image.is_color {
-                &mut self.color_atlas
+            let non_empty = glyph.image.width > 0 && glyph.image.height > 0;
+            let (atlas, full) = if glyph.image.is_color {
+                (&mut self.color_atlas, &mut color_full)
             } else {
-                &mut self.atlas
+                (&mut self.atlas, &mut mask_full)
             };
-            atlas.upload(
+            let region = atlas.upload(
                 &self.queue,
                 glyph.cache_key,
                 &glyph.image.data,
                 glyph.image.width,
                 glyph.image.height,
             );
+            if region.is_none() && non_empty {
+                *full = true;
+            }
+        }
+        if mask_full {
+            self.atlas.clear(&self.queue);
+            for glyph in glyphs.iter().filter(|g| !g.image.is_color) {
+                self.atlas.upload(
+                    &self.queue,
+                    glyph.cache_key,
+                    &glyph.image.data,
+                    glyph.image.width,
+                    glyph.image.height,
+                );
+            }
+        }
+        if color_full {
+            self.color_atlas.clear(&self.queue);
+            for glyph in glyphs.iter().filter(|g| g.image.is_color) {
+                self.color_atlas.upload(
+                    &self.queue,
+                    glyph.cache_key,
+                    &glyph.image.data,
+                    glyph.image.width,
+                    glyph.image.height,
+                );
+            }
         }
 
         // Upload secure glyphs to the secure atlas (cleared every frame)

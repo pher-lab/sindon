@@ -263,6 +263,40 @@ fn scrolled_glyphs_land_on_the_device_pixel_grid() {
 }
 
 #[test]
+fn offscreen_glyphs_are_culled_from_the_draw_list() {
+    // The editor emits glyphs for the *whole* document (off-screen rows are
+    // only scissor-clipped), which piled a long note's entire glyph set into
+    // the shared atlas and bloated the text geometry. Multi-line paint now
+    // culls to the visible band, so the draw list holds a viewport-worth
+    // regardless of document length. A 200-line note contains ~1000+ glyphs;
+    // only the handful of visible rows should be drawn.
+    use shroud_reactive::Signal;
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(W).height(H));
+    let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    tree.add_child(
+        root,
+        Input::new()
+            .multiline()
+            .height_full()
+            .value(Signal::new(body)),
+    );
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    tree.compute_layout_with_measure(W, H, &mut engine, &theme);
+
+    let ctx = paint(&tree);
+    assert!(!ctx.glyphs.is_empty(), "visible lines must still draw");
+    assert!(
+        ctx.glyphs.len() < 200,
+        "off-screen glyphs must be culled, but {} were drawn for a 200-line note",
+        ctx.glyphs.len()
+    );
+}
+
+#[test]
 fn external_caret_jump_scrolls_into_view() {
     // A *programmatic* caret move — the find-replace bar jumping to a match by
     // setting the bound cursor / selection signals — must scroll the match into

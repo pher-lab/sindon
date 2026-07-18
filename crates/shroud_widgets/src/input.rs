@@ -2291,6 +2291,24 @@ impl Widget for Input {
                 };
 
                 for glyph in &shaped.glyphs {
+                    // Viewport culling (multi-line only): a glyph outside the
+                    // visible band is scissor-clipped away anyway, so emitting
+                    // it only bloats the text geometry and — on a long note —
+                    // piles the whole document's unique glyphs into the shared
+                    // glyph atlas (the atlas has no per-frame bound, so that is
+                    // what eventually exhausts it and blanks new glyphs). Bound
+                    // the working set to a viewport-worth. `glyph.y` is the
+                    // buffer-relative baseline and `displayed` the scroll
+                    // offset; keep one line of margin each side for partially
+                    // visible rows and the glyph's own ascent/descent. Single-
+                    // line fields draw their one row unconditionally (their
+                    // horizontal overflow is intentional — see `max_width`).
+                    if self.multiline
+                        && (glyph.y < displayed - line_height
+                            || glyph.y > displayed + viewport_h + line_height)
+                    {
+                        continue;
+                    }
                     if let Some(image) = ctx.text_engine.rasterize(glyph.cache_key) {
                         ctx.draw_glyph(
                             text_x + glyph.x,
