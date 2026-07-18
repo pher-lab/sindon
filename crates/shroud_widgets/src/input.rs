@@ -2172,7 +2172,20 @@ impl Widget for Input {
                 layout.size.width,
                 viewport_h,
             ));
-            ctx.push_offset(0.0, -displayed);
+            // Snap the *visual* scroll translation to the device-pixel grid.
+            // Each line's glyphs are shape-snapped to the grid relative to the
+            // buffer top, so the column stays crisp only if the origin they are
+            // translated to also lands on a whole physical pixel. `displayed`
+            // is a fractional logical offset (an eased scroll position); pushed
+            // raw it shifted the whole block off-grid and smeared every line —
+            // and worse the further you scrolled, since a settled non-integer
+            // offset never realigns. Snap the *composite* origin `text_y -
+            // displayed` (not `displayed` alone) so a fractional `text_y` from
+            // Taffy layout is absorbed too. Hit-testing keeps the unsnapped
+            // `displayed` — snapping a coordinate a selection derives from would
+            // drift click-to-caret off the glyphs (see `snap_device_px`).
+            let draw_dy = ctx.snap_device_px(text_y - displayed) - text_y;
+            ctx.push_offset(0.0, draw_dy);
         }
 
         // Selection highlight, painted behind the glyphs so the (opaque) text

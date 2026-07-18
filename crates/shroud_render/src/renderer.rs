@@ -971,7 +971,7 @@ impl Renderer {
                 if !batch.rect_batches.is_empty() {
                     pass.set_pipeline(&self.rect_pipeline);
                     pass.set_vertex_buffer(0, batch.rect_vb.slice(..));
-                    pass.set_index_buffer(batch.rect_ib.slice(..), wgpu::IndexFormat::Uint16);
+                    pass.set_index_buffer(batch.rect_ib.slice(..), wgpu::IndexFormat::Uint32);
                     for b in &batch.rect_batches {
                         apply_scissor(&mut pass, b.clip_rect, scale, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
@@ -982,7 +982,7 @@ impl Renderer {
                 if !batch.image_batches.is_empty() {
                     pass.set_pipeline(&self.image_pipeline);
                     pass.set_vertex_buffer(0, batch.image_vb.slice(..));
-                    pass.set_index_buffer(batch.image_ib.slice(..), wgpu::IndexFormat::Uint16);
+                    pass.set_index_buffer(batch.image_ib.slice(..), wgpu::IndexFormat::Uint32);
                     for b in &batch.image_batches {
                         // `ensure_image_uploaded` ran above for every
                         // DrawImage; the cache lookup is therefore total.
@@ -1001,7 +1001,7 @@ impl Renderer {
                     pass.set_pipeline(&self.text_pipeline);
                     pass.set_bind_group(0, &self.text_bind_group, &[]);
                     pass.set_vertex_buffer(0, batch.text_vb.slice(..));
-                    pass.set_index_buffer(batch.text_ib.slice(..), wgpu::IndexFormat::Uint16);
+                    pass.set_index_buffer(batch.text_ib.slice(..), wgpu::IndexFormat::Uint32);
                     for b in &batch.text_batches {
                         apply_scissor(&mut pass, b.clip_rect, scale, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
@@ -1016,7 +1016,7 @@ impl Renderer {
                     pass.set_pipeline(&self.image_pipeline);
                     pass.set_bind_group(0, &self.color_text_bind_group, &[]);
                     pass.set_vertex_buffer(0, batch.color_vb.slice(..));
-                    pass.set_index_buffer(batch.color_ib.slice(..), wgpu::IndexFormat::Uint16);
+                    pass.set_index_buffer(batch.color_ib.slice(..), wgpu::IndexFormat::Uint32);
                     for b in &batch.color_batches {
                         apply_scissor(&mut pass, b.clip_rect, scale, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
@@ -1028,7 +1028,7 @@ impl Renderer {
                     pass.set_pipeline(&self.text_pipeline);
                     pass.set_bind_group(0, &self.secure_text_bind_group, &[]);
                     pass.set_vertex_buffer(0, batch.sec_vb.slice(..));
-                    pass.set_index_buffer(batch.sec_ib.slice(..), wgpu::IndexFormat::Uint16);
+                    pass.set_index_buffer(batch.sec_ib.slice(..), wgpu::IndexFormat::Uint32);
                     for b in &batch.sec_batches {
                         apply_scissor(&mut pass, b.clip_rect, scale, surface_w, surface_h);
                         let end = b.index_start + b.index_count;
@@ -1107,7 +1107,7 @@ impl Renderer {
         }
     }
 
-    fn build_rect_geometry(&self, rects: &[DrawRect]) -> (Vec<Vertex>, Vec<u16>, Vec<DrawBatch>) {
+    fn build_rect_geometry(&self, rects: &[DrawRect]) -> (Vec<Vertex>, Vec<u32>, Vec<DrawBatch>) {
         let (w, h) = self.logical_surface_size();
 
         let mut vertices = Vec::with_capacity(rects.len() * 4);
@@ -1115,7 +1115,7 @@ impl Renderer {
         let mut batches: Vec<DrawBatch> = Vec::new();
 
         for rect in rects {
-            let base = vertices.len() as u16;
+            let base = vertices.len() as u32;
             let index_start = indices.len() as u32;
 
             let c = rect.color.to_array();
@@ -1205,7 +1205,7 @@ impl Renderer {
         &self,
         glyphs: &[DrawGlyph],
         atlas: &TextureAtlas,
-    ) -> (Vec<TextVertex>, Vec<u16>, Vec<DrawBatch>) {
+    ) -> (Vec<TextVertex>, Vec<u32>, Vec<DrawBatch>) {
         let (sw, sh) = self.logical_surface_size();
         let aw = atlas.width();
         let ah = atlas.height();
@@ -1220,7 +1220,15 @@ impl Renderer {
                 None => continue,
             };
 
-            let base = vertices.len() as u16;
+            // 32-bit indices are mandatory here, not a nicety: this builder
+            // emits the *whole* document's glyphs (the Input paints every
+            // glyph and lets the GPU scissor cull off-screen ones — it does
+            // not pre-cull to the viewport). A `u16` base wraps at 65536
+            // vertices = 16384 glyphs, and every glyph past that pointed its
+            // quad at the wrong vertices and vanished — a long paste rendered
+            // blank from ~16k chars on while the buffer stayed intact. Keep
+            // this `u32` and `IndexFormat::Uint32` in lockstep at the draw.
+            let base = vertices.len() as u32;
             let index_start = indices.len() as u32;
 
             // The position is logical like everything else here; the bitmap's
@@ -1329,7 +1337,7 @@ impl Renderer {
     fn build_image_geometry(
         &self,
         images: &[DrawImage],
-    ) -> (Vec<TextVertex>, Vec<u16>, Vec<ImageBatch>) {
+    ) -> (Vec<TextVertex>, Vec<u32>, Vec<ImageBatch>) {
         let (sw, sh) = self.logical_surface_size();
 
         let mut vertices = Vec::with_capacity(images.len() * 4);
@@ -1337,7 +1345,7 @@ impl Renderer {
         let mut batches: Vec<ImageBatch> = Vec::new();
 
         for img in images {
-            let base = vertices.len() as u16;
+            let base = vertices.len() as u32;
             let index_start = indices.len() as u32;
 
             let x0 = (img.x / sw) * 2.0 - 1.0;
