@@ -342,7 +342,18 @@ impl Widget for ScrollView {
 
     fn paint_pre_children(&self, layout: Rect, ctx: &mut PaintContext) {
         ctx.push_clip(layout);
-        ctx.push_offset(0.0, -self.displayed_scroll());
+        // Snap the *composited* scroll offset to the device grid before pushing
+        // it. Glyphs re-snap their own origin (`snap_glyph_origin`), but the row
+        // backgrounds and divider rects that ride this offset do not — so during
+        // a smooth-scroll glide an un-snapped fractional offset lands their edges
+        // between physical columns and they shimmer. Fold in any active layer
+        // offset, snap the composite (so we sit on the same grid the renderer
+        // rasterizes against), then push the delta. Hit-testing keeps the raw
+        // fractional offset (see `scroll_offset`) — the same paint-snaps /
+        // hit-test-doesn't contract as the caret and the editor's inner scroll.
+        let (_, oy) = ctx.current_offset();
+        let snapped = ctx.snap_device_px(oy - self.displayed_scroll()) - oy;
+        ctx.push_offset(0.0, snapped);
     }
 
     fn paint_post_children(&self, layout: Rect, ctx: &mut PaintContext) {
@@ -500,5 +511,55 @@ mod tests {
         let mut sv = view(300.0);
         assert_eq!(sv.reveal_span(500.0, 40.0, 0.0), 300.0);
         assert_eq!(sv.scroll_y(), 300.0);
+    }
+
+    /// Park the eased offset at an exact fractional value, timing-independently:
+    /// a zero-duration `Animated` rests settled at its initial, so `get()`
+    /// (hence `displayed_scroll`) returns it verbatim.
+    fn view_displayed_at(offset: f32) -> ScrollView {
+        let mut sv = ScrollView::new().content_height(1000.0);
+        sv.scroll_anim = Some(Animated::new(offset, Duration::ZERO, Easing::EaseOut));
+        sv
+    }
+
+    #[test]
+    fn paint_snaps_the_scroll_offset_to_the_device_grid() {
+        // The eased offset the content is translated by must land on the
+        // physical grid, or the row backgrounds / dividers that ride it (unlike
+        // glyphs, which re-snap their own origin) shimmer mid-glide. The proof:
+        // the composited offset `paint_pre_children` pushes, scaled to physical
+        // pixels, is a whole pixel — at 125% / 150% just as at integer scales.
+        let disp = 30.37_f32;
+        let layout = Rect::new(0.0, 0.0, 100.0, 200.0);
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let sv = view_displayed_at(disp);
+            let mut ctx = PaintContext::default();
+            ctx.text_engine.set_scale(scale);
+            sv.paint_pre_children(layout, &mut ctx);
+
+            let (_, oy) = ctx.current_offset();
+            let phys = oy * scale;
+            assert!(
+                (phys - phys.round()).abs() < 1e-3,
+                "scale {scale}: pushed offset {oy} = {phys} phys px, off the device grid"
+            );
+            // A snap, not a jump: never off the true offset by a whole logical
+            // pixel, or the content would slide visibly out from under the user.
+            assert!(
+                (oy - (-disp)).abs() < 1.0,
+                "scale {scale}: pushed offset {oy} moved more than a pixel from {}",
+                -disp
+            );
+        }
+    }
+
+    #[test]
+    fn hit_test_offset_keeps_the_raw_fractional_value() {
+        // Paint snaps; hit-testing must not — a click mid-glide has to land on
+        // the row the user sees under the cursor, so `scroll_offset` reports the
+        // exact eased value with no device-grid rounding.
+        let disp = 30.37_f32;
+        let sv = view_displayed_at(disp);
+        assert_eq!(sv.scroll_offset(), (0.0, disp));
     }
 }
