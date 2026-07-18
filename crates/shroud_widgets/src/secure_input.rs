@@ -26,13 +26,16 @@
 //! observes the version counter on its next paint/event and clears.
 
 use std::cell::{Cell, RefCell};
+use std::time::Instant;
 
+use crate::caret::{self, CaretBlink};
 use crate::clear_trigger::ClearTrigger;
 use crate::event::{EventContext, EventResult, Key, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
 use shroud_core::{AccessNode, AccessRole, Color, FocusIndicator, Point, Rect, SecurityLevel};
 use shroud_layout::FlexStyle;
+use shroud_reactive::animation;
 use shroud_security::SecureString;
 
 /// Default maximum length (in bytes) of a `SecureInput` buffer.
@@ -152,6 +155,14 @@ pub struct SecureInput {
     /// it from the font size. Mirrors [`Input::min_height`].
     min_height_override: Option<f32>,
     focus_ring_color: Option<Color>,
+    /// When the caret's current solid blink phase began; reset on caret
+    /// activity so the caret holds solid while you type. Mirrors `Input`; see
+    /// [`caret::blink_phase`](crate::caret::blink_phase).
+    blink_ref: Cell<Option<Instant>>,
+    /// Caret state at the last focused paint — `(cursor, char count)`. A change
+    /// means the user moved the caret or edited, which resets the blink phase.
+    /// Cleared on focus loss so the next focus starts solid.
+    blink_sig: Cell<Option<(usize, usize)>>,
 }
 
 impl SecureInput {
@@ -189,6 +200,8 @@ impl SecureInput {
             pad_y: 8.0,
             min_height_override: None,
             focus_ring_color: None,
+            blink_ref: Cell::new(None),
+            blink_sig: Cell::new(None),
         }
     }
 
@@ -775,6 +788,26 @@ impl Widget for SecureInput {
         // caret is the affordance that survives ring suppression (mirrors
         // `Input`, which carets at the line start when empty).
         if self.focused {
+            // Blink phase — same model as `Input`, minus IME composition (a
+            // focused SecureInput suppresses the IME). The phase resets on any
+            // caret activity so the caret holds solid while you type, then we
+            // read on/off and vote the next toggle as a timed wake.
+            let caret_visible = match caret::caret_blink() {
+                CaretBlink::Off => true,
+                CaretBlink::Interval(interval) => {
+                    let now = animation::now();
+                    let sig = (self.cursor.get(), self.value.borrow().char_count());
+                    if self.blink_sig.get() != Some(sig) {
+                        self.blink_ref.set(Some(now));
+                        self.blink_sig.set(Some(sig));
+                    }
+                    let reference = self.blink_ref.get().unwrap_or(now);
+                    let (visible, next) = caret::blink_phase(reference, now, interval);
+                    animation::request_frame_at(next);
+                    visible
+                }
+            };
+
             // Centre the caret on the insertion point, then snap both edges to
             // the device-pixel grid — same fix as `Input`: straddling the
             // boundary keeps the caret from painting over the leading pixel of
@@ -787,7 +820,9 @@ impl Widget for SecureInput {
             let center_left = (caret_x - caret_w / 2.0).max(text_x);
             let snapped_x = ctx.snap_device_px(center_left + ox) - ox;
             let caret = Rect::new(snapped_x, text_y, caret_w, font_size);
-            ctx.fill_rect(caret, text_color);
+            if caret_visible {
+                ctx.fill_rect(caret, text_color);
+            }
         }
 
         if self.focused {
@@ -848,6 +883,8 @@ impl Widget for SecureInput {
                 self.focused = false;
                 // Never leave a secret revealed once focus leaves the field.
                 self.revealed.set(false);
+                // Reset the blink phase so the next focus starts solid.
+                self.blink_sig.set(None);
                 EventResult::Ignored
             }
 

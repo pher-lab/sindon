@@ -5,6 +5,7 @@
 
 pub mod accessibility;
 mod button;
+pub mod caret;
 mod checkbox;
 mod clear_trigger;
 mod container;
@@ -35,6 +36,7 @@ pub use accessibility::{
     access_child_id, access_target,
 };
 pub use button::Button;
+pub use caret::{CaretBlink, caret_blink, set_caret_blink};
 pub use checkbox::Checkbox;
 pub use clear_trigger::ClearTrigger;
 pub use container::Container;

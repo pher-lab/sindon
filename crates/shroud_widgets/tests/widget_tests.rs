@@ -1483,6 +1483,122 @@ fn focused_caret_both_edges_snap_to_the_physical_grid() {
 }
 
 #[test]
+fn focused_caret_blinks_on_a_timed_cycle_and_resets_on_typing() {
+    // The caret should be solid the instant the user acts, hidden for the
+    // second half of each blink interval, and snap back to solid on any
+    // keystroke even mid-blink. A frozen clock lets us step the phase exactly
+    // rather than racing a real 500ms timer.
+    use shroud_reactive::animation::test_clock;
+    use shroud_widgets::caret::{CaretBlink, set_caret_blink};
+    use std::time::Duration;
+
+    let clock = test_clock::freeze();
+    let ivl = Duration::from_millis(500);
+    set_caret_blink(CaretBlink::Interval(ivl));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let input_idx = tree.add_child(root, Input::new());
+    tree.compute_layout(400.0, 100.0);
+
+    let input_rect = tree.layout_rect(input_idx);
+    let mut event_ctx = EventContext::new();
+    // Focus the field, then type one character so the caret sits at a stable,
+    // non-empty position for the rest of the test.
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(input_rect.origin.x + 5.0, input_rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'x' }, &mut event_ctx);
+
+    // The caret is the only narrow, zero-border fill (the field background is
+    // ~400px wide; the border is a 1px stroke).
+    let has_caret = |tree: &mut WidgetTree| {
+        let mut ctx = PaintContext::default();
+        tree.paint(&mut ctx);
+        ctx.rects
+            .iter()
+            .any(|r| r.border_width == 0.0 && r.width > 0.0 && r.width < 8.0)
+    };
+
+    assert!(has_caret(&mut tree), "solid the moment the caret is placed");
+
+    clock.advance(Duration::from_millis(250));
+    assert!(
+        has_caret(&mut tree),
+        "still solid halfway through the interval"
+    );
+
+    clock.advance(Duration::from_millis(250));
+    assert!(
+        !has_caret(&mut tree),
+        "hidden once a full interval has elapsed"
+    );
+
+    clock.advance(ivl);
+    assert!(
+        has_caret(&mut tree),
+        "visible again after the off half-cycle"
+    );
+
+    clock.advance(ivl);
+    assert!(
+        !has_caret(&mut tree),
+        "hidden again in the next off half-cycle"
+    );
+    // Typing mid-blink must reset the phase to solid immediately.
+    tree.dispatch_event(&WidgetEvent::CharInput { ch: 'y' }, &mut event_ctx);
+    assert!(
+        has_caret(&mut tree),
+        "a keystroke snaps the caret back to solid mid-blink"
+    );
+}
+
+#[test]
+fn caret_blink_off_keeps_the_caret_solid_indefinitely() {
+    // A user who disabled caret blinking (CaretBlink::Off, from the OS setting)
+    // must always see a solid caret, no matter how much time passes.
+    use shroud_reactive::animation::test_clock;
+    use shroud_widgets::caret::{CaretBlink, set_caret_blink};
+    use std::time::Duration;
+
+    let clock = test_clock::freeze();
+    set_caret_blink(CaretBlink::Off);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let input_idx = tree.add_child(root, Input::new());
+    tree.compute_layout(400.0, 100.0);
+    let input_rect = tree.layout_rect(input_idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(input_rect.origin.x + 5.0, input_rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    let has_caret = |tree: &mut WidgetTree| {
+        let mut ctx = PaintContext::default();
+        tree.paint(&mut ctx);
+        ctx.rects
+            .iter()
+            .any(|r| r.border_width == 0.0 && r.width > 0.0 && r.width < 8.0)
+    };
+
+    assert!(has_caret(&mut tree), "solid caret with blinking off");
+    clock.advance(Duration::from_secs(10));
+    assert!(
+        has_caret(&mut tree),
+        "still solid ten seconds later — Off never toggles"
+    );
+}
+
+#[test]
 fn multiline_input_keeps_pasted_newlines() {
     // Paste arrives as a burst of CharInput events (event_loop dispatch_paste),
     // including the `\n` between lines. A textarea must keep those newlines or a
