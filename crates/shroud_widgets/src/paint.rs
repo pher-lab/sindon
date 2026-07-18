@@ -212,6 +212,32 @@ impl PaintContext {
         self.clip_stack.last().copied()
     }
 
+    /// Round a logical coordinate to the nearest device-pixel boundary, using
+    /// the text engine's current scale (physical pixels per logical pixel).
+    ///
+    /// Rounds in *device* space (scale up, round, scale back) so the result is
+    /// exact at fractional DPI (125% / 150%) — rounding in logical space would
+    /// miss the physical grid. Intended for thin, view-only elements (the text
+    /// caret, hairline decoration rules) whose ~0.5px antialiased rect edge
+    /// otherwise straddles two physical columns and smears onto whatever sits
+    /// next to it. Snap the *drawn* geometry only — never an offset a hit-test
+    /// or selection derives from, or click-to-caret would drift off the glyphs.
+    ///
+    /// The value passed in must already include any active [`current_offset`]
+    /// (snap the composited coordinate, not the widget-local one), so a caller
+    /// inside a translated layer stays on the same grid the renderer rasterizes
+    /// against.
+    ///
+    /// [`current_offset`]: Self::current_offset
+    pub fn snap_device_px(&self, v: f32) -> f32 {
+        let scale = self.text_engine.scale();
+        if scale > 0.0 {
+            (v * scale).round() / scale
+        } else {
+            v
+        }
+    }
+
     /// Draw a filled rectangle with sharp corners.
     pub fn fill_rect(&mut self, rect: Rect, color: Color) {
         self.fill_rect_rounded(rect, color, 0.0);
@@ -691,5 +717,43 @@ mod tests {
         ctx.suppress_ime();
         ctx.clear();
         assert!(!ctx.ime_suppressed());
+    }
+
+    #[test]
+    fn snap_device_px_lands_on_the_physical_grid_at_fractional_scale() {
+        // The caret's leading edge is snapped through this so its ~0.5px
+        // antialiased rect edge doesn't straddle two physical columns and smear
+        // onto the glyph to its left. The proof the caller relies on: the
+        // returned logical value, scaled back up, is a whole physical pixel —
+        // at 125% / 150% just as much as at integer scales.
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let mut ctx = PaintContext::default();
+            ctx.text_engine.set_scale(scale);
+            for raw in [10.3_f32, 7.61, 0.49, 123.02, 42.5] {
+                let snapped = ctx.snap_device_px(raw);
+                let phys = snapped * scale;
+                assert!(
+                    (phys - phys.round()).abs() < 1e-3,
+                    "scale {scale}: snap({raw}) = {snapped} lands at {phys} phys px, not on the grid"
+                );
+                // A snap, not a jump: it never moves the coordinate by a whole
+                // logical pixel or more (that would drop the caret onto the
+                // wrong glyph boundary).
+                assert!(
+                    (snapped - raw).abs() < 1.0,
+                    "scale {scale}: snap({raw}) moved to {snapped}, more than a pixel"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn snap_device_px_rounds_to_whole_logical_px_at_scale_one() {
+        // At 100% the physical and logical grids coincide, so snapping is just
+        // rounding to the nearest whole logical pixel.
+        let mut ctx = PaintContext::default();
+        ctx.text_engine.set_scale(1.0);
+        assert_eq!(ctx.snap_device_px(10.3), 10.0);
+        assert_eq!(ctx.snap_device_px(10.7), 11.0);
     }
 }

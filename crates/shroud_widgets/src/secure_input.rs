@@ -775,7 +775,18 @@ impl Widget for SecureInput {
         // caret is the affordance that survives ring suppression (mirrors
         // `Input`, which carets at the line start when empty).
         if self.focused {
-            let caret = Rect::new(caret_x, text_y, 2.0, font_size);
+            // Centre the caret on the insertion point, then snap both edges to
+            // the device-pixel grid — same fix as `Input`: straddling the
+            // boundary keeps the caret from painting over the leading pixel of
+            // the dot after it (a right-biased `[x, x+w]` rect does), and
+            // rounding the width to whole physical pixels stops the antialiased
+            // edges smearing onto the neighbouring dots at fractional DPI.
+            // View-only; the cursor index is untouched.
+            let (ox, _oy) = ctx.current_offset();
+            let caret_w = ctx.snap_device_px(2.0);
+            let center_left = (caret_x - caret_w / 2.0).max(text_x);
+            let snapped_x = ctx.snap_device_px(center_left + ox) - ox;
+            let caret = Rect::new(snapped_x, text_y, caret_w, font_size);
             ctx.fill_rect(caret, text_color);
         }
 
