@@ -214,6 +214,11 @@ const SCROLLBAR_LANE: f32 = SCROLLBAR_WIDTH + SCROLLBAR_INSET;
 /// caret-reveal and re-clamp bypass it via `Animated::snap`.
 const SCROLL_TRANSITION: Duration = Duration::from_millis(120);
 
+/// Logical width of the text caret. Rounded to a whole number of physical
+/// pixels at paint (see the caret draw) so both edges land on the device grid
+/// and neither antialiases onto an adjacent glyph.
+const CARET_WIDTH: f32 = 2.0;
+
 /// Coalescing class for an edit, used to decide whether a new edit folds into
 /// the current undo step or starts a fresh one. Consecutive same-kind inserts
 /// (or deletes) that continue from where the previous edit left the caret merge
@@ -2311,7 +2316,34 @@ impl Widget for Input {
         // caret instead of defaulting to a screen corner; the active offset folds
         // the scroll into the reported (window-relative) rect automatically.
         if let Some((cx, cy)) = caret_xy {
-            let caret = Rect::new(text_x + cx, text_y + cy, 2.0, font_size);
+            let caret_w = ctx.snap_device_px(CARET_WIDTH);
+            // Centre the caret on the insertion point, then snap it to the
+            // device-pixel grid. Two separate defects fed the "caret sticks to
+            // the letter" report:
+            //
+            //  1. Bias. `cx` is the *leading* edge of the glyph after the caret,
+            //     so a caret drawn at `[cx, cx + w]` reaches `w` px into that
+            //     glyph's cell and paints over its first ink pixel(s). Measured
+            //     against "ll", the old rect overlapped the next `l`'s ink by 1px
+            //     while leaving a 1px gap on the left — asymmetric, and it read
+            //     as fused to the following letter. Straddling `cx` splits the
+            //     bias so the worst-case overlap into either neighbour halves and
+            //     is symmetric.
+            //  2. Blur. `cx` is a fractional glyph advance and a 2px logical caret
+            //     is a fractional number of physical pixels at fractional DPI
+            //     (2.5px at 125%); left un-snapped, the rect shader's ~0.5px
+            //     antialiased edges straddle a physical column and smear onto the
+            //     neighbour. Snapping the (centred) leading edge and rounding the
+            //     width to whole physical pixels lands *both* edges on the grid.
+            //
+            // Clamp the centred edge to the text's left so a caret at line start
+            // stays out of the padding/border. All of this is view-only: the
+            // caret *offset* that hit-test / selection consume stays fractional,
+            // so click-to-caret geometry is untouched.
+            let (ox, _oy) = ctx.current_offset();
+            let center_left = (text_x + cx - caret_w / 2.0).max(text_x);
+            let caret_x = ctx.snap_device_px(center_left + ox) - ox;
+            let caret = Rect::new(caret_x, text_y + cy, caret_w, font_size);
             ctx.fill_rect(caret, text_color);
             // Report the cursor area to the OS. While composing, extend it down
             // past the preedit's underline (which sits at the line bottom,
@@ -2324,7 +2356,7 @@ impl Widget for Input {
             } else {
                 font_size
             };
-            ctx.set_ime_cursor_area(Rect::new(caret.origin.x, caret.origin.y, 2.0, ime_h));
+            ctx.set_ime_cursor_area(Rect::new(caret.origin.x, caret.origin.y, caret_w, ime_h));
         }
 
         if self.multiline {

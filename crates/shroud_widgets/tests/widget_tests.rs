@@ -1420,6 +1420,69 @@ fn input_accepts_char_input() {
 }
 
 #[test]
+fn focused_caret_both_edges_snap_to_the_physical_grid() {
+    // The caret is a ~2px rect whose left edge sits on a *fractional* glyph
+    // advance (`cx`), and whose logical width is a fractional number of physical
+    // pixels at fractional DPI (2.5px at 125%). Painted un-snapped, the rect
+    // shader's ~0.5px antialiased edges straddle a physical column and smear
+    // onto the glyph on that side — reported as the caret "sticking to" a letter
+    // (thin glyphs like `l` are the worst case). `Input::paint` snaps the
+    // leading edge *and* rounds the width to whole physical pixels; this pins
+    // that BOTH painted edges, scaled to physical pixels, land on whole pixels.
+    // Non-vacuous because "illil" at 16px has a fractional advance and 2px is
+    // 2.5 physical px at 125% — without the snaps either edge would miss the
+    // grid and this would fail (left edge only was the first, partial fix).
+    fn caret_edges_phys_at(scale: f32) -> (f32, f32) {
+        let mut tree = WidgetTree::new();
+        let root = tree.set_root(Container::column().width(400.0).height(100.0));
+        let input_idx = tree.add_child(root, Input::new());
+        tree.compute_layout(400.0, 100.0);
+
+        let input_rect = tree.layout_rect(input_idx);
+        let mut event_ctx = EventContext::new();
+        tree.dispatch_event(
+            &WidgetEvent::MouseDown {
+                position: Point::new(input_rect.origin.x + 5.0, input_rect.origin.y + 5.0),
+                button: MouseButton::Left,
+            },
+            &mut event_ctx,
+        );
+        for ch in "illil".chars() {
+            tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut event_ctx);
+        }
+
+        // Shaping stays in logical units at any scale, so `cx` is identical
+        // across scales — only the snap grid moves. Set the scale before paint
+        // so the caret snaps against the display it will actually rasterize on.
+        let mut ctx = PaintContext::default();
+        ctx.text_engine.set_scale(scale);
+        tree.paint(&mut ctx);
+
+        // The caret is the only zero-border fill roughly one logical unit wide
+        // (the field background is ~400px). Match on a narrow, non-border rect
+        // rather than an exact width, since the width is now DPI-rounded.
+        let caret = ctx
+            .rects
+            .iter()
+            .find(|r| r.border_width == 0.0 && r.width > 0.0 && r.width < 8.0)
+            .expect("focused input paints a caret");
+        ((caret.x) * scale, (caret.x + caret.width) * scale)
+    }
+
+    for scale in [1.25_f32, 1.5, 2.0] {
+        let (left, right) = caret_edges_phys_at(scale);
+        assert!(
+            (left - left.round()).abs() < 1e-3,
+            "scale {scale}: caret leading edge at {left} physical px is off the grid"
+        );
+        assert!(
+            (right - right.round()).abs() < 1e-3,
+            "scale {scale}: caret trailing edge at {right} physical px is off the grid"
+        );
+    }
+}
+
+#[test]
 fn multiline_input_keeps_pasted_newlines() {
     // Paste arrives as a burst of CharInput events (event_loop dispatch_paste),
     // including the `\n` between lines. A textarea must keep those newlines or a
