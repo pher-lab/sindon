@@ -220,6 +220,49 @@ fn mouse_wheel_glides_with_a_transition() {
 }
 
 #[test]
+fn scrolled_glyphs_land_on_the_device_pixel_grid() {
+    // A fractional scroll offset used to be pushed to the glyphs raw, shifting
+    // the whole column off the physical-pixel grid so scrolled text rendered
+    // blurry — and worse the further you scrolled, since a settled non-integer
+    // offset never realigns. The visual draw offset is now snapped to the
+    // device grid (each line is already shape-snapped relative to the buffer
+    // top), so scrolled text stays crisp. At this harness's 1.0 scale the
+    // device grid is the integer logical grid. Hit-testing keeps the unsnapped
+    // offset, so this guards the drawn geometry only.
+    let (mut tree, _idx, rect) = build_and_type(20, Duration::ZERO);
+    let _ = paint(&tree); // consume the type-driven caret reveal
+
+    let mut ev = EventContext::new();
+    // Pin the viewport to the top, then nudge down by a deliberately fractional
+    // 3.5 px. The wheel does not set the reveal flag, so this offset sticks and
+    // is what the next paint translates the glyphs by.
+    for delta_y in [100_000.0, -3.5] {
+        tree.dispatch_event(
+            &WidgetEvent::Scroll {
+                position: Point::new(rect.origin.x + 5.0, rect.origin.y + 5.0),
+                delta_x: 0.0,
+                delta_y,
+            },
+            &mut ev,
+        );
+    }
+
+    let ctx = paint(&tree);
+    assert!(
+        !ctx.glyphs.is_empty(),
+        "the body text should produce glyphs"
+    );
+    for g in &ctx.glyphs {
+        let off_grid = (g.y - g.y.round()).abs();
+        assert!(
+            off_grid < 0.01,
+            "a scrolled glyph must land on the device-pixel grid, but y={} is {off_grid} off",
+            g.y
+        );
+    }
+}
+
+#[test]
 fn external_caret_jump_scrolls_into_view() {
     // A *programmatic* caret move — the find-replace bar jumping to a match by
     // setting the bound cursor / selection signals — must scroll the match into
