@@ -89,6 +89,12 @@ type Highlighter = Box<dyn Fn(&str) -> Vec<(usize, usize, Color)>>;
 /// buffer.
 type KeymapHandler = Box<dyn Fn(&str, usize) -> Option<KeyEdit>>;
 
+/// Caret-activity snapshot compared between focused paints to decide whether the
+/// user is still active (hold the caret solid) or has paused (resume the blink):
+/// `(cursor, selection anchor, buffer len, preedit generation)`. See
+/// [`Input::blink_sig`].
+type BlinkSig = (usize, Option<usize>, usize, u64);
+
 /// A structural edit produced by a smart-keymap hook ([`Input::on_enter`] /
 /// [`Input::on_backspace`]). The widget applies it as one discrete undo step:
 /// the byte range `replace` in the current buffer is replaced with `insert`,
@@ -666,18 +672,30 @@ pub struct Input {
     /// `cursor + preedit_cursor.start`, so it tracks the composition's own
     /// cursor rather than jumping to the end of the preedit.
     preedit_cursor: Option<(usize, usize)>,
+    /// Bumped on every [`WidgetEvent::ImePreedit`] so a composition keystroke
+    /// counts as caret activity in [`blink_sig`](Self::blink_sig). Without it
+    /// the plain preedit fields the signature reads (`cursor`, anchor, buffer
+    /// len) never move while composing, so the caret would blink through the
+    /// composition instead of holding solid while you type; folding this in
+    /// makes composing follow the same "solid while active, blink on pause"
+    /// rule as ordinary typing.
+    ///
+    /// [`WidgetEvent::ImePreedit`]: crate::event::WidgetEvent::ImePreedit
+    preedit_gen: u64,
     /// When the caret's current *solid* blink phase began. Reset to "now"
     /// whenever [`blink_sig`](Self::blink_sig) changes between paints — any
-    /// keystroke, arrow, or click — so the caret stays solid while you type and
-    /// only resumes blinking after a pause. `None` until the first focused
-    /// paint; fed to [`caret::blink_phase`](crate::caret::blink_phase).
+    /// keystroke, arrow, click, or IME preedit update — so the caret stays
+    /// solid while you type and only resumes blinking after a pause. `None`
+    /// until the first focused paint; fed to
+    /// [`caret::blink_phase`](crate::caret::blink_phase).
     blink_ref: Cell<Option<Instant>>,
     /// Caret state at the last focused paint — `(cursor, selection anchor,
-    /// buffer len)`. When it differs from the current paint the caret moved or
-    /// the text changed (the user is active), which resets the blink phase.
-    /// Cleared to `None` on focus loss so the next focus opens a fresh solid
-    /// phase rather than inheriting a stale mid-blink reference.
-    blink_sig: Cell<Option<(usize, Option<usize>, usize)>>,
+    /// buffer len, preedit generation)`. When it differs from the current paint
+    /// the caret moved, the text changed, or the IME preedit advanced (the user
+    /// is active), which resets the blink phase. Cleared to `None` on focus
+    /// loss so the next focus opens a fresh solid phase rather than inheriting a
+    /// stale mid-blink reference.
+    blink_sig: Cell<Option<BlinkSig>>,
 }
 
 impl Input {
@@ -736,6 +754,7 @@ impl Input {
             fixed_height: None,
             preedit: String::new(),
             preedit_cursor: None,
+            preedit_gen: 0,
             blink_ref: Cell::new(None),
             blink_sig: Cell::new(None),
         }
@@ -2448,26 +2467,27 @@ impl Widget for Input {
         // caret instead of defaulting to a screen corner; the active offset folds
         // the scroll into the reported (window-relative) rect automatically.
         if let Some((cx, cy)) = caret_xy {
-            // Blink phase. Held solid while composing (you're mid-keystroke via
-            // the IME); otherwise the phase resets whenever the caret moved or
-            // the text changed since the last paint — so it stays solid while
-            // you type and only blinks after a pause — then we read on/off and
-            // vote the next toggle as a timed wake. This gates only whether the
-            // fill is emitted; the geometry and the IME cursor-area report below
-            // are unchanged.
+            // Blink phase. The phase resets whenever the caret moved, the text
+            // changed, or the IME preedit advanced since the last paint — so the
+            // caret stays solid while you type (including mid-composition via the
+            // IME, where `preedit_gen` is the activity signal) and only blinks
+            // after a pause — then we read on/off and vote the next toggle as a
+            // timed wake. Composing follows the same rule as ordinary typing:
+            // pausing over an uncommitted preedit resumes the blink rather than
+            // freezing solid. (A caret is only drawn here for the plain preedit;
+            // during 変換 the target clause is highlighted and the fill is
+            // suppressed below, so blink never applies there.) This gates only
+            // whether the fill is emitted; the geometry and the IME cursor-area
+            // report below are unchanged.
             let caret_visible = match caret::caret_blink() {
                 CaretBlink::Off => true,
-                CaretBlink::Interval(_) if composing => {
-                    // Force a fresh solid phase once composition ends.
-                    self.blink_sig.set(None);
-                    true
-                }
                 CaretBlink::Interval(interval) => {
                     let now = animation::now();
                     let sig = (
                         self.cursor.get(),
                         self.selection_anchor.get(),
                         self.value.borrow().len(),
+                        self.preedit_gen,
                     );
                     if self.blink_sig.get() != Some(sig) {
                         self.blink_ref.set(Some(now));
@@ -2761,6 +2781,10 @@ impl Widget for Input {
                 self.preedit.push_str(text);
                 self.preedit_cursor = *cursor;
                 self.reveal_caret.set(true);
+                // Count this composition update as caret activity so the blink
+                // holds solid while the user is actively composing and only
+                // resumes after a pause (see `preedit_gen` / `blink_sig`).
+                self.preedit_gen = self.preedit_gen.wrapping_add(1);
                 EventResult::Consumed
             }
 

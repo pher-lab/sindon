@@ -1599,6 +1599,86 @@ fn caret_blink_off_keeps_the_caret_solid_indefinitely() {
 }
 
 #[test]
+fn composing_caret_blinks_after_a_pause_and_resets_on_each_preedit() {
+    // Regression: while composing an uncommitted IME preedit, the caret used to
+    // be forced solid for the whole composition — so pausing mid-composition
+    // (very common in Japanese input: type a phrase, then stop to think before
+    // converting) froze it while every other context blinks on a pause. It
+    // should follow the same rule as ordinary typing: solid while actively
+    // composing, blinking after a pause, and snapping back to solid on the next
+    // preedit update. (This is the plain preedit only — during 変換 the target
+    // clause is highlighted and no caret is drawn at all.)
+    use shroud_reactive::animation::test_clock;
+    use shroud_widgets::caret::{CaretBlink, set_caret_blink};
+    use std::time::Duration;
+
+    let clock = test_clock::freeze();
+    let ivl = Duration::from_millis(500);
+    set_caret_blink(CaretBlink::Interval(ivl));
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    let input_idx = tree.add_child(root, Input::new());
+    tree.compute_layout(400.0, 100.0);
+
+    let input_rect = tree.layout_rect(input_idx);
+    let mut event_ctx = EventContext::new();
+    tree.dispatch_event(
+        &WidgetEvent::MouseDown {
+            position: Point::new(input_rect.origin.x + 5.0, input_rect.origin.y + 5.0),
+            button: MouseButton::Left,
+        },
+        &mut event_ctx,
+    );
+
+    // Push an (uncommitted) composition update. Caret at the preedit's end.
+    let preedit = |tree: &mut WidgetTree, ctx: &mut EventContext, text: &str| {
+        tree.dispatch_event(
+            &WidgetEvent::ImePreedit {
+                text: text.to_string(),
+                cursor: Some((text.len(), text.len())),
+            },
+            ctx,
+        );
+    };
+
+    // The caret is the only tall, narrow, zero-border fill: the preedit
+    // underline is a full-run-width, 1px-tall rule, so keying off both a small
+    // width *and* a caret-height (> 4px) fill isolates the caret cleanly.
+    let has_caret = |tree: &mut WidgetTree| {
+        let mut ctx = PaintContext::default();
+        tree.paint(&mut ctx);
+        ctx.rects
+            .iter()
+            .any(|r| r.border_width == 0.0 && r.width > 0.0 && r.width < 8.0 && r.height > 4.0)
+    };
+
+    preedit(&mut tree, &mut event_ctx, "abc");
+    assert!(has_caret(&mut tree), "solid the moment composition updates");
+
+    // A pause over the uncommitted preedit resumes the blink — the old code
+    // held this solid forever.
+    clock.advance(Duration::from_millis(250));
+    assert!(
+        has_caret(&mut tree),
+        "still solid halfway through the interval"
+    );
+    clock.advance(Duration::from_millis(250));
+    assert!(
+        !has_caret(&mut tree),
+        "the composing caret blinks off after a full idle interval"
+    );
+
+    // The next composition keystroke snaps it back to solid, exactly like a
+    // keystroke in committed text.
+    preedit(&mut tree, &mut event_ctx, "abcd");
+    assert!(
+        has_caret(&mut tree),
+        "a preedit update resets the composing caret to solid"
+    );
+}
+
+#[test]
 fn multiline_input_keeps_pasted_newlines() {
     // Paste arrives as a burst of CharInput events (event_loop dispatch_paste),
     // including the `\n` between lines. A textarea must keep those newlines or a
