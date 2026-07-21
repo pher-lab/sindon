@@ -17,7 +17,7 @@ use shroud_widgets::tree::WidgetTree;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key as WinitKey, NamedKey as WinitNamedKey};
+use winit::keyboard::{Key as WinitKey, KeyCode, NamedKey as WinitNamedKey, PhysicalKey};
 use winit::window::WindowId;
 
 /// Default cadence for the periodic tick when an `on_frame` hook is set.
@@ -1553,6 +1553,21 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     // keys) or, for Space, a CharInput so the rest of the
                     // pipeline treats it as a printable character.
                     WinitKey::Named(named) => {
+                        // Keys the IME consumes arrive as logical `Process`
+                        // with the physical identity intact. Log arrows only:
+                        // during composition *every* eaten key (romaji letters
+                        // included) is `Process`, so naming any other physical
+                        // key would put typed plaintext in the perf log.
+                        if matches!(named, WinitNamedKey::Process) && self.perf_log.is_some() {
+                            let phys = match event.physical_key {
+                                PhysicalKey::Code(KeyCode::ArrowLeft) => "ArrowLeft",
+                                PhysicalKey::Code(KeyCode::ArrowRight) => "ArrowRight",
+                                PhysicalKey::Code(KeyCode::ArrowUp) => "ArrowUp",
+                                PhysicalKey::Code(KeyCode::ArrowDown) => "ArrowDown",
+                                _ => "other",
+                            };
+                            self.perf_event_line(&format!("process-key({phys})"));
+                        }
                         if let Some(event) = translate_named_key(named) {
                             self.perf_mark_input("key");
                             if let Some(tree) = &mut self.tree {
