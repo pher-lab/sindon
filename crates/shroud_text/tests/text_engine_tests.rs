@@ -1258,7 +1258,8 @@ fn shape_composing_matches_the_three_separate_shapes() {
                 let ref_underline =
                     engine.selection_rects_attrs(text, ps, pe, fs, lh, wrap, &attrs);
 
-                let block = engine.shape_composing(text, fs, lh, wrap, &attrs, caret, (ps, pe));
+                let block =
+                    engine.shape_composing(text, fs, lh, wrap, &attrs, caret, (ps, pe), None);
 
                 assert_eq!(
                     block.caret, ref_caret,
@@ -1267,6 +1268,10 @@ fn shape_composing_matches_the_three_separate_shapes() {
                 assert_eq!(
                     block.underline, ref_underline,
                     "underline mismatch for range {ps}..{pe} in {text:?} (wrap {wrap:?})"
+                );
+                assert!(
+                    block.target.is_empty(),
+                    "target must stay empty without a target range in {text:?} (wrap {wrap:?})"
                 );
                 assert_eq!(
                     block.shaped.glyphs.len(),
@@ -1287,6 +1292,45 @@ fn shape_composing_matches_the_three_separate_shapes() {
             }
         }
     }
+}
+
+// A non-empty `target_range` (the IME's 変換 target clause) produces highlight
+// rects that match the standalone selection rects for the same range — the fold
+// must reuse the same body so the highlight lands exactly on the converting
+// clause's glyphs. An empty/degenerate range yields no rects.
+#[test]
+fn shape_composing_target_matches_selection_rects() {
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (18.0, 18.0 * 1.3);
+    let attrs = TextAttrs::default();
+
+    let text = "\u{65E5}\u{672C}\u{8A9E}"; // 日本語 (single converting clause)
+    let (ps, pe) = (0, text.len()); // preedit spans the whole clause
+
+    // Whole clause is the target (space-bar 変換 on a single clause).
+    let block = engine.shape_composing(
+        text,
+        fs,
+        lh,
+        None,
+        &attrs,
+        0,
+        (ps, pe),
+        Some((0, text.len())),
+    );
+    let want = engine.selection_rects_attrs(text, 0, text.len(), fs, lh, None, &attrs);
+    assert_eq!(
+        block.target, want,
+        "target highlight must match the selection rects for the clause range"
+    );
+    assert!(!block.target.is_empty(), "a real clause must highlight");
+
+    // A degenerate (empty) target range highlights nothing.
+    let block = engine.shape_composing(text, fs, lh, None, &attrs, 0, (ps, pe), Some((1, 1)));
+    assert!(
+        block.target.is_empty(),
+        "an empty target range must not highlight"
+    );
 }
 
 // ── EditBuffer (focused editing single-shape path) ────────────────────────

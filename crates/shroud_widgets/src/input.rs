@@ -1833,6 +1833,11 @@ impl Widget for Input {
         let mut composed_text: Option<String> = None;
         let mut composed_caret = 0usize;
         let mut preedit_span: Option<(usize, usize)> = None;
+        // Composed-string byte range of the IME's *target clause* — the 注目文節
+        // winit reports as a range (`cs != ce`) once `space` starts conversion.
+        // `Some` only while converting; drives the highlight below and suppresses
+        // the stray caret that would otherwise collapse onto the clause head.
+        let mut preedit_target: Option<(usize, usize)> = None;
         if composing {
             let v = self.value.borrow();
             let (lo, hi) = match self.selection_range() {
@@ -1851,6 +1856,17 @@ impl Widget for Input {
                 Some((cs, _ce)) => lo + cs.min(self.preedit.len()),
                 None => span.1,
             };
+            // A non-empty IME cursor range means "this clause is being
+            // converted", not "the caret is here". Map it into composed-string
+            // coords so the paint highlights the clause instead of dropping a
+            // caret at `cs` (its head). Rebased through `lo` like `span`.
+            if let Some((cs, ce)) = self.preedit_cursor {
+                let cs = cs.min(self.preedit.len());
+                let ce = ce.min(self.preedit.len());
+                if cs < ce {
+                    preedit_target = Some((lo + cs, lo + ce));
+                }
+            }
             preedit_span = Some(span);
             composed_text = Some(s);
         }
@@ -1870,6 +1886,7 @@ impl Widget for Input {
                 &self.attrs,
                 composed_caret,
                 (ps, pe),
+                preedit_target,
             )),
             _ => None,
         };
@@ -2248,6 +2265,33 @@ impl Widget for Input {
             }
         }
 
+        // IME target-clause highlight (変換の注目文節), painted behind the glyphs
+        // like a selection so the converting clause reads as reverse-video. winit
+        // reports this clause as a byte range while `space` cycles conversion
+        // candidates; drawing it as a highlight — instead of collapsing the range
+        // to a caret at its head — matches the native inline-composition
+        // affordance. The caret fill is suppressed for the same range below.
+        if let Some(block) = composed_block.as_ref() {
+            if !block.target.is_empty() {
+                let sel_color = self
+                    .selection_color
+                    .as_ref()
+                    .map(|c| c.get())
+                    .unwrap_or(ctx.theme.colors.selection_background);
+                for r in &block.target {
+                    ctx.fill_rect(
+                        Rect::new(
+                            text_x + r.origin.x,
+                            text_y + r.origin.y,
+                            r.size.width,
+                            r.size.height,
+                        ),
+                        sel_color,
+                    );
+                }
+            }
+        }
+
         {
             let value = self.value.borrow();
             if value_is_empty {
@@ -2423,7 +2467,16 @@ impl Widget for Input {
             let center_left = (text_x + cx - caret_w / 2.0).max(text_x);
             let caret_x = ctx.snap_device_px(center_left + ox) - ox;
             let caret = Rect::new(caret_x, text_y + cy, caret_w, font_size);
-            if caret_visible {
+            // While converting, the target clause is shown highlighted (above),
+            // so a thin caret would just sit at the clause head marking nothing —
+            // suppress its fill. Keyed off the highlight actually drawn, so "caret
+            // hidden" and "clause highlighted" are the same condition. The IME
+            // cursor-area report below still fires, so the candidate window stays
+            // anchored to the clause.
+            let clause_highlighted = composed_block
+                .as_ref()
+                .is_some_and(|b| !b.target.is_empty());
+            if caret_visible && !clause_highlighted {
                 ctx.fill_rect(caret, text_color);
             }
             // Report the cursor area to the OS. While composing, extend it down
