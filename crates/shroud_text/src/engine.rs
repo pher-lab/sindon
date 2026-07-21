@@ -113,6 +113,13 @@ pub struct ComposedBlock {
     /// Block-relative underline rects for the preedit run, one per visual line
     /// it spans, matching [`selection_rects_attrs`](TextEngine::selection_rects_attrs).
     pub underline: Vec<Rect>,
+    /// Block-relative highlight rects for the IME's *target clause* — the
+    /// 注目文節 winit reports as a byte range `[cs, ce)` with `cs != ce` while
+    /// `space` cycles conversion candidates. One rect per visual row it spans,
+    /// full line-height like a selection so the converting clause reads as
+    /// highlighted. Empty while merely typing (the IME reports a caret, not a
+    /// range) — the plain caret covers that case.
+    pub target: Vec<Rect>,
 }
 
 /// A shaped, queryable buffer for the focused (non-composing) editing path,
@@ -1161,10 +1168,12 @@ impl TextEngine {
     }
 
     /// Shape the IME-composition display string **once** and return the glyphs,
-    /// the caret at `caret_offset`, and the underline rects for the preedit
-    /// `underline` range — everything a composing `Input` paints. See
-    /// [`ComposedBlock`]. Uncached by design: each keystroke's composed string
-    /// is unique, so caching would only churn the LRU with transient entries.
+    /// the caret at `caret_offset`, the underline rects for the preedit
+    /// `underline` range, and (when `target_range` is a non-empty `[ts, te)`)
+    /// the highlight rects for the converting *target clause* — everything a
+    /// composing `Input` paints. See [`ComposedBlock`]. Uncached by design:
+    /// each keystroke's composed string is unique, so caching would only churn
+    /// the LRU with transient entries.
     #[allow(clippy::too_many_arguments)]
     pub fn shape_composing(
         &mut self,
@@ -1175,14 +1184,22 @@ impl TextEngine {
         attrs: &TextAttrs,
         caret_offset: usize,
         underline_range: (usize, usize),
+        target_range: Option<(usize, usize)>,
     ) -> ComposedBlock {
         let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
         let shaped = extract_shaped_plain(&buffer, font_size, self.scale);
 
-        // Preedit underline (the non-trailing selection body) and caret —
-        // both off the same buffer.
+        // Preedit underline (the non-trailing selection body), target-clause
+        // highlight, and caret — all off the same buffer, so the highlight
+        // lines up with the glyphs and underline exactly. The highlight reuses
+        // the selection-rect body (full line-height rects) for the caller to
+        // fill like a text selection.
         let underline =
             selection_rects_in_buffer(&buffer, text, underline_range.0, underline_range.1, None);
+        let target = match target_range {
+            Some((ts, te)) if ts < te => selection_rects_in_buffer(&buffer, text, ts, te, None),
+            _ => Vec::new(),
+        };
         let caret = self.caret_from_buffer(
             &buffer,
             text,
@@ -1197,6 +1214,7 @@ impl TextEngine {
             shaped,
             caret,
             underline,
+            target,
         }
     }
 
@@ -1755,7 +1773,7 @@ mod tests {
         let attrs = TextAttrs::default();
         let _ = e.shape_edit_plain("typing", 16.0, 20.0, None, &attrs);
         let _ = e.shape_edit_rich(&[TextSpan::new("typing")], 16.0, 20.0, None);
-        let _ = e.shape_composing("typing", 16.0, 20.0, None, &attrs, 3, (0, 3));
+        let _ = e.shape_composing("typing", 16.0, 20.0, None, &attrs, 3, (0, 3), None);
         assert_eq!(
             e.shape_cache.map.len(),
             0,

@@ -10,6 +10,7 @@
 //! 3. the preedit never enters the bound value until the IME commits, and
 //! 4. focus loss drops a half-composed preedit.
 
+use shroud_core::Color;
 use shroud_core::{Point, Rect, Theme};
 use shroud_reactive::Signal;
 use shroud_text::TextEngine;
@@ -229,6 +230,59 @@ fn preedit_caret_tracks_the_composition() {
         "caret should follow the composition past the field's left padding: \
          caret_x={} text_x={text_x}",
         caret.x
+    );
+}
+
+/// Whether a composition caret (the ≈2px-wide, tall fill rect) was drawn.
+fn has_caret(ctx: &PaintContext) -> bool {
+    ctx.rects
+        .iter()
+        .any(|r| (r.width - 2.0).abs() < 0.01 && r.height > 4.0)
+}
+
+/// Count of target-clause highlight rects: tall (full line-height, so the
+/// selection-background fill, not the 1px underline) and in the selection color.
+fn highlight_count(ctx: &PaintContext, color: Color) -> usize {
+    ctx.rects
+        .iter()
+        .filter(|r| r.color == color && r.height > 4.0)
+        .count()
+}
+
+#[test]
+fn converting_clause_is_highlighted_and_the_caret_is_suppressed() {
+    // Space-bar 変換: winit reports the target clause as a non-empty byte range
+    // (`cs != ce`), not a caret. The clause must be shown *highlighted* (like a
+    // selection) instead of collapsing the range to a stray caret at its head,
+    // and the thin caret must not be drawn over the highlight. Contrast the two
+    // states off the same field so only the reported cursor changes.
+    let sel = Theme::default().colors.selection_background;
+    let (mut tree, _rect, mut ev) = focused_input(None);
+
+    // Typing (no clause converted yet): the IME reports a caret. Baseline — a
+    // caret is drawn and nothing is highlighted.
+    preedit(&mut tree, &mut ev, "hello", None);
+    let typing = paint(&tree);
+    assert!(
+        has_caret(&typing),
+        "while typing, the composition caret must be drawn"
+    );
+    assert_eq!(
+        highlight_count(&typing, sel),
+        0,
+        "typing (no target clause) must not highlight anything"
+    );
+
+    // Convert: the whole preedit becomes the target clause (range 0..len).
+    preedit(&mut tree, &mut ev, "hello", Some((0, "hello".len())));
+    let converting = paint(&tree);
+    assert!(
+        highlight_count(&converting, sel) >= 1,
+        "the converting target clause must be highlighted"
+    );
+    assert!(
+        !has_caret(&converting),
+        "the stray caret must be suppressed while the clause is highlighted"
     );
 }
 
