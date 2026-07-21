@@ -674,10 +674,11 @@ pub struct Input {
     preedit_cursor: Option<(usize, usize)>,
     /// The IME's hidden character caret during conversion, reconstructed
     /// event-by-event from clause-range updates + arrow hints (see
-    /// [`ime_caret::track`](crate::ime_caret)). Byte offset into
-    /// [`preedit`](Self::preedit); `None` in clause-select mode, where the
-    /// target clause underline alone is the honest display.
-    ime_nav_caret: Option<usize>,
+    /// [`ime_caret::track`](crate::ime_caret)). Positions are byte offsets
+    /// into [`preedit`](Self::preedit); only a corroborated (`Live`) track
+    /// is drawn — `Idle`/`Tentative` keep the clause-select display, where
+    /// the target clause underline alone is the honest picture.
+    ime_nav_caret: crate::ime_caret::Track,
     /// Bumped on every [`WidgetEvent::ImePreedit`] so a composition keystroke
     /// counts as caret activity in [`blink_sig`](Self::blink_sig). Without it
     /// the plain preedit fields the signature reads (`cursor`, anchor, buffer
@@ -760,7 +761,7 @@ impl Input {
             fixed_height: None,
             preedit: String::new(),
             preedit_cursor: None,
-            ime_nav_caret: None,
+            ime_nav_caret: crate::ime_caret::Track::Idle,
             preedit_gen: 0,
             blink_ref: Cell::new(None),
             blink_sig: Cell::new(None),
@@ -1914,7 +1915,7 @@ impl Widget for Input {
             // The tracked hidden caret (conversion mode, `ime_caret`) wins
             // over the clause head: it is the position the user is actually
             // steering with ←/→, the one Notepad shows.
-            composed_caret = match (self.ime_nav_caret, self.preedit_cursor) {
+            composed_caret = match (self.ime_nav_caret.caret(), self.preedit_cursor) {
                 (Some(t), _) => lo + t.min(self.preedit.len()),
                 (None, Some((cs, _ce))) => lo + cs.min(self.preedit.len()),
                 (None, None) => span.1,
@@ -2544,7 +2545,7 @@ impl Widget for Input {
             let clause_highlighted = composed_block
                 .as_ref()
                 .is_some_and(|b| !b.target.is_empty());
-            if caret_visible && (!clause_highlighted || self.ime_nav_caret.is_some()) {
+            if caret_visible && (!clause_highlighted || self.ime_nav_caret.caret().is_some()) {
                 ctx.fill_rect(caret, text_color);
             }
             // Report the cursor area to the OS. While composing, extend it down
@@ -2729,7 +2730,7 @@ impl Widget for Input {
                 // screen after the field is no longer focused.
                 self.preedit.clear();
                 self.preedit_cursor = None;
-                self.ime_nav_caret = None;
+                self.ime_nav_caret = crate::ime_caret::Track::Idle;
                 self.pending_select.set(SelectUnit::Caret);
                 self.drag_origin.set(None);
                 self.desired_x.set(None);
