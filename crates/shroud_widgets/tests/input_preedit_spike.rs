@@ -67,6 +67,7 @@ fn preedit(
         &WidgetEvent::ImePreedit {
             text: text.to_string(),
             cursor,
+            nav: None,
         },
         ev,
     );

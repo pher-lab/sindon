@@ -672,6 +672,12 @@ pub struct Input {
     /// `cursor + preedit_cursor.start`, so it tracks the composition's own
     /// cursor rather than jumping to the end of the preedit.
     preedit_cursor: Option<(usize, usize)>,
+    /// The IME's hidden character caret during conversion, reconstructed
+    /// event-by-event from clause-range updates + arrow hints (see
+    /// [`ime_caret::track`](crate::ime_caret)). Byte offset into
+    /// [`preedit`](Self::preedit); `None` in clause-select mode, where the
+    /// target clause underline alone is the honest display.
+    ime_nav_caret: Option<usize>,
     /// Bumped on every [`WidgetEvent::ImePreedit`] so a composition keystroke
     /// counts as caret activity in [`blink_sig`](Self::blink_sig). Without it
     /// the plain preedit fields the signature reads (`cursor`, anchor, buffer
@@ -754,6 +760,7 @@ impl Input {
             fixed_height: None,
             preedit: String::new(),
             preedit_cursor: None,
+            ime_nav_caret: None,
             preedit_gen: 0,
             blink_ref: Cell::new(None),
             blink_sig: Cell::new(None),
@@ -1904,9 +1911,13 @@ impl Widget for Input {
             s.push_str(&self.preedit);
             s.push_str(&v[hi..]);
             let span = (lo, lo + self.preedit.len());
-            composed_caret = match self.preedit_cursor {
-                Some((cs, _ce)) => lo + cs.min(self.preedit.len()),
-                None => span.1,
+            // The tracked hidden caret (conversion mode, `ime_caret`) wins
+            // over the clause head: it is the position the user is actually
+            // steering with ←/→, the one Notepad shows.
+            composed_caret = match (self.ime_nav_caret, self.preedit_cursor) {
+                (Some(t), _) => lo + t.min(self.preedit.len()),
+                (None, Some((cs, _ce))) => lo + cs.min(self.preedit.len()),
+                (None, None) => span.1,
             };
             // A non-empty IME cursor range means "this clause is being
             // converted", not "the caret is here". Map it into composed-string
@@ -2525,10 +2536,15 @@ impl Widget for Input {
             // drawn, so "caret hidden" and "clause underlined" are the same
             // condition. The IME cursor-area report below still fires, so the
             // candidate window stays anchored to the clause.
+            //
+            // Exception: once the hidden-caret tracker is engaged (the user is
+            // steering the IME's character caret with ←/→ — `ime_caret`), the
+            // caret is *at* that tracked position, not the clause head, and
+            // drawing it alongside the underline is exactly what Notepad does.
             let clause_highlighted = composed_block
                 .as_ref()
                 .is_some_and(|b| !b.target.is_empty());
-            if caret_visible && !clause_highlighted {
+            if caret_visible && (!clause_highlighted || self.ime_nav_caret.is_some()) {
                 ctx.fill_rect(caret, text_color);
             }
             // Report the cursor area to the OS. While composing, extend it down
@@ -2713,6 +2729,7 @@ impl Widget for Input {
                 // screen after the field is no longer focused.
                 self.preedit.clear();
                 self.preedit_cursor = None;
+                self.ime_nav_caret = None;
                 self.pending_select.set(SelectUnit::Caret);
                 self.drag_origin.set(None);
                 self.desired_x.set(None);
@@ -2762,7 +2779,19 @@ impl Widget for Input {
                 EventResult::Consumed
             }
 
-            WidgetEvent::ImePreedit { text, cursor } if self.focused => {
+            WidgetEvent::ImePreedit { text, cursor, nav } if self.focused => {
+                // Advance the hidden-caret tracker against the *previous*
+                // preedit state before overwriting it: same-range updates are
+                // caret steps, range changes re-anchor, anything unexplained
+                // resets to clause-select display (see `ime_caret`).
+                self.ime_nav_caret = crate::ime_caret::track(
+                    self.ime_nav_caret,
+                    &self.preedit,
+                    self.preedit_cursor,
+                    text,
+                    *cursor,
+                    *nav,
+                );
                 // Store the in-progress composition for display only — `value`
                 // is untouched until the IME commits (which arrives via
                 // CharInput). An empty `text` clears the preedit (commit /

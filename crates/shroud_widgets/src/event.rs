@@ -70,6 +70,17 @@ pub enum WidgetEvent {
         /// Caret byte range `(start, end)` within `text`, or `None` to hide
         /// the caret during composition (winit's own convention).
         cursor: Option<(usize, usize)>,
+        /// The IME-consumed plain arrow key that immediately preceded this
+        /// update, when one did (`None` for typing, candidate operations, or
+        /// arrows with modifiers held — Shift+arrow is clause *resizing*).
+        ///
+        /// During conversion the platform reports the target clause as
+        /// `cursor` but not the IME's internal character caret; an update
+        /// arriving with the *same* clause range right after a plain arrow is
+        /// that hidden caret moving one character in this direction. The
+        /// focused text widget uses the hint to track and draw it (see
+        /// `ime_caret`).
+        nav: Option<ImeNav>,
     },
     /// Scroll wheel (or trackpad scroll).
     ///
@@ -80,6 +91,14 @@ pub enum WidgetEvent {
         delta_x: f32,
         delta_y: f32,
     },
+}
+
+/// Direction of an IME-consumed plain arrow key, attached to
+/// [`WidgetEvent::ImePreedit`] as a navigation hint (see the field docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImeNav {
+    Left,
+    Right,
 }
 
 /// Mouse button identifiers.

@@ -1637,6 +1637,7 @@ fn composing_caret_blinks_after_a_pause_and_resets_on_each_preedit() {
             &WidgetEvent::ImePreedit {
                 text: text.to_string(),
                 cursor: Some((text.len(), text.len())),
+                nav: None,
             },
             ctx,
         );

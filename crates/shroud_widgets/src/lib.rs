@@ -13,6 +13,7 @@ mod dropdown;
 pub mod event;
 pub mod focus;
 mod image;
+mod ime_caret;
 mod input;
 mod interaction;
 pub mod layer;

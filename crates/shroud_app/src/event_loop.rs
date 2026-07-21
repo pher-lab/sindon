@@ -10,7 +10,9 @@ use shroud_platform::{PlatformWindow, SecureClipboard, SystemTheme};
 use shroud_reactive::{Reactive, Signal};
 use shroud_render::renderer::Renderer;
 use shroud_security::hardening;
-use shroud_widgets::event::{EventContext, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
+use shroud_widgets::event::{
+    EventContext, ImeNav, Key, Modifiers, MouseButton, NamedKey, WidgetEvent,
+};
 use shroud_widgets::paint::PaintContext;
 use shroud_widgets::shortcut::{Shortcut, ShortcutContext, ShortcutId};
 use shroud_widgets::tree::WidgetTree;
@@ -727,6 +729,7 @@ impl App {
             fonts_loaded: false,
             redraw_pending_since: Cell::new(None),
             redraw_retry_count: Cell::new(0),
+            pending_ime_nav: None,
             perf_log: std::env::var("SHROUD_PERF")
                 .ok()
                 .and_then(|path| std::fs::File::create(path).ok())
@@ -872,24 +875,28 @@ fn translate_named_key(named: &WinitNamedKey) -> Option<WidgetEvent> {
 /// [`translate_named_key`].
 ///
 /// - `Preedit` → a single [`WidgetEvent::ImePreedit`] carrying the
-///   composition text + caret range. The focused text widget renders it
-///   inline; an empty preedit clears it.
+///   composition text + caret range, plus `nav` — the IME-consumed plain
+///   arrow that immediately preceded this update, if any — so the widget can
+///   track the IME's hidden conversion caret. Only `Preedit` carries it; the
+///   clears below always send `nav: None`.
 /// - `Commit` → clear any active preedit first, then splat the committed
 ///   chars through the existing [`WidgetEvent::CharInput`] path (so widgets
 ///   need no commit-specific handling).
 /// - `Enabled` / `Disabled` → clear any lingering preedit. Harmless no-op
 ///   when nothing is composing; on `Disabled` (focus loss / IME bypass) it
 ///   guarantees a half-composed string doesn't stick on screen.
-fn translate_ime(ime: &Ime) -> Vec<WidgetEvent> {
+fn translate_ime(ime: &Ime, nav: Option<ImeNav>) -> Vec<WidgetEvent> {
     match ime {
         Ime::Preedit(text, cursor) => vec![WidgetEvent::ImePreedit {
             text: text.clone(),
             cursor: *cursor,
+            nav,
         }],
         Ime::Commit(text) => {
             let mut out = vec![WidgetEvent::ImePreedit {
                 text: String::new(),
                 cursor: None,
+                nav: None,
             }];
             out.extend(text.chars().map(|ch| WidgetEvent::CharInput { ch }));
             out
@@ -897,6 +904,7 @@ fn translate_ime(ime: &Ime) -> Vec<WidgetEvent> {
         Ime::Enabled | Ime::Disabled => vec![WidgetEvent::ImePreedit {
             text: String::new(),
             cursor: None,
+            nav: None,
         }],
     }
 }
@@ -957,6 +965,11 @@ struct ShroudEventLoop {
     /// `resumed` can fire more than once (suspend/resume); without this guard
     /// each resume would re-register the same faces and bloat the font db.
     fonts_loaded: bool,
+    /// An IME-consumed plain arrow press (logical `Process`, physical
+    /// ArrowLeft/Right, no modifiers) awaiting the `Ime` event it caused.
+    /// Set on every keypress (non-arrows store `None`), taken by the next
+    /// `Ime` event as its [`ImeNav`] hint — see `translate_ime`.
+    pending_ime_nav: Option<ImeNav>,
     /// Frame perf log, enabled by setting `SHROUD_PERF=<file path>` in the
     /// environment: one line per painted frame with phase timings (layout /
     /// paint / gpu), the frame's full-shape count/time from the text engine,
@@ -1516,6 +1529,27 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 // modifiers and characters both log as `key`).
                 self.perf_event_line("key");
 
+                // Remember an IME-consumed plain arrow (logical `Process`,
+                // physical identity intact) for the `Ime` event it triggers,
+                // which Windows delivers a moment later in the same batch.
+                // Every other press clears the slot so a stale arrow can't
+                // label an unrelated composition update, and modifier'd
+                // arrows clear too: Shift+←/→ is clause *resizing*, not a
+                // caret walk.
+                let mods = self.event_ctx.modifiers;
+                self.pending_ime_nav =
+                    if matches!(event.logical_key, WinitKey::Named(WinitNamedKey::Process))
+                        && !(mods.shift || mods.ctrl || mods.alt)
+                    {
+                        match event.physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowLeft) => Some(ImeNav::Left),
+                            PhysicalKey::Code(KeyCode::ArrowRight) => Some(ImeNav::Right),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
                 match &event.logical_key {
                     // Character input → CharInput event (or KeyDown when a
                     // non-shift modifier is held, so the shortcut router
@@ -1622,8 +1656,11 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                         self.perf_input = Some((Instant::now(), desc));
                     }
                 }
+                // Consume the pending arrow hint whether or not a tree is up:
+                // it belongs to this Ime event alone.
+                let nav = self.pending_ime_nav.take();
                 if let Some(tree) = &mut self.tree {
-                    for event in translate_ime(&ime) {
+                    for event in translate_ime(&ime, nav) {
                         tree.dispatch_event(&event, &mut self.event_ctx);
                     }
                     self.request_redraw();
@@ -1922,14 +1959,38 @@ mod tests {
     fn ime_preedit_translates_to_preedit_event() {
         // FW-1: a composition update becomes one ImePreedit carrying the text
         // and the IME caret range, which the focused widget renders inline.
-        let events = translate_ime(&Ime::Preedit("か".to_string(), Some((3, 3))));
+        let events = translate_ime(&Ime::Preedit("か".to_string(), Some((3, 3))), None);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            WidgetEvent::ImePreedit { text, cursor } => {
+            WidgetEvent::ImePreedit { text, cursor, nav } => {
                 assert_eq!(text.as_str(), "か");
                 assert_eq!(*cursor, Some((3, 3)));
+                assert_eq!(*nav, None);
             }
             other => panic!("expected ImePreedit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ime_preedit_carries_the_arrow_hint() {
+        // The hidden-caret tracker needs to know which plain arrow the IME
+        // consumed right before a composition update; the hint must ride the
+        // Preedit event itself so widget and platform stay in step.
+        let events = translate_ime(
+            &Ime::Preedit("今日は".to_string(), Some((0, 9))),
+            Some(ImeNav::Left),
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            WidgetEvent::ImePreedit { nav, .. } => assert_eq!(*nav, Some(ImeNav::Left)),
+            other => panic!("expected ImePreedit, got {other:?}"),
+        }
+        // A commit is never a caret walk: even with a stale hint supplied,
+        // the leading clear must not carry it.
+        let events = translate_ime(&Ime::Commit("猫".to_string()), Some(ImeNav::Right));
+        match &events[0] {
+            WidgetEvent::ImePreedit { nav, .. } => assert_eq!(*nav, None),
+            other => panic!("expected leading ImePreedit clear, got {other:?}"),
         }
     }
 
@@ -1938,10 +1999,10 @@ mod tests {
         // A commit first clears any active preedit (so the underlined
         // composition vanishes), then splats the committed chars through the
         // existing CharInput path — one event per code point.
-        let events = translate_ime(&Ime::Commit("ねこ".to_string()));
+        let events = translate_ime(&Ime::Commit("ねこ".to_string()), None);
         assert_eq!(events.len(), 3, "one clear + one char per code point");
         match &events[0] {
-            WidgetEvent::ImePreedit { text, cursor } => {
+            WidgetEvent::ImePreedit { text, cursor, .. } => {
                 assert!(text.is_empty(), "commit must lead with a preedit clear");
                 assert_eq!(*cursor, None);
             }
@@ -1957,10 +2018,10 @@ mod tests {
         // a half-composed string can't stick when the IME toggles (e.g. a
         // SecureInput's Tier-2 bypass disables IME on focus).
         for ime in [Ime::Enabled, Ime::Disabled] {
-            let events = translate_ime(&ime);
+            let events = translate_ime(&ime, None);
             assert_eq!(events.len(), 1);
             match &events[0] {
-                WidgetEvent::ImePreedit { text, cursor } => {
+                WidgetEvent::ImePreedit { text, cursor, .. } => {
                     assert!(text.is_empty());
                     assert_eq!(*cursor, None);
                 }
