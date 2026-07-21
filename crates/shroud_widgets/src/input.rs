@@ -1222,6 +1222,31 @@ impl Input {
         self.selection_anchor.set(None);
     }
 
+    /// Abandon an in-flight pointer-select gesture whose deferred hit-test
+    /// ([`pending_hit`](Self::pending_hit)) hasn't been resolved by a paint yet.
+    ///
+    /// winit coalesces redraws, so a drag-select immediately followed by a
+    /// keystroke arrives as `MouseDown`/`MouseMove` + a key event in one batch,
+    /// with no paint between. The key edit runs first (against the current
+    /// caret); if the stale `pending_hit` then survives to the next paint it
+    /// resolves the old click against the *edited* buffer and — via
+    /// [`ensure_anchor`](Self::ensure_anchor) — pins the anchor to the moved
+    /// caret, materializing a selection that sticks. Dropping the gesture here
+    /// lets the keyboard win cleanly. Only ever called with `pending_hit` set,
+    /// so an already-resolved drag (capture still held, `pending_hit` empty) is
+    /// left untouched and keeps extending normally.
+    fn cancel_pending_pointer_gesture(&self, ctx: &mut EventContext) {
+        self.pending_hit.set(None);
+        self.pending_select.set(SelectUnit::Caret);
+        self.drag_origin.set(None);
+        // Break the multi-click chain so this abandoned press can't team up
+        // with the next one into a stray double-/triple-click.
+        self.last_click.set(None);
+        if self.selecting.replace(false) {
+            ctx.release_pointer();
+        }
+    }
+
     /// Begin (or keep) a selection anchored at the current caret. The first
     /// Shift+motion pins the anchor; later ones just move the active end.
     fn ensure_anchor(&self) {
@@ -1245,16 +1270,24 @@ impl Input {
     /// caller composes the follow-up (`push_to_source` / `on_change`); this
     /// only mutates the buffer + caret so it can be shared by typing,
     /// Backspace, Delete, and Cut.
+    ///
+    /// The anchor is dropped unconditionally, even when the range was empty
+    /// (a *collapsed* selection, `anchor == cursor`). Such an anchor is
+    /// invisible but real; left in place, the caller's follow-up insert moves
+    /// the caret out from under it and the "selection" silently re-expands and
+    /// sticks. Since every caller is about to insert-at / delete-around the
+    /// caret, clearing here means an edit never resurrects a stale anchor.
     fn delete_selection(&mut self) -> bool {
-        if let Some((lo, hi)) = self.selection_range() {
+        let removed = if let Some((lo, hi)) = self.selection_range() {
             self.value.borrow_mut().drain(lo..hi);
             self.cursor.set(lo);
-            self.selection_anchor.set(None);
             self.desired_x.set(None);
             true
         } else {
             false
-        }
+        };
+        self.selection_anchor.set(None);
+        removed
     }
 
     /// Capture the current editable state for the history.
@@ -2030,6 +2063,14 @@ impl Widget for Input {
                         self.selection_anchor.set(None);
                     }
                     self.cursor.set(offset);
+                    // A drag that never crossed a character boundary resolves to
+                    // a zero-length selection (`anchor == offset`). Drop the
+                    // anchor so this collapsed, invisible selection can't linger
+                    // and then re-expand when a later edit / caret move shifts
+                    // the caret off it.
+                    if self.selection_anchor.get() == Some(offset) {
+                        self.selection_anchor.set(None);
+                    }
                 }
             }
             self.desired_x.set(None);
@@ -2723,298 +2764,329 @@ impl Widget for Input {
                 EventResult::Consumed
             }
 
-            WidgetEvent::KeyDown { key } if self.focused => match key {
-                Key::Named(NamedKey::Backspace) => {
-                    // A selection is deleted as a unit (a discrete undo step);
-                    // otherwise fall back to the single-char delete (which
-                    // coalesces with a run of Backspaces) and the empty-buffer
-                    // hand-off.
-                    if self.selection_range().is_some() {
-                        self.begin_edit(EditKind::Delete, false);
-                        self.delete_selection();
-                        self.commit_edit(EditKind::Delete, true, ctx);
-                    } else {
-                        let cursor = self.cursor.get();
-                        if cursor > 0 {
-                            // Smart keymap (B-1 ③): a hook may delete a whole
-                            // structural prefix (e.g. a markdown list marker) as
-                            // one step. `None` (or a malformed edit) falls
-                            // through to the single-char delete, which coalesces
-                            // with a run of Backspaces.
-                            let smart = self.backspace_handler.as_ref().and_then(|h| {
-                                let v = self.value.borrow();
-                                h(&v, cursor)
-                            });
-                            let handled = match smart {
-                                Some(edit) => self.apply_key_edit(EditKind::Delete, edit, ctx),
-                                None => false,
-                            };
-                            if !handled {
+            WidgetEvent::KeyDown { key } if self.focused => {
+                // Normalize away a *collapsed* anchor (`anchor == caret`) before
+                // dispatching. It renders nothing, but a plain caret move / edit
+                // below steps the caret off it and re-expands it into a real,
+                // sticky selection. A Shift+arrow round-trip is the usual way to
+                // land one (extend out, extend back); clearing it here is a
+                // no-op for a live selection and harmless for Shift (which
+                // re-anchors to the same caret). This is the keyboard sibling of
+                // the pointer-drag normalization in `paint`.
+                if self.selection_anchor.get() == Some(self.cursor.get()) {
+                    self.selection_anchor.set(None);
+                }
+                match key {
+                    Key::Named(NamedKey::Backspace) => {
+                        // A selection is deleted as a unit (a discrete undo step);
+                        // otherwise fall back to the single-char delete (which
+                        // coalesces with a run of Backspaces) and the empty-buffer
+                        // hand-off.
+                        if self.selection_range().is_some() {
+                            self.begin_edit(EditKind::Delete, false);
+                            self.delete_selection();
+                            self.commit_edit(EditKind::Delete, true, ctx);
+                        } else {
+                            let cursor = self.cursor.get();
+                            if cursor > 0 {
+                                // Smart keymap (B-1 ③): a hook may delete a whole
+                                // structural prefix (e.g. a markdown list marker) as
+                                // one step. `None` (or a malformed edit) falls
+                                // through to the single-char delete, which coalesces
+                                // with a run of Backspaces.
+                                let smart = self.backspace_handler.as_ref().and_then(|h| {
+                                    let v = self.value.borrow();
+                                    h(&v, cursor)
+                                });
+                                let handled = match smart {
+                                    Some(edit) => self.apply_key_edit(EditKind::Delete, edit, ctx),
+                                    None => false,
+                                };
+                                if !handled {
+                                    let prev = {
+                                        let v = self.value.borrow();
+                                        Self::prev_char_boundary(&v, cursor)
+                                    };
+                                    self.begin_edit(EditKind::Delete, true);
+                                    self.value.borrow_mut().drain(prev..cursor);
+                                    self.cursor.set(prev);
+                                    self.desired_x.set(None);
+                                    self.commit_edit(EditKind::Delete, false, ctx);
+                                }
+                            } else if self.value.borrow().is_empty() {
+                                // Empty buffer + Backspace: hand off to the app
+                                // (e.g. a tag editor removing the last chip). Gated
+                                // on a truly-empty buffer so a Backspace at the
+                                // start of non-empty text stays an inert no-op.
+                                if let Some(handler) = self.on_backspace_empty.as_mut() {
+                                    handler(ctx);
+                                }
+                            }
+                        }
+                        EventResult::Consumed
+                    }
+                    Key::Named(NamedKey::Delete) => {
+                        // A selection is deleted as a unit (a discrete undo step);
+                        // otherwise delete the single char to the right of the
+                        // caret (coalescing with a run of forward Deletes).
+                        if self.selection_range().is_some() {
+                            self.begin_edit(EditKind::Delete, false);
+                            self.delete_selection();
+                            self.commit_edit(EditKind::Delete, true, ctx);
+                        } else {
+                            let cursor = self.cursor.get();
+                            let len = self.value.borrow().len();
+                            if cursor < len {
+                                let next = {
+                                    let v = self.value.borrow();
+                                    Self::next_char_boundary(&v, cursor)
+                                };
+                                self.begin_edit(EditKind::Delete, true);
+                                self.value.borrow_mut().drain(cursor..next);
+                                self.desired_x.set(None);
+                                self.commit_edit(EditKind::Delete, false, ctx);
+                            }
+                        }
+                        EventResult::Consumed
+                    }
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        if ctx.modifiers.shift {
+                            // Extend selection one char left.
+                            self.ensure_anchor();
+                            let cursor = self.cursor.get();
+                            if cursor > 0 {
                                 let prev = {
                                     let v = self.value.borrow();
                                     Self::prev_char_boundary(&v, cursor)
                                 };
-                                self.begin_edit(EditKind::Delete, true);
-                                self.value.borrow_mut().drain(prev..cursor);
                                 self.cursor.set(prev);
-                                self.desired_x.set(None);
-                                self.commit_edit(EditKind::Delete, false, ctx);
                             }
-                        } else if self.value.borrow().is_empty() {
-                            // Empty buffer + Backspace: hand off to the app
-                            // (e.g. a tag editor removing the last chip). Gated
-                            // on a truly-empty buffer so a Backspace at the
-                            // start of non-empty text stays an inert no-op.
-                            if let Some(handler) = self.on_backspace_empty.as_mut() {
-                                handler(ctx);
-                            }
-                        }
-                    }
-                    EventResult::Consumed
-                }
-                Key::Named(NamedKey::Delete) => {
-                    // A selection is deleted as a unit (a discrete undo step);
-                    // otherwise delete the single char to the right of the
-                    // caret (coalescing with a run of forward Deletes).
-                    if self.selection_range().is_some() {
-                        self.begin_edit(EditKind::Delete, false);
-                        self.delete_selection();
-                        self.commit_edit(EditKind::Delete, true, ctx);
-                    } else {
-                        let cursor = self.cursor.get();
-                        let len = self.value.borrow().len();
-                        if cursor < len {
-                            let next = {
-                                let v = self.value.borrow();
-                                Self::next_char_boundary(&v, cursor)
-                            };
-                            self.begin_edit(EditKind::Delete, true);
-                            self.value.borrow_mut().drain(cursor..next);
-                            self.desired_x.set(None);
-                            self.commit_edit(EditKind::Delete, false, ctx);
-                        }
-                    }
-                    EventResult::Consumed
-                }
-                Key::Named(NamedKey::ArrowLeft) => {
-                    if ctx.modifiers.shift {
-                        // Extend selection one char left.
-                        self.ensure_anchor();
-                        let cursor = self.cursor.get();
-                        if cursor > 0 {
-                            let prev = {
-                                let v = self.value.borrow();
-                                Self::prev_char_boundary(&v, cursor)
-                            };
-                            self.cursor.set(prev);
-                        }
-                    } else if let Some((lo, _hi)) = self.selection_range() {
-                        // Plain ArrowLeft with a selection collapses to its
-                        // left edge (no per-char move).
-                        self.cursor.set(lo);
-                        self.clear_selection();
-                    } else {
-                        let cursor = self.cursor.get();
-                        if cursor > 0 {
-                            let prev = {
-                                let v = self.value.borrow();
-                                Self::prev_char_boundary(&v, cursor)
-                            };
-                            self.cursor.set(prev);
-                        }
-                    }
-                    self.desired_x.set(None);
-                    self.last_edit.set(None);
-                    EventResult::Consumed
-                }
-                Key::Named(NamedKey::ArrowRight) => {
-                    if ctx.modifiers.shift {
-                        self.ensure_anchor();
-                        let cursor = self.cursor.get();
-                        let len = self.value.borrow().len();
-                        if cursor < len {
-                            let next = {
-                                let v = self.value.borrow();
-                                Self::next_char_boundary(&v, cursor)
-                            };
-                            self.cursor.set(next);
-                        }
-                    } else if let Some((_lo, hi)) = self.selection_range() {
-                        // Plain ArrowRight with a selection collapses to its
-                        // right edge.
-                        self.cursor.set(hi);
-                        self.clear_selection();
-                    } else {
-                        let cursor = self.cursor.get();
-                        let len = self.value.borrow().len();
-                        if cursor < len {
-                            let next = {
-                                let v = self.value.borrow();
-                                Self::next_char_boundary(&v, cursor)
-                            };
-                            self.cursor.set(next);
-                        }
-                    }
-                    self.desired_x.set(None);
-                    self.last_edit.set(None);
-                    EventResult::Consumed
-                }
-                Key::Named(NamedKey::ArrowUp) if self.multiline => {
-                    // Shift extends the selection; a plain vertical move drops
-                    // it. The caret relocation itself needs the text engine to
-                    // map to/from visual rows, so it's deferred to paint via
-                    // `pending_vmove` (like a click's `pending_hit`); `desired_x`
-                    // is left untouched here so a run of Up/Down keeps its
-                    // sticky column.
-                    if ctx.modifiers.shift {
-                        self.ensure_anchor();
-                    } else {
-                        self.clear_selection();
-                    }
-                    self.pending_vmove.set(self.pending_vmove.get() - 1);
-                    self.last_edit.set(None);
-                    EventResult::Consumed
-                }
-                Key::Named(NamedKey::ArrowDown) if self.multiline => {
-                    if ctx.modifiers.shift {
-                        self.ensure_anchor();
-                    } else {
-                        self.clear_selection();
-                    }
-                    self.pending_vmove.set(self.pending_vmove.get() + 1);
-                    self.last_edit.set(None);
-                    EventResult::Consumed
-                }
-                Key::Named(NamedKey::Home) => {
-                    if ctx.modifiers.shift {
-                        self.ensure_anchor();
-                    } else {
-                        self.clear_selection();
-                    }
-                    self.cursor.set(0);
-                    self.desired_x.set(None);
-                    self.last_edit.set(None);
-                    EventResult::Consumed
-                }
-                Key::Named(NamedKey::End) => {
-                    if ctx.modifiers.shift {
-                        self.ensure_anchor();
-                    } else {
-                        self.clear_selection();
-                    }
-                    self.cursor.set(self.value.borrow().len());
-                    self.desired_x.set(None);
-                    self.last_edit.set(None);
-                    EventResult::Consumed
-                }
-                Key::Named(NamedKey::Enter) => {
-                    if self.multiline {
-                        // Smart keymap (B-1 ③): with no active selection, let an
-                        // app-supplied hook turn Enter into a structural edit —
-                        // continuing a markdown list, or clearing an empty list
-                        // item — instead of a plain newline. `None` (or a
-                        // malformed edit) falls through. A selection always falls
-                        // through to the newline insert below.
-                        let smart = if self.selection_range().is_none() {
-                            self.enter_handler.as_ref().and_then(|h| {
-                                let v = self.value.borrow();
-                                h(&v, self.cursor.get())
-                            })
+                        } else if let Some((lo, _hi)) = self.selection_range() {
+                            // Plain ArrowLeft with a selection collapses to its
+                            // left edge (no per-char move).
+                            self.cursor.set(lo);
+                            self.clear_selection();
                         } else {
-                            None
-                        };
-                        let handled = match smart {
-                            Some(edit) => self.apply_key_edit(EditKind::Insert, edit, ctx),
-                            None => false,
-                        };
-                        if !handled {
-                            // Insert a newline at the cursor, replacing any
-                            // active selection first — typing over a selection
-                            // replaces it, and Enter is no exception (otherwise
-                            // the selected text survives and the newline just
-                            // piles up next to it). on_submit is intentionally
-                            // inert in multi-line mode so the field behaves like
-                            // a textarea. The replace + newline are one discrete
-                            // undo step — it doesn't merge with the typing on
-                            // either side. `begin_edit` snapshots the pre-delete
-                            // state (selection intact) so undo restores it.
-                            self.begin_edit(EditKind::Insert, false);
-                            self.delete_selection();
                             let cursor = self.cursor.get();
-                            self.value.borrow_mut().insert(cursor, '\n');
-                            self.cursor.set(cursor + 1);
-                            self.desired_x.set(None);
-                            self.commit_edit(EditKind::Insert, true, ctx);
-                        }
-                    } else if let Some(handler) = self.on_submit.as_mut() {
-                        let snapshot = self.value.borrow().clone();
-                        handler(&snapshot, ctx);
-                    }
-                    EventResult::Consumed
-                }
-                // Ctrl/Cmd+Shift+Z = redo (the mac / browser convention). This
-                // chord carries Shift, so it can't match the `is_cmd_combo` arm
-                // below — it needs its own guard ahead of it. Matched
-                // case-insensitively since the promoted char may arrive as
-                // 'z' or 'Z' depending on the platform's shift handling.
-                Key::Character(c)
-                    if is_cmd_shift_combo(ctx.modifiers) && c.eq_ignore_ascii_case(&'z') =>
-                {
-                    self.redo(ctx);
-                    EventResult::Consumed
-                }
-                // Clipboard chords arrive here as `Character` KeyDowns because
-                // the event loop promotes Ctrl/Cmd+letter out of `CharInput`.
-                // (Ctrl/Cmd+V is intercepted upstream and replayed as
-                // `CharInput`, so paste flows through the insert path and
-                // replaces any selection via `delete_selection`.)
-                Key::Character(c) if is_cmd_combo(ctx.modifiers) => {
-                    match c.to_ascii_lowercase() {
-                        'a' => {
-                            self.select_all();
-                            EventResult::Consumed
-                        }
-                        'c' => {
-                            if let Some(text) = self.selected_text() {
-                                ctx.write_clipboard(text);
+                            if cursor > 0 {
+                                let prev = {
+                                    let v = self.value.borrow();
+                                    Self::prev_char_boundary(&v, cursor)
+                                };
+                                self.cursor.set(prev);
                             }
-                            EventResult::Consumed
                         }
-                        'x' => {
-                            // Cut = copy + delete the selection (a discrete
-                            // undo step).
-                            if let Some(text) = self.selected_text() {
-                                ctx.write_clipboard(text);
-                                self.begin_edit(EditKind::Delete, false);
-                                if self.delete_selection() {
-                                    self.commit_edit(EditKind::Delete, true, ctx);
+                        self.desired_x.set(None);
+                        self.last_edit.set(None);
+                        EventResult::Consumed
+                    }
+                    Key::Named(NamedKey::ArrowRight) => {
+                        if ctx.modifiers.shift {
+                            self.ensure_anchor();
+                            let cursor = self.cursor.get();
+                            let len = self.value.borrow().len();
+                            if cursor < len {
+                                let next = {
+                                    let v = self.value.borrow();
+                                    Self::next_char_boundary(&v, cursor)
+                                };
+                                self.cursor.set(next);
+                            }
+                        } else if let Some((_lo, hi)) = self.selection_range() {
+                            // Plain ArrowRight with a selection collapses to its
+                            // right edge.
+                            self.cursor.set(hi);
+                            self.clear_selection();
+                        } else {
+                            let cursor = self.cursor.get();
+                            let len = self.value.borrow().len();
+                            if cursor < len {
+                                let next = {
+                                    let v = self.value.borrow();
+                                    Self::next_char_boundary(&v, cursor)
+                                };
+                                self.cursor.set(next);
+                            }
+                        }
+                        self.desired_x.set(None);
+                        self.last_edit.set(None);
+                        EventResult::Consumed
+                    }
+                    Key::Named(NamedKey::ArrowUp) if self.multiline => {
+                        // Shift extends the selection; a plain vertical move drops
+                        // it. The caret relocation itself needs the text engine to
+                        // map to/from visual rows, so it's deferred to paint via
+                        // `pending_vmove` (like a click's `pending_hit`); `desired_x`
+                        // is left untouched here so a run of Up/Down keeps its
+                        // sticky column.
+                        if ctx.modifiers.shift {
+                            self.ensure_anchor();
+                        } else {
+                            self.clear_selection();
+                        }
+                        self.pending_vmove.set(self.pending_vmove.get() - 1);
+                        self.last_edit.set(None);
+                        EventResult::Consumed
+                    }
+                    Key::Named(NamedKey::ArrowDown) if self.multiline => {
+                        if ctx.modifiers.shift {
+                            self.ensure_anchor();
+                        } else {
+                            self.clear_selection();
+                        }
+                        self.pending_vmove.set(self.pending_vmove.get() + 1);
+                        self.last_edit.set(None);
+                        EventResult::Consumed
+                    }
+                    Key::Named(NamedKey::Home) => {
+                        if ctx.modifiers.shift {
+                            self.ensure_anchor();
+                        } else {
+                            self.clear_selection();
+                        }
+                        self.cursor.set(0);
+                        self.desired_x.set(None);
+                        self.last_edit.set(None);
+                        EventResult::Consumed
+                    }
+                    Key::Named(NamedKey::End) => {
+                        if ctx.modifiers.shift {
+                            self.ensure_anchor();
+                        } else {
+                            self.clear_selection();
+                        }
+                        self.cursor.set(self.value.borrow().len());
+                        self.desired_x.set(None);
+                        self.last_edit.set(None);
+                        EventResult::Consumed
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        if self.multiline {
+                            // Smart keymap (B-1 ③): with no active selection, let an
+                            // app-supplied hook turn Enter into a structural edit —
+                            // continuing a markdown list, or clearing an empty list
+                            // item — instead of a plain newline. `None` (or a
+                            // malformed edit) falls through. A selection always falls
+                            // through to the newline insert below.
+                            let smart = if self.selection_range().is_none() {
+                                self.enter_handler.as_ref().and_then(|h| {
+                                    let v = self.value.borrow();
+                                    h(&v, self.cursor.get())
+                                })
+                            } else {
+                                None
+                            };
+                            let handled = match smart {
+                                Some(edit) => self.apply_key_edit(EditKind::Insert, edit, ctx),
+                                None => false,
+                            };
+                            if !handled {
+                                // Insert a newline at the cursor, replacing any
+                                // active selection first — typing over a selection
+                                // replaces it, and Enter is no exception (otherwise
+                                // the selected text survives and the newline just
+                                // piles up next to it). on_submit is intentionally
+                                // inert in multi-line mode so the field behaves like
+                                // a textarea. The replace + newline are one discrete
+                                // undo step — it doesn't merge with the typing on
+                                // either side. `begin_edit` snapshots the pre-delete
+                                // state (selection intact) so undo restores it.
+                                self.begin_edit(EditKind::Insert, false);
+                                self.delete_selection();
+                                let cursor = self.cursor.get();
+                                self.value.borrow_mut().insert(cursor, '\n');
+                                self.cursor.set(cursor + 1);
+                                self.desired_x.set(None);
+                                self.commit_edit(EditKind::Insert, true, ctx);
+                            }
+                        } else if let Some(handler) = self.on_submit.as_mut() {
+                            let snapshot = self.value.borrow().clone();
+                            handler(&snapshot, ctx);
+                        }
+                        EventResult::Consumed
+                    }
+                    // Ctrl/Cmd+Shift+Z = redo (the mac / browser convention). This
+                    // chord carries Shift, so it can't match the `is_cmd_combo` arm
+                    // below — it needs its own guard ahead of it. Matched
+                    // case-insensitively since the promoted char may arrive as
+                    // 'z' or 'Z' depending on the platform's shift handling.
+                    Key::Character(c)
+                        if is_cmd_shift_combo(ctx.modifiers) && c.eq_ignore_ascii_case(&'z') =>
+                    {
+                        self.redo(ctx);
+                        EventResult::Consumed
+                    }
+                    // Clipboard chords arrive here as `Character` KeyDowns because
+                    // the event loop promotes Ctrl/Cmd+letter out of `CharInput`.
+                    // (Ctrl/Cmd+V is intercepted upstream and replayed as
+                    // `CharInput`, so paste flows through the insert path and
+                    // replaces any selection via `delete_selection`.)
+                    Key::Character(c) if is_cmd_combo(ctx.modifiers) => {
+                        match c.to_ascii_lowercase() {
+                            'a' => {
+                                self.select_all();
+                                EventResult::Consumed
+                            }
+                            'c' => {
+                                if let Some(text) = self.selected_text() {
+                                    ctx.write_clipboard(text);
                                 }
+                                EventResult::Consumed
                             }
-                            EventResult::Consumed
+                            'x' => {
+                                // Cut = copy + delete the selection (a discrete
+                                // undo step).
+                                if let Some(text) = self.selected_text() {
+                                    ctx.write_clipboard(text);
+                                    self.begin_edit(EditKind::Delete, false);
+                                    if self.delete_selection() {
+                                        self.commit_edit(EditKind::Delete, true, ctx);
+                                    }
+                                }
+                                EventResult::Consumed
+                            }
+                            // Undo / redo. Ctrl/Cmd+Z undoes; Ctrl/Cmd+Y redoes
+                            // (the Windows convention). Ctrl/Cmd+Shift+Z also redoes
+                            // — that chord carries Shift so it can't reach this
+                            // `is_cmd_combo` arm; it's handled just above.
+                            'z' => {
+                                self.undo(ctx);
+                                EventResult::Consumed
+                            }
+                            'y' => {
+                                self.redo(ctx);
+                                EventResult::Consumed
+                            }
+                            // Other Ctrl/Cmd+letter combos aren't ours — leave
+                            // them for an app shortcut (the router already had
+                            // first refusal upstream).
+                            _ => EventResult::Ignored,
                         }
-                        // Undo / redo. Ctrl/Cmd+Z undoes; Ctrl/Cmd+Y redoes
-                        // (the Windows convention). Ctrl/Cmd+Shift+Z also redoes
-                        // — that chord carries Shift so it can't reach this
-                        // `is_cmd_combo` arm; it's handled just above.
-                        'z' => {
-                            self.undo(ctx);
-                            EventResult::Consumed
-                        }
-                        'y' => {
-                            self.redo(ctx);
-                            EventResult::Consumed
-                        }
-                        // Other Ctrl/Cmd+letter combos aren't ours — leave
-                        // them for an app shortcut (the router already had
-                        // first refusal upstream).
-                        _ => EventResult::Ignored,
                     }
+                    _ => EventResult::Ignored,
                 }
-                _ => EventResult::Ignored,
-            },
+            }
 
             _ => EventResult::Ignored,
         };
+        // A keyboard/IME edit or caret move that the field consumed while a
+        // pointer-select gesture's hit-test is still pending (events batched
+        // before a paint) must discard that gesture — otherwise the deferred
+        // click resolves against the just-edited buffer and leaves a stuck
+        // selection anchored to the moved caret. Gated on `pending_hit` so it's
+        // a no-op for ordinary typing (nothing pending) and for an already-
+        // resolved drag whose capture is legitimately still held.
+        if self.pending_hit.get().is_some()
+            && matches!(result, EventResult::Consumed)
+            && matches!(
+                event,
+                WidgetEvent::KeyDown { .. }
+                    | WidgetEvent::CharInput { .. }
+                    | WidgetEvent::ImePreedit { .. }
+            )
+        {
+            self.cancel_pending_pointer_gesture(ctx);
+        }
         // Any consumed edit / caret move should bring the caret back into view
         // on the next paint. A wheel scroll is the one consumed event that must
         // *not* (so scrolling away from the caret with the mouse sticks).
