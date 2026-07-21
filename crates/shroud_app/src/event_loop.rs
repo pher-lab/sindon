@@ -720,6 +720,7 @@ impl App {
             cursor_position: Point::new(0.0, 0.0),
             frame_hook,
             next_tick: None,
+            anim_wake_at: None,
             last_input: Instant::now(),
             last_ime_cursor_area: None,
             last_ime_allowed: None,
@@ -922,6 +923,15 @@ struct ShroudEventLoop {
     /// even when unrelated events (mouse moves, focus changes) cause
     /// extra `about_to_wait` calls.
     next_tick: Option<Instant>,
+    /// Earliest instant a widget asked to be repainted at via
+    /// [`shroud_reactive::animation::request_frame_at`], captured after the
+    /// last paint, or `None` when nothing wants a timed wake. This is the
+    /// blinking caret's toggle: `about_to_wait` parks until this deadline and
+    /// then requests one redraw, instead of pumping at frame rate the way an
+    /// in-flight `Animated` (which votes via `frame_requested`) does. Cleared
+    /// once the deadline fires; the repaint it triggers re-votes if the caret
+    /// is still blinking.
+    anim_wake_at: Option<Instant>,
     /// Timestamp of the most recent user input event (key, mouse
     /// move/click, scroll, IME). Read by the frame-hook tick to compute
     /// [`FrameContext::idle`], the basis for inactivity timers like an
@@ -1179,6 +1189,21 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         // whenever the next keystroke or tick happens to rescue it — Windows
         // swallows the WM_PAINT while the IME opens its composition window.
         let mut wake_at = self.next_tick;
+
+        // Caret-blink / timed-wake: park until the voted toggle deadline, then
+        // ask for a single repaint. If it's already due, request the redraw
+        // now and clear it — the paint that follows re-votes the *next* toggle
+        // (or, once the field blurs, votes nothing and the loop idles). Same
+        // "ask again from inside about_to_wait" shape as the watchdog below.
+        if let Some(at) = self.anim_wake_at {
+            if Instant::now() >= at {
+                self.anim_wake_at = None;
+                self.request_redraw();
+            } else {
+                wake_at = Some(wake_at.map_or(at, |t| t.min(at)));
+            }
+        }
+
         if let Some(since) = self.redraw_pending_since.get() {
             let mut deadline = since + REDRAW_WATCHDOG;
             if Instant::now() >= deadline {
@@ -1250,6 +1275,17 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         if let Some(theme) = platform_window.system_theme() {
             system_theme_signal().set(Some(theme));
         }
+
+        // Publish the OS caret-blink preference so focused text fields blink at
+        // the system rate — and hold solid when the user turned blinking off
+        // (an accessibility choice). No-op if the app set its own policy via
+        // `set_caret_blink`. Read once here, like the theme snapshot above; the
+        // rate rarely changes mid-session and isn't a winit event.
+        let caret_blink = match shroud_platform::caret_blink_time() {
+            Some(interval) => shroud_widgets::caret::CaretBlink::Interval(interval),
+            None => shroud_widgets::caret::CaretBlink::Off,
+        };
+        shroud_widgets::caret::set_caret_blink_from_system(caret_blink);
 
         let window_arc = platform_window.arc();
 
@@ -1794,6 +1830,12 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 if shroud_reactive::animation::frame_requested() {
                     self.request_redraw();
                 }
+
+                // Capture any *timed* wake voted this paint (the caret's next
+                // blink toggle). Unlike the flag above we don't redraw now —
+                // `about_to_wait` parks until the deadline and repaints then,
+                // so a blinking caret costs two frames a second, not sixty.
+                self.anim_wake_at = shroud_reactive::animation::frame_deadline();
             }
 
             _ => {}

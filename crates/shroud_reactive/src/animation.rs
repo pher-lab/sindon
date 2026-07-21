@@ -49,6 +49,16 @@ thread_local! {
     /// event-loop thread, like `system_theme_signal`.
     static FRAME_REQUESTED: Cell<bool> = const { Cell::new(false) };
 
+    /// The earliest instant a widget has asked to be repainted at, or `None`
+    /// when nothing wants a *timed* wake. Unlike [`FRAME_REQUESTED`] (which
+    /// asks for the very next vsync and, left set, busy-pumps at frame rate),
+    /// this parks the loop until a specific deadline and fires once — the
+    /// blinking text caret's toggle, say, which needs a repaint twice a second,
+    /// not sixty times. The event loop folds this into its wait deadline and
+    /// requests a redraw when it arrives. Reset each frame alongside
+    /// `FRAME_REQUESTED`; a still-pending timed wake re-votes during paint.
+    static FRAME_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+
     /// When `Some`, animations read this instead of the wall clock. Only
     /// [`test_clock`] ever sets it; in a real app it stays `None` for the
     /// process's life and [`now`] is just `Instant::now`. Thread-local for
@@ -61,7 +71,11 @@ thread_local! {
 /// frozen it via [`test_clock`]. Every read of "what time is it" in this
 /// module goes through here — that's what makes a frozen clock total rather
 /// than partial.
-fn now() -> Instant {
+///
+/// Public so widgets that drive their own time-based repaint (the caret's
+/// blink phase) read the *same* clock the animation system does, which is what
+/// lets [`test_clock::freeze`] pin their behaviour in a test too.
+pub fn now() -> Instant {
     CLOCK_OVERRIDE
         .with(|c| c.get())
         .unwrap_or_else(Instant::now)
@@ -157,10 +171,29 @@ pub fn request_frame() {
     FRAME_REQUESTED.with(|f| f.set(true));
 }
 
-/// Clear the per-frame animation vote. The event loop calls this immediately
-/// before laying out / painting a frame.
+/// Ask to be repainted at (no later than) `at`, without pinning the loop at
+/// frame rate in the meantime. Only the earliest outstanding deadline is kept,
+/// so many voters collapse to one wake. Used by widgets whose repaint is
+/// time-driven but sparse — the caret's blink toggle. Prefer this over
+/// [`request_frame`] whenever the next repaint is at a *known* future instant
+/// rather than "as soon as possible": `request_frame` left set re-votes every
+/// frame and never lets the loop sleep.
+pub fn request_frame_at(at: Instant) {
+    FRAME_DEADLINE.with(|d| {
+        let next = match d.get() {
+            Some(existing) => existing.min(at),
+            None => at,
+        };
+        d.set(Some(next));
+    });
+}
+
+/// Clear the per-frame animation votes (both the next-frame flag and any timed
+/// wake deadline). The event loop calls this immediately before laying out /
+/// painting a frame; anything still in flight re-votes during that paint.
 pub fn reset_frame_request() {
     FRAME_REQUESTED.with(|f| f.set(false));
+    FRAME_DEADLINE.with(|d| d.set(None));
 }
 
 /// Whether any animation voted for another frame since the last
@@ -168,6 +201,14 @@ pub fn reset_frame_request() {
 /// schedules a redraw when it returns `true`.
 pub fn frame_requested() -> bool {
     FRAME_REQUESTED.with(|f| f.get())
+}
+
+/// The earliest timed-wake deadline voted via [`request_frame_at`] since the
+/// last [`reset_frame_request`], or `None`. The event loop reads this after
+/// painting and parks until (at most) this instant, then repaints — giving the
+/// caret its blink toggle without a frame-rate busy loop.
+pub fn frame_deadline() -> Option<Instant> {
+    FRAME_DEADLINE.with(|d| d.get())
 }
 
 /// An easing curve mapping linear progress `t ∈ [0, 1]` to eased progress.
@@ -381,6 +422,42 @@ mod tests {
             !frame_requested(),
             "a settled animation must not request a frame"
         );
+    }
+
+    #[test]
+    fn timed_wake_keeps_only_the_earliest_deadline() {
+        reset_frame_request();
+        assert_eq!(frame_deadline(), None, "reset clears any pending deadline");
+
+        let base = Instant::now();
+        let later = base + Duration::from_millis(500);
+        let sooner = base + Duration::from_millis(200);
+
+        request_frame_at(later);
+        assert_eq!(frame_deadline(), Some(later));
+
+        // A sooner vote wins; a later one does not push the wake out.
+        request_frame_at(sooner);
+        assert_eq!(frame_deadline(), Some(sooner));
+        request_frame_at(later);
+        assert_eq!(
+            frame_deadline(),
+            Some(sooner),
+            "a later vote must not delay an already-earlier wake"
+        );
+    }
+
+    #[test]
+    fn timed_wake_is_independent_of_the_next_frame_flag() {
+        reset_frame_request();
+        // Asking for a timed wake must not also assert "repaint immediately" —
+        // that's the whole point of not busy-pumping between blinks.
+        request_frame_at(Instant::now() + Duration::from_millis(500));
+        assert!(!frame_requested(), "a timed wake is not a next-frame vote");
+        assert!(frame_deadline().is_some());
+
+        reset_frame_request();
+        assert_eq!(frame_deadline(), None);
     }
 
     #[test]

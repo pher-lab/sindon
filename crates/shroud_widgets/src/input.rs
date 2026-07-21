@@ -43,11 +43,13 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+use crate::caret::{self, CaretBlink};
 use crate::event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
 use shroud_core::{AccessNode, AccessRole, Color, FocusIndicator, Point, Rect};
 use shroud_layout::FlexStyle;
+use shroud_reactive::animation;
 use shroud_reactive::{Animated, Easing, Reactive, Signal};
 use shroud_text::{FontWeight, TextAttrs, TextSpan};
 use zeroize::Zeroizing;
@@ -664,6 +666,18 @@ pub struct Input {
     /// `cursor + preedit_cursor.start`, so it tracks the composition's own
     /// cursor rather than jumping to the end of the preedit.
     preedit_cursor: Option<(usize, usize)>,
+    /// When the caret's current *solid* blink phase began. Reset to "now"
+    /// whenever [`blink_sig`](Self::blink_sig) changes between paints — any
+    /// keystroke, arrow, or click — so the caret stays solid while you type and
+    /// only resumes blinking after a pause. `None` until the first focused
+    /// paint; fed to [`caret::blink_phase`](crate::caret::blink_phase).
+    blink_ref: Cell<Option<Instant>>,
+    /// Caret state at the last focused paint — `(cursor, selection anchor,
+    /// buffer len)`. When it differs from the current paint the caret moved or
+    /// the text changed (the user is active), which resets the blink phase.
+    /// Cleared to `None` on focus loss so the next focus opens a fresh solid
+    /// phase rather than inheriting a stale mid-blink reference.
+    blink_sig: Cell<Option<(usize, Option<usize>, usize)>>,
 }
 
 impl Input {
@@ -722,6 +736,8 @@ impl Input {
             fixed_height: None,
             preedit: String::new(),
             preedit_cursor: None,
+            blink_ref: Cell::new(None),
+            blink_sig: Cell::new(None),
         }
     }
 
@@ -2347,6 +2363,38 @@ impl Widget for Input {
         // caret instead of defaulting to a screen corner; the active offset folds
         // the scroll into the reported (window-relative) rect automatically.
         if let Some((cx, cy)) = caret_xy {
+            // Blink phase. Held solid while composing (you're mid-keystroke via
+            // the IME); otherwise the phase resets whenever the caret moved or
+            // the text changed since the last paint — so it stays solid while
+            // you type and only blinks after a pause — then we read on/off and
+            // vote the next toggle as a timed wake. This gates only whether the
+            // fill is emitted; the geometry and the IME cursor-area report below
+            // are unchanged.
+            let caret_visible = match caret::caret_blink() {
+                CaretBlink::Off => true,
+                CaretBlink::Interval(_) if composing => {
+                    // Force a fresh solid phase once composition ends.
+                    self.blink_sig.set(None);
+                    true
+                }
+                CaretBlink::Interval(interval) => {
+                    let now = animation::now();
+                    let sig = (
+                        self.cursor.get(),
+                        self.selection_anchor.get(),
+                        self.value.borrow().len(),
+                    );
+                    if self.blink_sig.get() != Some(sig) {
+                        self.blink_ref.set(Some(now));
+                        self.blink_sig.set(Some(sig));
+                    }
+                    let reference = self.blink_ref.get().unwrap_or(now);
+                    let (visible, next) = caret::blink_phase(reference, now, interval);
+                    animation::request_frame_at(next);
+                    visible
+                }
+            };
+
             let caret_w = ctx.snap_device_px(CARET_WIDTH);
             // Centre the caret on the insertion point, then snap it to the
             // device-pixel grid. Two separate defects fed the "caret sticks to
@@ -2375,7 +2423,9 @@ impl Widget for Input {
             let center_left = (text_x + cx - caret_w / 2.0).max(text_x);
             let caret_x = ctx.snap_device_px(center_left + ox) - ox;
             let caret = Rect::new(caret_x, text_y + cy, caret_w, font_size);
-            ctx.fill_rect(caret, text_color);
+            if caret_visible {
+                ctx.fill_rect(caret, text_color);
+            }
             // Report the cursor area to the OS. While composing, extend it down
             // past the preedit's underline (which sits at the line bottom,
             // `line_height` below the caret top) plus a small gap, so the OS
@@ -2546,6 +2596,9 @@ impl Widget for Input {
 
             WidgetEvent::FocusLost => {
                 self.focused = false;
+                // Drop the blink signature so the next focus opens a fresh
+                // solid phase instead of inheriting a stale mid-blink reference.
+                self.blink_sig.set(None);
                 // Releasing focus mid-drag (e.g. programmatic refocus) ends the
                 // drag; drop the capture too so it can't outlive the selection.
                 if self.selecting.replace(false) {
