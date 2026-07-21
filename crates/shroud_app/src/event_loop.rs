@@ -1592,10 +1592,18 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             // path. See `translate_ime` for the full mapping.
             WindowEvent::Ime(ime) => {
                 if self.perf_log.is_some() {
-                    // Length only — the perf log must never carry preedit or
-                    // committed text (it may be the user's plaintext).
+                    // Lengths and byte offsets only — the perf log must never
+                    // carry preedit or committed text (it may be the user's
+                    // plaintext). The cursor range is what lets a scripted key
+                    // sequence reveal an IME's clause state machine from the
+                    // log alone, no visible caret needed.
                     let desc = match &ime {
-                        Ime::Preedit(s, _) => format!("preedit({})", s.chars().count()),
+                        Ime::Preedit(s, Some((a, b))) => {
+                            format!("preedit({},{a}..{b})", s.chars().count())
+                        }
+                        Ime::Preedit(s, None) => {
+                            format!("preedit({},none)", s.chars().count())
+                        }
                         Ime::Commit(s) => format!("commit({})", s.chars().count()),
                         Ime::Enabled => "ime-on".to_string(),
                         Ime::Disabled => "ime-off".to_string(),
