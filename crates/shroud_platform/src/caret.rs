@@ -5,7 +5,7 @@
 //! honour rather than override. `shroud_app` reads this once at startup and
 //! publishes it to the widget layer; widgets never call it directly.
 //!
-//! Like [`system_locale`](crate::system_locale) this is a one-shot snapshot.
+//! Like `system_locale` this is a one-shot snapshot.
 //! The preference can change while the process runs (the Control Panel keyboard
 //! slider), but that's rare and isn't surfaced as a winit event, so live
 //! updates are out of scope — re-query at app start if a fresher value matters.
