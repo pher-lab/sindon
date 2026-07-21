@@ -6966,6 +6966,104 @@ fn rebuild_mid_drag_defers_hover_resync_until_the_drag_releases() {
     );
 }
 
+// ── hover follows content that scrolls under a stationary cursor ──
+//
+// The sidebar case: rest the pointer on a note row, spin the wheel, and a
+// *different* row glides under the unmoved cursor. Hover is otherwise only
+// recomputed from a live `MouseMove`, so the originally-lit row stayed lit
+// until the user nudged the mouse. A glide moves the *content*, not the tree,
+// so neither the layer-pop nor the removal trigger fires — the scroll view
+// now arms the same `resync_hover` from `sync_scroll_view_content_heights`
+// whenever its eased offset shifts.
+
+/// A ScrollView tall enough to scroll, holding three stacked 40px probe rows.
+/// Returns (tree, [p0, p1, p2], events).
+fn scroll_probe_column() -> (WidgetTree, [usize; 3], Rc<RefCell<Vec<String>>>) {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(
+        ScrollView::new()
+            .width(200.0)
+            .height(100.0)
+            .content_height(1000.0)
+            // Instant glide so the settled offset — hence which row lands under
+            // the cursor — is deterministic without having to drive a clock.
+            .scroll_transition(std::time::Duration::ZERO),
+    );
+    let p0 = tree.add_child(root, HoverProbe::new("p0", events.clone()));
+    let p1 = tree.add_child(root, HoverProbe::new("p1", events.clone()));
+    let p2 = tree.add_child(root, HoverProbe::new("p2", events.clone()));
+    tree.compute_layout(200.0, 200.0);
+    (tree, [p0, p1, p2], events)
+}
+
+#[test]
+fn scroll_relights_the_row_that_glides_under_a_stationary_cursor() {
+    let (mut tree, [p0, p1, _p2], events) = scroll_probe_column();
+    let mut ev = EventContext::new();
+
+    // Rest the pointer 20px into the first row.
+    let cursor = Point::new(20.0, 20.0);
+    tree.dispatch_event(&WidgetEvent::MouseMove { position: cursor }, &mut ev);
+    assert_eq!(tree.hovered(), Some(p0));
+    assert_eq!(*events.borrow(), vec!["p0:enter".to_string()]);
+    events.borrow_mut().clear();
+
+    // Wheel down by one row. The Scroll carries the *same* cursor the event
+    // loop passes (the pointer never moved), so `last_pointer_pos` stays put —
+    // it is the content that slides, by 40px, bringing the second row up.
+    tree.dispatch_event(
+        &WidgetEvent::Scroll {
+            position: cursor,
+            delta_x: 0.0,
+            delta_y: -40.0,
+        },
+        &mut ev,
+    );
+
+    // The frame tail the event loop runs: lay out (the sync pass notices the
+    // offset moved and arms the resync), then resync.
+    tree.compute_layout(200.0, 200.0);
+    let changed = tree.resync_hover(&mut ev);
+
+    assert!(changed, "the row under the cursor changed");
+    assert_eq!(tree.hovered(), Some(p1), "the second row glided under it");
+    assert_eq!(
+        *events.borrow(),
+        vec!["p0:leave".to_string(), "p1:enter".to_string()],
+        "the first row let go and the second lit up with no mouse move"
+    );
+}
+
+#[test]
+fn a_scroll_that_moves_nothing_leaves_hover_alone() {
+    // Already at the top: a wheel-up clamps to a no-op, so the eased offset
+    // never moves and hover must not be disturbed. Guards that the resync keys
+    // off actual content movement, not merely the arrival of a wheel event.
+    let (mut tree, [p0, _p1, _p2], events) = scroll_probe_column();
+    let mut ev = EventContext::new();
+
+    let cursor = Point::new(20.0, 20.0);
+    tree.dispatch_event(&WidgetEvent::MouseMove { position: cursor }, &mut ev);
+    assert_eq!(tree.hovered(), Some(p0));
+    events.borrow_mut().clear();
+
+    tree.dispatch_event(
+        &WidgetEvent::Scroll {
+            position: cursor,
+            delta_x: 0.0,
+            delta_y: 40.0, // scroll up past the top → clamped, no movement
+        },
+        &mut ev,
+    );
+    tree.compute_layout(200.0, 200.0);
+    let changed = tree.resync_hover(&mut ev);
+
+    assert!(!changed, "a clamped scroll moved no content");
+    assert_eq!(tree.hovered(), Some(p0), "hover stayed on the first row");
+    assert!(events.borrow().is_empty(), "no spurious enter/leave");
+}
+
 // ── Input: multi-line (Phase 25, A-2) ────────────────────────────
 
 /// Build a 400×300 tree, install a single Input as the root's only child,

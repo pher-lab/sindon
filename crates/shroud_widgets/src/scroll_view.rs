@@ -41,6 +41,11 @@ pub struct ScrollView {
     scroll_anim: Option<Animated<f32>>,
     /// Glide duration for wheel scrolling. `Duration::ZERO` = instant.
     scroll_transition: Duration,
+    /// The eased offset as of the last [`Self::take_scroll_moved`] call. Lets
+    /// the tree notice content sliding under a stationary cursor (a wheel
+    /// glide) so it can replay the hover hit-test — hover is otherwise only
+    /// ever recomputed from a live `MouseMove`. Starts at the resting 0.
+    last_seen_displayed: f32,
     /// Caller-pinned content height. `None` means "auto" — the widget tree
     /// writes the laid-out children's max bottom into [`Self::auto_content_height`]
     /// after each layout pass and that value is used for scroll clamp /
@@ -71,6 +76,7 @@ impl ScrollView {
         Self {
             scroll_anim: None,
             scroll_transition: SCROLL_TRANSITION_DEFAULT,
+            last_seen_displayed: 0.0,
             explicit_content_height: None,
             auto_content_height: 0.0,
             // A scroll container must declare `overflow: hidden` so flex
@@ -290,6 +296,27 @@ impl ScrollView {
                 a.snap(max);
             }
         }
+    }
+
+    /// Whether the eased offset moved since the previous call, latching the
+    /// new value. The tree polls this once per layout pass (see
+    /// `WidgetTree::sync_scroll_view_content_heights`): a wheel glide slides
+    /// the content under a stationary cursor with no `MouseMove` to refresh
+    /// hover, so a move here asks the tree to replay the hover hit-test — the
+    /// same "geometry shifted under a still cursor" case a layer pop or a
+    /// self-rebuild already handle.
+    ///
+    /// Comparing the displayed delta (rather than the animator's
+    /// `is_animating`) catches the settling frame too — the one where the
+    /// offset lands exactly on its target, which reads as already settled —
+    /// and falls silent the instant the content comes to rest, so a view at
+    /// anchor reports nothing and adds no per-frame work. Call it after
+    /// [`Self::clamp_scroll`] so a re-clamp snap counts as the move it is.
+    pub(crate) fn take_scroll_moved(&mut self) -> bool {
+        let cur = self.displayed_scroll();
+        let moved = cur != self.last_seen_displayed;
+        self.last_seen_displayed = cur;
+        moved
     }
 }
 

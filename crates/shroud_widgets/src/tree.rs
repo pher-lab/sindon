@@ -69,13 +69,14 @@ pub struct WidgetTree {
     /// [`Self::resync_hover`] can re-resolve it after the tree changes
     /// underneath a stationary cursor. `None` until the first pointer event.
     last_pointer_pos: Option<Point>,
-    /// Set when a layer pops or [`Self::remove`] tombstones the hovered
-    /// widget, consumed by [`Self::resync_hover`] on the next frame. Both
-    /// can leave a widget sitting directly under a cursor that never moves
-    /// afterwards — dismissing a menu by clicking a button behind it, or a
-    /// button that rebuilds its own list and is replaced in place — and
-    /// without a resync that widget stays un-hovered until the user jiggles
-    /// the mouse.
+    /// Set when a layer pops, [`Self::remove`] tombstones the hovered widget,
+    /// or a scroll view's eased offset glides content under the cursor,
+    /// consumed by [`Self::resync_hover`] on the next frame. All three can
+    /// leave a *different* widget sitting directly under a cursor that never
+    /// moves afterwards — dismissing a menu by clicking a button behind it, a
+    /// button that rebuilds its own list and is replaced in place, or a wheel
+    /// scroll that slides a fresh row under the pointer — and without a resync
+    /// that widget stays un-hovered until the user jiggles the mouse.
     hover_dirty: bool,
     /// Widget that has captured the pointer (e.g. an `Input` mid drag-select).
     /// While `Some`, `MouseMove` / `MouseUp` are routed directly to it,
@@ -1315,6 +1316,11 @@ impl WidgetTree {
             })
             .collect();
 
+        // Set once any scroll view's eased offset moved this pass, so the
+        // hover hit-test is replayed below: a wheel glide slides content under
+        // a stationary cursor with no `MouseMove` to refresh hover.
+        let mut scroll_moved = false;
+
         for sv_idx in candidates {
             let Some(node) = self.node(sv_idx) else {
                 continue;
@@ -1351,7 +1357,19 @@ impl WidgetTree {
                 // a now-too-large offset back so the top isn't scrolled out of
                 // view. Growing content leaves the offset alone.
                 sv.clamp_scroll(viewport_h);
+                // Poll after the clamp so a re-clamp snap counts as movement.
+                scroll_moved |= sv.take_scroll_moved();
             }
+        }
+
+        // A glide (or a clamp snap) shifted content under a cursor that never
+        // moved. Ask the next `resync_hover` to replay the hit-test, the same
+        // way a layer pop or a self-rebuild does — hover is purely geometric,
+        // so the replay re-derives it from `last_pointer_pos` alone. Deferred
+        // under a pointer capture and skipped before the first pointer event,
+        // both handled inside `resync_hover`.
+        if scroll_moved {
+            self.hover_dirty = true;
         }
     }
 
@@ -2519,19 +2537,23 @@ impl WidgetTree {
     /// emitting the `MouseLeave` / `MouseEnter` a real `MouseMove` would have.
     /// Returns `true` when the hover chain actually changed.
     ///
-    /// A no-op unless a layer popped or the hovered widget was removed since
-    /// the last call. `hovered` is normally only ever updated from a live
-    /// `MouseMove`, which leaves a hole: dismissing a menu re-exposes whatever
-    /// sits under the cursor, but if the cursor does not then move, nothing
-    /// tells that widget it is hovered. It is most visible when the dismiss
-    /// *is* the click on another button — the outside-click path swallows that
-    /// press, so the button under the pointer receives neither the click nor a
-    /// hover until the mouse jiggles.
+    /// A no-op unless a layer popped, the hovered widget was removed, or a
+    /// scroll view glided content under the cursor since the last call.
+    /// `hovered` is normally only ever updated from a live `MouseMove`, which
+    /// leaves a hole: dismissing a menu re-exposes whatever sits under the
+    /// cursor, but if the cursor does not then move, nothing tells that widget
+    /// it is hovered. It is most visible when the dismiss *is* the click on
+    /// another button — the outside-click path swallows that press, so the
+    /// button under the pointer receives neither the click nor a hover until
+    /// the mouse jiggles.
     ///
     /// Removal is the same hole reached from the other side: a button whose
     /// handler rebuilds the list it lives in activates itself out of
     /// existence, and the replacement lands under the unmoved cursor with no
-    /// `MouseMove` to light it. Hover is purely geometric, so unlike the
+    /// `MouseMove` to light it. A wheel scroll is the same hole again: the
+    /// content, not the tree, is what moved, sliding a different row under the
+    /// still pointer (see `sync_scroll_view_content_heights`, which arms the
+    /// resync each gliding frame). Hover is purely geometric, so unlike the
     /// focus counterpart this needs nothing from the builder — the replay
     /// re-derives it from the cursor position alone.
     ///
