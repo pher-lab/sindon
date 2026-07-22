@@ -110,6 +110,16 @@ impl ScrollView {
         self
     }
 
+    /// Pin the content extent at runtime. Used by
+    /// [`VirtualList`](crate::VirtualList), which knows the full logical height
+    /// (item count × row height) even though only a window of rows is
+    /// materialized, so the auto-measured height (a screenful) would be wrong.
+    /// Wins over the auto-measured value, same as the [`Self::content_height`]
+    /// builder.
+    pub(crate) fn set_pinned_content_height(&mut self, h: f32) {
+        self.explicit_content_height = Some(h);
+    }
+
     /// Effective content extent — explicit value if set, otherwise the value
     /// the tree wrote after the last layout pass.
     fn effective_content_height(&self) -> f32 {

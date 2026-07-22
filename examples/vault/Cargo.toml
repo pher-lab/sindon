@@ -1,0 +1,22 @@
+[package]
+name = "vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# The framework under test. This example is shroud's *second* grounding app
+# (after Knot): a credential vault exercises the "collection shape" of secret —
+# many small, high-churn secrets you copy without revealing — which Knot's
+# few-large-documents shape never forced. Its release-blocking demand is list
+# virtualization, which this example is built to drive into the framework.
+shroud = { path = "../../crates/shroud" }
+# Same secret-handling chain Knot uses. Argon2id derives the key from the
+# master password; XChaCha/ChaCha seals each entry's secret payload.
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+zeroize = { workspace = true }
+# NOTE: SQLCipher persistence (rusqlite, bundled-sqlcipher-vendored-openssl)
+# is added in a later milestone so the slow cold build stays out of the
+# UI + VirtualList iteration loop. Until then the vault seeds in memory.
