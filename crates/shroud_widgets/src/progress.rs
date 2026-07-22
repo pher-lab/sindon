@@ -125,8 +125,8 @@ impl ProgressBar {
     }
 
     /// An indeterminate bar — a segment sweeps the track to signal ongoing work
-    /// of unknown duration. Animates continuously while visible (see the [module
-    /// docs](self)); reports no numeric value to assistive technology.
+    /// of unknown duration. Animates continuously while visible (see the module
+    /// docs); reports no numeric value to assistive technology.
     pub fn indeterminate() -> Self {
         Self {
             value: None,
@@ -259,7 +259,7 @@ const SPINNER_RING_FRAC: f32 = 0.36;
 ///
 /// Built entirely from filled discs (no arc / path primitive needed), so it
 /// rides on the same rounded-rect fill every other widget uses. Animates
-/// continuously while visible (see the [module docs](self)).
+/// continuously while visible (see the module docs).
 ///
 /// # Example (conceptual)
 /// ```ignore
@@ -275,7 +275,7 @@ pub struct Spinner {
 }
 
 impl Spinner {
-    /// A spinner at the default diameter ([`SPINNER_SIZE`]).
+    /// A spinner at the default diameter (`SPINNER_SIZE`).
     pub fn new() -> Self {
         Self {
             size: SPINNER_SIZE,

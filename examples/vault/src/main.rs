@@ -5,9 +5,9 @@
 //! place. A credential vault is the opposite secret shape: *many small,
 //! high-churn* secrets you copy without ever revealing. That shape is what
 //! forced the one release-blocking framework gap Knot never did — a plain
-//! [`ScrollView`](shroud::widgets::ScrollView) instantiates *all* its children,
+//! [`ScrollView`] instantiates *all* its children,
 //! so a vault of hundreds of entries lays out every row every frame. The list
-//! here is a [`VirtualList`](shroud::widgets::VirtualList), which materializes
+//! here is a [`VirtualList`], which materializes
 //! only the visible window; `VAULT_PLAIN=1` switches back to the plain
 //! `ScrollView` as an A/B baseline (run either with `SHROUD_PERF=1` to feel it).
 //!

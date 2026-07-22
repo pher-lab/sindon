@@ -103,7 +103,7 @@ impl VirtualList {
     }
 
     /// Extra rows kept materialized above and below the viewport so a small
-    /// scroll doesn't rebuild. Defaults to [`DEFAULT_OVERSCAN`].
+    /// scroll doesn't rebuild. Defaults to 4 rows.
     pub fn overscan(mut self, rows: usize) -> Self {
         self.overscan = rows;
         self
