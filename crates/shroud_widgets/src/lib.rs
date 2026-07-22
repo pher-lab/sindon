@@ -33,6 +33,7 @@ mod switch;
 mod text;
 pub mod toast;
 pub mod tree;
+mod tree_view;
 mod widget;
 
 pub use accessibility::{
@@ -66,4 +67,5 @@ pub use switch::Switch;
 pub use text::TextWidget;
 pub use toast::{ToastHost, ToastId, ToastKind};
 pub use tree::WidgetTree;
+pub use tree_view::{TreeItem, TreeView};
 pub use widget::{MeasureContext, Widget};
