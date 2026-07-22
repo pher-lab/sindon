@@ -47,7 +47,7 @@ use crate::caret::{self, CaretBlink};
 use crate::event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{AccessNode, AccessRole, Color, FocusIndicator, Point, Rect};
+use shroud_core::{AccessNode, AccessRole, Color, FocusIndicator, Lerp, Point, Rect};
 use shroud_layout::FlexStyle;
 use shroud_reactive::animation;
 use shroud_reactive::{Animated, Easing, Reactive, Signal};
@@ -221,6 +221,18 @@ const SCROLLBAR_LANE: f32 = SCROLLBAR_WIDTH + SCROLLBAR_INSET;
 /// `ScrollView`'s default (FW-7) so the two scroll surfaces feel identical;
 /// caret-reveal and re-clamp bypass it via `Animated::snap`.
 const SCROLL_TRANSITION: Duration = Duration::from_millis(120);
+
+/// Scrollbar track + thumb geometry for the multi-line viewport, produced by
+/// [`Input::scrollbar_geom`]. `travel` is the vertical range the thumb top spans
+/// (`viewport_h − thumb_h`); `max_scroll` is the matching content-offset range,
+/// so `offset = (thumb_top / travel) · max_scroll`. Mirrors `ScrollView`'s
+/// `ScrollbarGeom` so the two scroll surfaces are hit-tested by one rule.
+struct InputScrollbarGeom {
+    track_rect: Rect,
+    thumb_rect: Rect,
+    travel: f32,
+    max_scroll: f32,
+}
 
 /// Logical width of the text caret. Rounded to a whole number of physical
 /// pixels at paint (see the caret draw) so both edges land on the device grid
@@ -703,6 +715,19 @@ pub struct Input {
     /// loss so the next focus opens a fresh solid phase rather than inheriting a
     /// stale mid-blink reference.
     blink_sig: Cell<Option<BlinkSig>>,
+    /// A scrollbar-thumb drag in flight (multi-line only). `Some(grab_dy)` holds
+    /// the offset between the cursor and the thumb's top edge at the press, so
+    /// the thumb stays anchored under the grab point as the pointer moves;
+    /// `None` = not dragging. Independent of hover so a captured drag survives
+    /// the cursor leaving the bar — mirrors [`ScrollView`](crate::ScrollView)'s
+    /// `dragging`. A plain field (not a `Cell`): only `event` (`&mut self`) sets
+    /// it, and `paint` reads it through `&self` for the brighten cue.
+    scroll_dragging: Option<f32>,
+    /// The cursor is over the scrollbar thumb's grab band. Purely a paint cue —
+    /// the thumb brightens on hover. Recomputed each `MouseMove`, cleared on
+    /// `MouseLeave`. Every pointer move already forces a repaint, so no explicit
+    /// redraw request is needed.
+    scrollbar_hovered: bool,
 }
 
 impl Input {
@@ -765,6 +790,8 @@ impl Input {
             preedit_gen: 0,
             blink_ref: Cell::new(None),
             blink_sig: Cell::new(None),
+            scroll_dragging: None,
+            scrollbar_hovered: false,
         }
     }
 
@@ -1720,6 +1747,78 @@ impl Input {
             }
         }
     }
+
+    /// Pure scrollbar geometry from already-resolved viewport metrics. The one
+    /// formula shared by `paint` (which passes the freshly-shaped values) and
+    /// event hit-testing (which passes the cached [`last_max_scroll`]), so the
+    /// bar the user sees and the band they can grab are positioned by a single
+    /// rule — the same paint/hit-test contract the caret and the inner scroll
+    /// hold. `None` when nothing overflows (no bar to draw or grab). The thumb
+    /// rides the *displayed* (eased) offset so it glides with the text.
+    ///
+    /// [`last_max_scroll`]: Self::last_max_scroll
+    fn scrollbar_geom(
+        layout: Rect,
+        pad_y: f32,
+        viewport_h: f32,
+        max_scroll: f32,
+        displayed: f32,
+    ) -> Option<InputScrollbarGeom> {
+        if max_scroll <= 0.0 || viewport_h <= 0.0 {
+            return None;
+        }
+        let content_h = viewport_h + max_scroll;
+        // Keep the `- 1.0` border inset so the bar sits just inside the stroke,
+        // exactly as the paint block did before this was factored out.
+        let track_x = layout.right() - 1.0 - SCROLLBAR_WIDTH - SCROLLBAR_INSET;
+        let track_top = layout.origin.y + pad_y;
+        let thumb_h = ((viewport_h / content_h) * viewport_h)
+            .max(SCROLLBAR_THUMB_MIN)
+            .min(viewport_h);
+        let travel = viewport_h - thumb_h;
+        let progress = (displayed / max_scroll).clamp(0.0, 1.0);
+        let thumb_y = track_top + progress * travel;
+        Some(InputScrollbarGeom {
+            track_rect: Rect::new(track_x, track_top, SCROLLBAR_WIDTH, viewport_h),
+            thumb_rect: Rect::new(track_x, thumb_y, SCROLLBAR_WIDTH, thumb_h),
+            travel,
+            max_scroll,
+        })
+    }
+
+    /// Event-side scrollbar geometry, reconstructed from the cached metrics
+    /// (`event` has no text engine to re-measure). `viewport_h` derives from the
+    /// layout; `max_scroll` is the bound the last paint stored; the offset is the
+    /// current displayed (eased) value. Paint re-clamps authoritatively, so a
+    /// one-frame-stale bound is safe — the same contract the wheel handler and
+    /// `ScrollView`'s stored content height already rely on. `None` for a
+    /// single-line field or when nothing overflows.
+    fn scrollbar_geom_cached(&self, layout: Rect) -> Option<InputScrollbarGeom> {
+        if !self.multiline {
+            return None;
+        }
+        let viewport_h = (layout.size.height - 2.0 * self.pad_y).max(0.0);
+        Self::scrollbar_geom(
+            layout,
+            self.pad_y,
+            viewport_h,
+            self.last_max_scroll.get(),
+            self.scroll_anim.get(),
+        )
+    }
+
+    /// Map a cursor y (viewport space) to a scroll offset and snap to it, so the
+    /// thumb top lands at `cursor_y − grab_dy`. The 1:1 tracking path for a thumb
+    /// drag — it snaps (not eases) so the thumb can't lag the cursor, matching
+    /// `ScrollView`; a no-op when there is no room to scroll.
+    fn scrollbar_drag_to(&self, cursor_y: f32, grab_dy: f32, geom: &InputScrollbarGeom) {
+        if geom.travel <= 0.0 || geom.max_scroll <= 0.0 {
+            return;
+        }
+        let thumb_top = cursor_y - grab_dy;
+        let progress = ((thumb_top - geom.track_rect.origin.y) / geom.travel).clamp(0.0, 1.0);
+        self.scroll_anim.snap(progress * geom.max_scroll);
+    }
 }
 
 impl Default for Input {
@@ -2577,31 +2676,26 @@ impl Widget for Input {
         // (#34) — the lane is reserved unconditionally so the wrap width (and
         // thus the caret / hit-test / selection geometry keyed off it) doesn't
         // shift when the bar appears or disappears.
-        if self.multiline && max_scroll > 0.0 && viewport_h > 0.0 {
-            let content_h = viewport_h + max_scroll;
+        // Geometry from the freshly-shaped `max_scroll` / `displayed` (this
+        // frame is authoritative), positioned by the same rule the drag
+        // hit-test uses via `scrollbar_geom`. `None` (single-line / nothing
+        // overflows) draws no bar.
+        if let Some(geom) =
+            Self::scrollbar_geom(layout, self.pad_y, viewport_h, max_scroll, displayed)
+        {
             let track_color = ctx.theme.colors.surface_variant;
-            let thumb_color = ctx.theme.colors.on_surface_variant;
-
-            let track_x = layout.right() - 1.0 - SCROLLBAR_WIDTH - SCROLLBAR_INSET;
-            let track_top = layout.origin.y + self.pad_y;
-            ctx.fill_rect(
-                Rect::new(track_x, track_top, SCROLLBAR_WIDTH, viewport_h),
-                track_color,
-            );
-
-            // Thumb size proportional to the viewport/content ratio, floored so
-            // it stays grabbable, capped at the track height.
-            let thumb_h = ((viewport_h / content_h) * viewport_h)
-                .max(SCROLLBAR_THUMB_MIN)
-                .min(viewport_h);
-            // Track the displayed (eased) offset so the thumb glides with the
-            // text rather than jumping to the wheel target.
-            let progress = (displayed / max_scroll).clamp(0.0, 1.0);
-            let thumb_y = track_top + progress * (viewport_h - thumb_h);
-            ctx.fill_rect(
-                Rect::new(track_x, thumb_y, SCROLLBAR_WIDTH, thumb_h),
-                thumb_color,
-            );
+            let mut thumb_color = ctx.theme.colors.on_surface_variant;
+            // Brighten the thumb toward the foreground while grabbed, a little on
+            // hover, so the bar reads as a live control rather than a passive
+            // indicator — matching `ScrollView`. A drag owns the pointer, so its
+            // cue outranks hover.
+            if self.scroll_dragging.is_some() {
+                thumb_color = thumb_color.lerp(&ctx.theme.colors.on_surface, 0.55);
+            } else if self.scrollbar_hovered {
+                thumb_color = thumb_color.lerp(&ctx.theme.colors.on_surface, 0.3);
+            }
+            ctx.fill_rect(geom.track_rect, track_color);
+            ctx.fill_rect(geom.thumb_rect, thumb_color);
         }
 
         if focus_active && !border_focus {
@@ -2621,6 +2715,11 @@ impl Widget for Input {
         // top of any external write that landed since the last paint.
         self.sync_from_source();
 
+        // Set by the scrollbar-drag arms below so the tail's caret-reveal (which
+        // fires for any consumed multi-line event) skips a scrollbar gesture —
+        // the same exception the wheel already gets. Without it a drag would
+        // scroll, then the reveal would snap the viewport back to the caret.
+        let mut scrollbar_gesture = false;
         let result = match event {
             WidgetEvent::MouseDown { position, button } => {
                 // Focus is already set by WidgetTree's click-to-focus
@@ -2630,36 +2729,75 @@ impl Widget for Input {
                 // follows Shift, so Shift+click stretches the selection from
                 // the current caret to the click point.
                 if *button == MouseButton::Left {
-                    // Chain quick presses at the same spot into a multi-click:
-                    // 1 = caret, 2 = word, 3 = whole line, then cycle back to 1.
-                    // The hit-test and the word / line expansion are resolved at
-                    // paint (no text engine here).
-                    let now = Instant::now();
-                    let count = match self.last_click.get() {
-                        Some((t, p, c))
-                            if now.duration_since(t) <= DOUBLE_CLICK_MAX
-                                && (p.x - position.x).abs() <= DOUBLE_CLICK_SLOP
-                                && (p.y - position.y).abs() <= DOUBLE_CLICK_SLOP =>
-                        {
-                            c % 3 + 1
-                        }
-                        _ => 1,
-                    };
-                    self.last_click.set(Some((now, *position, count)));
-                    let unit = match count {
-                        2 => SelectUnit::Word,
-                        3 => SelectUnit::Line,
-                        _ => SelectUnit::Caret,
-                    };
-                    self.pending_hit.set(Some((*position, ctx.modifiers.shift)));
-                    self.pending_select.set(unit);
-                    self.selecting.set(true);
-                    self.desired_x.set(None);
-                    // Capture the pointer so the drag keeps being delivered
-                    // (and is reliably ended) even when the cursor leaves the
-                    // field's rect — the tree routes MouseMove/Up straight here.
-                    ctx.capture_pointer();
+                    // A press in the scrollbar's grab band starts a thumb drag
+                    // instead of a text selection. The reserved lane is text-free
+                    // (the wrap width stops before it, #34), so grabbing here can
+                    // never steal a caret click; checked before the selection
+                    // path so the two gestures stay mutually exclusive.
+                    let on_bar = self
+                        .scrollbar_geom_cached(layout)
+                        .filter(|g| position.x >= g.track_rect.origin.x);
+                    if let Some(geom) = on_bar {
+                        // Pressing the thumb keeps its grab point under the
+                        // cursor; pressing the bare track jumps the thumb *centre*
+                        // to the cursor, then drags anchored there.
+                        let on_thumb = position.y >= geom.thumb_rect.origin.y
+                            && position.y <= geom.thumb_rect.bottom();
+                        let grab_dy = if on_thumb {
+                            position.y - geom.thumb_rect.origin.y
+                        } else {
+                            geom.thumb_rect.size.height / 2.0
+                        };
+                        self.scroll_dragging = Some(grab_dy);
+                        self.scrollbar_hovered = true;
+                        // Capture so the drag is delivered (and reliably ended)
+                        // even when the cursor leaves the field's rect.
+                        ctx.capture_pointer();
+                        self.scrollbar_drag_to(position.y, grab_dy, &geom);
+                        scrollbar_gesture = true;
+                    } else {
+                        // Chain quick presses at the same spot into a multi-click:
+                        // 1 = caret, 2 = word, 3 = whole line, then cycle back to
+                        // 1. The hit-test and the word / line expansion are
+                        // resolved at paint (no text engine here).
+                        let now = Instant::now();
+                        let count = match self.last_click.get() {
+                            Some((t, p, c))
+                                if now.duration_since(t) <= DOUBLE_CLICK_MAX
+                                    && (p.x - position.x).abs() <= DOUBLE_CLICK_SLOP
+                                    && (p.y - position.y).abs() <= DOUBLE_CLICK_SLOP =>
+                            {
+                                c % 3 + 1
+                            }
+                            _ => 1,
+                        };
+                        self.last_click.set(Some((now, *position, count)));
+                        let unit = match count {
+                            2 => SelectUnit::Word,
+                            3 => SelectUnit::Line,
+                            _ => SelectUnit::Caret,
+                        };
+                        self.pending_hit.set(Some((*position, ctx.modifiers.shift)));
+                        self.pending_select.set(unit);
+                        self.selecting.set(true);
+                        self.desired_x.set(None);
+                        // Capture the pointer so the drag keeps being delivered
+                        // (and is reliably ended) even when the cursor leaves the
+                        // field's rect — the tree routes MouseMove/Up straight here.
+                        ctx.capture_pointer();
+                    }
                 }
+                EventResult::Consumed
+            }
+
+            WidgetEvent::MouseMove { position } if self.scroll_dragging.is_some() => {
+                // Scrollbar drag in flight: track the pointer 1:1 (snap, no ease).
+                if let Some(grab_dy) = self.scroll_dragging {
+                    if let Some(geom) = self.scrollbar_geom_cached(layout) {
+                        self.scrollbar_drag_to(position.y, grab_dy, &geom);
+                    }
+                }
+                scrollbar_gesture = true;
                 EventResult::Consumed
             }
 
@@ -2670,21 +2808,51 @@ impl Widget for Input {
                 EventResult::Consumed
             }
 
+            WidgetEvent::MouseMove { position } => {
+                // Not dragging or selecting: track whether the cursor is over the
+                // thumb so paint can brighten it. Paint cue only — do not consume,
+                // so content hover routing is undisturbed. The repaint every move
+                // already triggers picks up the colour change.
+                self.scrollbar_hovered = self
+                    .scrollbar_geom_cached(layout)
+                    .map(|g| {
+                        position.x >= g.track_rect.origin.x
+                            && position.y >= g.thumb_rect.origin.y
+                            && position.y <= g.thumb_rect.bottom()
+                    })
+                    .unwrap_or(false);
+                EventResult::Ignored
+            }
+
             WidgetEvent::MouseUp { .. } => {
-                // End of a drag (or a plain click): drop the capture and stop
-                // extending. Consume only when we were actually dragging, so a
-                // release that wasn't ours doesn't shadow another handler.
-                let was_selecting = self.selecting.replace(false);
-                // The gesture is over: drop the held snap unit and its anchor so
-                // a later plain drag can't reuse a stale word / line origin.
-                self.pending_select.set(SelectUnit::Caret);
-                self.drag_origin.set(None);
-                if was_selecting {
+                // A scrollbar drag ends here first: drop its capture and consume.
+                if self.scroll_dragging.take().is_some() {
                     ctx.release_pointer();
+                    scrollbar_gesture = true;
                     EventResult::Consumed
                 } else {
-                    EventResult::Ignored
+                    // End of a text drag (or a plain click): drop the capture and
+                    // stop extending. Consume only when we were actually dragging,
+                    // so a release that wasn't ours doesn't shadow another handler.
+                    let was_selecting = self.selecting.replace(false);
+                    // The gesture is over: drop the held snap unit and its anchor
+                    // so a later plain drag can't reuse a stale word / line origin.
+                    self.pending_select.set(SelectUnit::Caret);
+                    self.drag_origin.set(None);
+                    if was_selecting {
+                        ctx.release_pointer();
+                        EventResult::Consumed
+                    } else {
+                        EventResult::Ignored
+                    }
                 }
+            }
+
+            // Cursor left the field: drop the hover brighten. A drag in flight
+            // owns a captured pointer and is ended by its MouseUp, not by this.
+            WidgetEvent::MouseLeave => {
+                self.scrollbar_hovered = false;
+                EventResult::Ignored
             }
 
             // Mouse wheel over a multi-line field scrolls its internal viewport.
@@ -2723,7 +2891,9 @@ impl Widget for Input {
                 self.blink_sig.set(None);
                 // Releasing focus mid-drag (e.g. programmatic refocus) ends the
                 // drag; drop the capture too so it can't outlive the selection.
-                if self.selecting.replace(false) {
+                // A scrollbar-thumb drag holds the same capture, so end it here
+                // as well or it would leak past the focus change.
+                if self.selecting.replace(false) || self.scroll_dragging.take().is_some() {
                     ctx.release_pointer();
                 }
                 // Drop any half-composed IME preedit so it can't linger on
@@ -3133,11 +3303,15 @@ impl Widget for Input {
             self.cancel_pending_pointer_gesture(ctx);
         }
         // Any consumed edit / caret move should bring the caret back into view
-        // on the next paint. A wheel scroll is the one consumed event that must
-        // *not* (so scrolling away from the caret with the mouse sticks).
+        // on the next paint. A wheel scroll is the one consumed *event* that must
+        // not (so scrolling away from the caret with the mouse sticks); a
+        // scrollbar drag is the same case reached through mouse events, so it is
+        // excluded via `scrollbar_gesture` too — otherwise the reveal would snap
+        // the viewport straight back to the caret mid-drag.
         if self.multiline
             && matches!(result, EventResult::Consumed)
             && !matches!(event, WidgetEvent::Scroll { .. })
+            && !scrollbar_gesture
         {
             self.reveal_caret.set(true);
         }
@@ -3312,5 +3486,172 @@ mod tests {
         let s = "あい\nうえ"; // あい = bytes 0..6, \n = 6, うえ = 7..13
         assert_eq!(line_bounds(s, 3), (0, 6)); // inside first line
         assert_eq!(line_bounds(s, 10), (7, 13)); // inside second line
+    }
+
+    // ── Scrollbar drag ──────────────────────────────────────────────────
+    //
+    // A field driven at 100×216 with the default `pad_y = 8` gives a `viewport_h`
+    // of 200. Pin the cached scroll bound to 800 (so `content_h = 1000`): then
+    // `thumb_h = (200/1000)·200 = 40`, `travel = 160`, and a thumb-top of `y`
+    // maps to offset `((y − track_top)/160)·800` with `track_top = pad_y = 8`.
+    // The resting thumb (offset 0) occupies y ∈ [8, 48]; the grab band starts at
+    // `track_x = right − 1 (border) − 6 (width) − 2 (inset) = 91`.
+    mod scrollbar_drag {
+        use crate::Input;
+        use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
+        use crate::widget::Widget;
+        use shroud_core::{Point, Rect};
+
+        fn scroll_field() -> Input {
+            let field = Input::new().multiline();
+            field.last_max_scroll.set(800.0);
+            field
+        }
+
+        fn layout() -> Rect {
+            Rect::new(0.0, 0.0, 100.0, 216.0)
+        }
+
+        fn down(x: f32, y: f32) -> WidgetEvent {
+            WidgetEvent::MouseDown {
+                position: Point::new(x, y),
+                button: MouseButton::Left,
+            }
+        }
+
+        fn mv(x: f32, y: f32) -> WidgetEvent {
+            WidgetEvent::MouseMove {
+                position: Point::new(x, y),
+            }
+        }
+
+        fn up(x: f32, y: f32) -> WidgetEvent {
+            WidgetEvent::MouseUp {
+                position: Point::new(x, y),
+                button: MouseButton::Left,
+            }
+        }
+
+        #[test]
+        fn geometry_matches_the_documented_layout() {
+            let field = scroll_field();
+            let g = field
+                .scrollbar_geom_cached(layout())
+                .expect("content overflows, so there is a bar");
+            assert_eq!(g.thumb_rect.size.height, 40.0);
+            assert_eq!(g.travel, 160.0);
+            assert_eq!(g.max_scroll, 800.0);
+            assert_eq!(g.track_rect.origin.x, 91.0);
+            // Track top and the resting thumb both sit at pad_y.
+            assert_eq!(g.track_rect.origin.y, 8.0);
+            assert_eq!(g.thumb_rect.origin.y, 8.0);
+        }
+
+        #[test]
+        fn a_single_line_field_has_no_bar_to_grab() {
+            let field = Input::new(); // single-line
+            field.last_max_scroll.set(800.0);
+            assert!(field.scrollbar_geom_cached(layout()).is_none());
+        }
+
+        #[test]
+        fn dragging_the_thumb_scrubs_the_offset() {
+            let mut field = scroll_field();
+            let mut ctx = EventContext::new();
+
+            // Press the top of the thumb (grab_dy = 0): nothing moves yet.
+            let r = field.event(&down(94.0, 8.0), layout(), &mut ctx);
+            assert_eq!(r, EventResult::Consumed);
+            assert_eq!(ctx.take_capture_change(), Some(true), "press captures");
+            assert_eq!(field.scroll_anim.get(), 0.0);
+
+            // Drag halfway down the travel → half of max_scroll.
+            field.event(&mv(94.0, 88.0), layout(), &mut ctx);
+            assert_eq!(field.scroll_anim.get(), 400.0, "80/160 of 800");
+
+            // Past the end clamps at max, and the offset snaps (no glide): the
+            // displayed value equals the target immediately.
+            field.event(&mv(94.0, 500.0), layout(), &mut ctx);
+            assert_eq!(field.scroll_anim.get(), 800.0, "drag snaps, no lag");
+
+            // A scrollbar drag must never arm caret-reveal — otherwise the next
+            // paint would snap the viewport straight back to the caret.
+            assert!(
+                !field.reveal_caret.get(),
+                "a scrollbar drag does not reveal the caret"
+            );
+
+            // Release ends the drag and hands the pointer back.
+            let r = field.event(&up(94.0, 500.0), layout(), &mut ctx);
+            assert_eq!(r, EventResult::Consumed);
+            assert_eq!(ctx.take_capture_change(), Some(false), "release lets go");
+            assert!(field.scroll_dragging.is_none());
+        }
+
+        #[test]
+        fn the_grab_point_stays_anchored_under_the_cursor() {
+            // Press thumb-y 38 (grab_dy = 30); a move to cursor-y 118 puts the
+            // thumb top at 88 → ((88 − 8)/160)·800 = 400. The same spot on the
+            // thumb stays under the cursor rather than teleporting to it.
+            let mut field = scroll_field();
+            let mut ctx = EventContext::new();
+            field.event(&down(94.0, 38.0), layout(), &mut ctx);
+            assert_eq!(
+                field.scroll_anim.get(),
+                0.0,
+                "pressing the thumb does not jump it"
+            );
+            field.event(&mv(94.0, 118.0), layout(), &mut ctx);
+            assert_eq!(field.scroll_anim.get(), 400.0);
+        }
+
+        #[test]
+        fn pressing_the_bare_track_centres_the_thumb_on_the_cursor() {
+            // A press below the thumb centres it on the cursor: cursor-y 158,
+            // thumb_h/2 = 20 → thumb top 138 → ((138 − 8)/160)·800 = 650.
+            let mut field = scroll_field();
+            let mut ctx = EventContext::new();
+            field.event(&down(94.0, 158.0), layout(), &mut ctx);
+            assert_eq!(field.scroll_anim.get(), 650.0);
+        }
+
+        #[test]
+        fn a_press_in_the_text_area_starts_a_selection_not_a_scroll() {
+            // Left of the grab band (x < 91) is text: the press begins a text
+            // selection, never a scrollbar drag.
+            let mut field = scroll_field();
+            let mut ctx = EventContext::new();
+            let r = field.event(&down(10.0, 100.0), layout(), &mut ctx);
+            assert_eq!(r, EventResult::Consumed);
+            assert!(
+                field.scroll_dragging.is_none(),
+                "a content press is not a scroll drag"
+            );
+            assert!(field.selecting.get(), "a content press starts a selection");
+        }
+
+        #[test]
+        fn a_press_on_the_lane_with_nothing_to_scroll_selects_text() {
+            // No cached overflow → no bar → a press in the lane is text, not a
+            // drag, so the wheel-less field still behaves like a plain textarea.
+            let mut field = Input::new().multiline(); // last_max_scroll stays 0
+            let mut ctx = EventContext::new();
+            field.event(&down(94.0, 100.0), layout(), &mut ctx);
+            assert!(field.scroll_dragging.is_none());
+            assert!(field.selecting.get());
+        }
+
+        #[test]
+        fn hovering_the_thumb_sets_the_paint_cue_without_consuming() {
+            let mut field = scroll_field();
+            let mut ctx = EventContext::new();
+            // Over the resting thumb (y ∈ [8, 48], x in the band).
+            let r = field.event(&mv(94.0, 20.0), layout(), &mut ctx);
+            assert_eq!(r, EventResult::Ignored, "a hover must not consume");
+            assert!(field.scrollbar_hovered, "cursor is over the thumb");
+            // Moving off the thumb (still inside the field) clears the cue.
+            field.event(&mv(94.0, 120.0), layout(), &mut ctx);
+            assert!(!field.scrollbar_hovered);
+        }
     }
 }
