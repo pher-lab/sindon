@@ -5,13 +5,15 @@
 //! update `scroll_y`, clamped against the user-declared `content_height`.
 //!
 //! Phase 11 MVP: vertical scrolling only; content height is supplied by the
-//! caller via [`ScrollView::content_height`]. An optional visual scrollbar
-//! is drawn on the right edge (non-interactive).
+//! caller via [`ScrollView::content_height`]. An optional scrollbar is drawn
+//! on the right edge; it is also draggable — pressing the thumb scrubs the
+//! offset, and pressing the track jumps the thumb to the cursor (the same
+//! pointer-capture drag [`Slider`](crate::Slider) uses).
 
-use crate::event::{EventContext, EventResult, WidgetEvent};
+use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::widget::Widget;
-use shroud_core::{Color, Rect};
+use shroud_core::{Color, Lerp, Rect};
 use shroud_layout::FlexStyle;
 use shroud_reactive::{Animated, Easing};
 use std::time::Duration;
@@ -57,6 +59,18 @@ pub struct ScrollView {
     /// viewport shows the bottom padding flush with the last child. Ignored
     /// when [`Self::explicit_content_height`] is `Some`.
     auto_content_height: f32,
+    /// A scrollbar-thumb drag in flight. `Some(grab_dy)` holds the offset
+    /// between the cursor and the thumb's top edge at the moment of the press,
+    /// so the thumb stays anchored under the grab point as the pointer moves
+    /// (rather than snapping its top to the cursor). `None` = not dragging.
+    /// Independent of hover so a captured drag survives the cursor leaving the
+    /// track — mirrors [`Slider`](crate::Slider)'s `dragging` flag.
+    dragging: Option<f32>,
+    /// The cursor is over the (widened) thumb grab area. Purely a paint cue —
+    /// the thumb brightens on hover. Recomputed each `MouseMove`; cleared on
+    /// `MouseLeave`. Every pointer move already forces a repaint, so this
+    /// needs no explicit redraw request.
+    thumb_hovered: bool,
     style: FlexStyle,
     show_scrollbar: bool,
     /// User-supplied uniform padding (set via [`Self::padding`]). Stored
@@ -79,6 +93,8 @@ impl ScrollView {
             last_seen_displayed: 0.0,
             explicit_content_height: None,
             auto_content_height: 0.0,
+            dragging: None,
+            thumb_hovered: false,
             // A scroll container must declare `overflow: hidden` so flex
             // layout lets it shrink below its content. By default a flex item's
             // automatic minimum size is its content size, so a `grow(1.0)`
@@ -242,6 +258,16 @@ impl ScrollView {
             .set(to);
     }
 
+    /// Set the scroll offset *instantly* — displayed and target both jump to
+    /// `to` with no glide. Wheel scrolling eases (see [`Self::drive_scroll`]),
+    /// but a scrollbar-thumb drag must track the pointer 1:1, so it snaps: an
+    /// eased glide would leave the thumb lagging behind the cursor.
+    fn snap_scroll(&mut self, to: f32) {
+        self.scroll_anim
+            .get_or_insert_with(|| Animated::new(0.0, self.scroll_transition, Easing::EaseOut))
+            .snap(to);
+    }
+
     /// Maximum allowed scroll offset given the current viewport height.
     pub fn max_scroll_y(&self, viewport_height: f32) -> f32 {
         (self.effective_content_height() - viewport_height).max(0.0)
@@ -328,6 +354,79 @@ impl ScrollView {
         self.last_seen_displayed = cur;
         moved
     }
+
+    /// Scrollbar track + thumb geometry for the given viewport `layout`, or
+    /// `None` when the scrollbar is hidden or nothing overflows (so there is
+    /// no bar to draw or grab). The single source of truth shared by paint and
+    /// drag hit-testing — deriving both from here keeps what the user sees and
+    /// what they can grab exactly aligned, the same paint/hit-test contract the
+    /// caret and inner scroll hold. The thumb is positioned from the *displayed*
+    /// (eased) offset, so it glides with the content.
+    fn scrollbar_geom(&self, layout: Rect) -> Option<ScrollbarGeom> {
+        if !self.show_scrollbar {
+            return None;
+        }
+        let viewport_h = layout.size.height;
+        let content_h = self.effective_content_height();
+        if content_h <= viewport_h || viewport_h <= 0.0 {
+            return None;
+        }
+
+        let track_x = layout.origin.x + layout.size.width - SCROLLBAR_WIDTH - SCROLLBAR_INSET;
+        let track_rect = Rect::new(track_x, layout.origin.y, SCROLLBAR_WIDTH, viewport_h);
+
+        let thumb_h = ((viewport_h / content_h) * viewport_h)
+            .max(SCROLLBAR_THUMB_MIN)
+            .min(viewport_h);
+        let max_scroll = (content_h - viewport_h).max(0.0);
+        let travel = viewport_h - thumb_h;
+        let progress = if max_scroll > 0.0 {
+            (self.displayed_scroll() / max_scroll).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let thumb_y = layout.origin.y + progress * travel;
+        let thumb_rect = Rect::new(track_x, thumb_y, SCROLLBAR_WIDTH, thumb_h);
+
+        Some(ScrollbarGeom {
+            track_rect,
+            thumb_rect,
+            travel,
+            max_scroll,
+        })
+    }
+
+    /// Left edge of the pointer grab band. The visual track is only
+    /// [`SCROLLBAR_WIDTH`] wide — too thin to reliably hit with a mouse — so the
+    /// interactive region spans the whole reserved [`SCROLLBAR_GUTTER`]. Children
+    /// are laid out inside that gutter's padding, so widening the grab area here
+    /// never steals a click from them.
+    fn grab_band_left(layout: Rect) -> f32 {
+        layout.right() - SCROLLBAR_GUTTER
+    }
+
+    /// Map a cursor y (viewport space) to a scroll offset and snap to it, so the
+    /// thumb's top edge lands at `cursor_y - grab_dy`. The 1:1 tracking path for
+    /// a thumb drag; a no-op when there is no room to scroll.
+    fn drag_to(&mut self, cursor_y: f32, grab_dy: f32, geom: &ScrollbarGeom, layout: Rect) {
+        if geom.travel <= 0.0 || geom.max_scroll <= 0.0 {
+            return;
+        }
+        let thumb_top = cursor_y - grab_dy;
+        let progress = ((thumb_top - layout.origin.y) / geom.travel).clamp(0.0, 1.0);
+        self.snap_scroll(progress * geom.max_scroll);
+    }
+}
+
+/// Scrollbar track + thumb rects plus the two scalars a drag needs, returned by
+/// [`ScrollView::scrollbar_geom`]. `travel` is the vertical range the thumb top
+/// spans (`viewport_h − thumb_h`); `max_scroll` is the matching content offset
+/// range, so `offset = (thumb_top / travel) · max_scroll`.
+struct ScrollbarGeom {
+    track_rect: Rect,
+    thumb_rect: Rect,
+    travel: f32,
+    max_scroll: f32,
 }
 
 impl Default for ScrollView {
@@ -398,38 +497,25 @@ impl Widget for ScrollView {
         ctx.pop_clip();
 
         // Scrollbar (drawn on top, unclipped, at viewport coords).
-        if !self.show_scrollbar {
+        let Some(geom) = self.scrollbar_geom(layout) else {
             return;
-        }
-        let viewport_h = layout.size.height;
-        let content_h = self.effective_content_height();
-        if content_h <= viewport_h || viewport_h <= 0.0 {
-            return;
-        }
+        };
 
         let track_color = self.track_color.unwrap_or(ctx.theme.colors.surface_variant);
-        let thumb_color = self
+        let mut thumb_color = self
             .thumb_color
             .unwrap_or(ctx.theme.colors.on_surface_variant);
+        // Brighten the thumb toward the foreground while grabbed, and a little
+        // on hover, so the bar reads as a live control rather than a passive
+        // indicator. A drag owns the pointer, so its cue outranks hover.
+        if self.dragging.is_some() {
+            thumb_color = thumb_color.lerp(&ctx.theme.colors.on_surface, 0.55);
+        } else if self.thumb_hovered {
+            thumb_color = thumb_color.lerp(&ctx.theme.colors.on_surface, 0.3);
+        }
 
-        let track_x = layout.origin.x + layout.size.width - SCROLLBAR_WIDTH - SCROLLBAR_INSET;
-        let track_rect = Rect::new(track_x, layout.origin.y, SCROLLBAR_WIDTH, viewport_h);
-        ctx.fill_rect(track_rect, track_color);
-
-        // Thumb size proportional to viewport/content ratio.
-        let thumb_h = ((viewport_h / content_h) * viewport_h).max(SCROLLBAR_THUMB_MIN);
-        let thumb_h = thumb_h.min(viewport_h);
-        let max_scroll = (content_h - viewport_h).max(0.0);
-        // Thumb tracks the displayed (eased) offset so it glides with the
-        // content rather than jumping ahead to the target.
-        let progress = if max_scroll > 0.0 {
-            (self.displayed_scroll() / max_scroll).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let thumb_y = layout.origin.y + progress * (viewport_h - thumb_h);
-        let thumb_rect = Rect::new(track_x, thumb_y, SCROLLBAR_WIDTH, thumb_h);
-        ctx.fill_rect(thumb_rect, thumb_color);
+        ctx.fill_rect(geom.track_rect, track_color);
+        ctx.fill_rect(geom.thumb_rect, thumb_color);
     }
 
     fn scroll_offset(&self) -> (f32, f32) {
@@ -438,31 +524,105 @@ impl Widget for ScrollView {
         (0.0, self.displayed_scroll())
     }
 
-    fn event(&mut self, event: &WidgetEvent, layout: Rect, _ctx: &mut EventContext) -> EventResult {
-        if let WidgetEvent::Scroll {
-            position, delta_y, ..
-        } = event
-        {
-            if !layout.contains(*position) {
-                return EventResult::Ignored;
+    fn event(&mut self, event: &WidgetEvent, layout: Rect, ctx: &mut EventContext) -> EventResult {
+        match event {
+            WidgetEvent::Scroll {
+                position, delta_y, ..
+            } => {
+                if !layout.contains(*position) {
+                    return EventResult::Ignored;
+                }
+                let max = self.max_scroll_y(layout.size.height);
+                // Accumulate against the *target*, not the in-flight displayed
+                // value, so consecutive wheel ticks add up instead of fighting
+                // the glide. `drive_scroll` eases the displayed offset toward it.
+                let new_y = (self.scroll_y() - delta_y).clamp(0.0, max);
+                if new_y != self.scroll_y() {
+                    self.drive_scroll(new_y);
+                }
+                EventResult::Consumed
             }
-            let max = self.max_scroll_y(layout.size.height);
-            // Accumulate against the *target*, not the in-flight displayed
-            // value, so consecutive wheel ticks add up instead of fighting the
-            // glide. `drive_scroll` eases the displayed offset toward it.
-            let new_y = (self.scroll_y() - delta_y).clamp(0.0, max);
-            if new_y != self.scroll_y() {
-                self.drive_scroll(new_y);
+
+            // A press in the scrollbar's grab band begins a drag; children are
+            // dispatched before this widget and never occupy the gutter, so a
+            // press anywhere else falls through (Ignored) exactly as before.
+            WidgetEvent::MouseDown {
+                button: MouseButton::Left,
+                position,
+            } => {
+                let Some(geom) = self.scrollbar_geom(layout) else {
+                    return EventResult::Ignored;
+                };
+                if position.x < Self::grab_band_left(layout) {
+                    return EventResult::Ignored;
+                }
+                // Pressing the thumb keeps its grab point under the cursor;
+                // pressing the bare track jumps the thumb *centre* to the cursor
+                // (then drags anchored there).
+                let on_thumb = position.y >= geom.thumb_rect.origin.y
+                    && position.y <= geom.thumb_rect.bottom();
+                let grab_dy = if on_thumb {
+                    position.y - geom.thumb_rect.origin.y
+                } else {
+                    geom.thumb_rect.size.height / 2.0
+                };
+                self.dragging = Some(grab_dy);
+                self.thumb_hovered = true;
+                ctx.capture_pointer();
+                self.drag_to(position.y, grab_dy, &geom, layout);
+                EventResult::Consumed
             }
-            return EventResult::Consumed;
+
+            WidgetEvent::MouseMove { position } => {
+                if let Some(grab_dy) = self.dragging {
+                    if let Some(geom) = self.scrollbar_geom(layout) {
+                        self.drag_to(position.y, grab_dy, &geom, layout);
+                    }
+                    EventResult::Consumed
+                } else {
+                    // Hover cue only — do not consume, so normal hover routing
+                    // over the content is undisturbed. The repaint every move
+                    // already triggers picks up the colour change.
+                    self.thumb_hovered = self
+                        .scrollbar_geom(layout)
+                        .map(|g| {
+                            position.x >= Self::grab_band_left(layout)
+                                && position.y >= g.thumb_rect.origin.y
+                                && position.y <= g.thumb_rect.bottom()
+                        })
+                        .unwrap_or(false);
+                    EventResult::Ignored
+                }
+            }
+
+            WidgetEvent::MouseUp {
+                button: MouseButton::Left,
+                ..
+            } => {
+                if self.dragging.take().is_some() {
+                    ctx.release_pointer();
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+
+            // Cursor left the viewport: drop the hover cue. A drag in flight
+            // owns a captured pointer and is ended by its MouseUp, not by this.
+            WidgetEvent::MouseLeave => {
+                self.thumb_hovered = false;
+                EventResult::Ignored
+            }
+
+            _ => EventResult::Ignored,
         }
-        EventResult::Ignored
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shroud_core::Point;
 
     /// 1000px of content in a 200px viewport, so there is room to scroll in
     /// both directions from any offset the tests park at.
@@ -598,5 +758,165 @@ mod tests {
         let disp = 30.37_f32;
         let sv = view_displayed_at(disp);
         assert_eq!(sv.scroll_offset(), (0.0, disp));
+    }
+
+    // ── Scrollbar drag ──────────────────────────────────────────────────
+    //
+    // A 100×200 viewport over 1000px of content: thumb_h = (200/1000)·200 = 40,
+    // travel = 160, max_scroll = 800, so a thumb-top of `y` maps to offset
+    // `(y/160)·800 = 5y`. The grab band starts at right() − GUTTER = 88, and the
+    // resting thumb (offset 0) occupies y ∈ [0, 40].
+    fn drag_layout() -> Rect {
+        Rect::new(0.0, 0.0, 100.0, 200.0)
+    }
+
+    fn down(x: f32, y: f32) -> WidgetEvent {
+        WidgetEvent::MouseDown {
+            position: Point::new(x, y),
+            button: MouseButton::Left,
+        }
+    }
+
+    fn mv(x: f32, y: f32) -> WidgetEvent {
+        WidgetEvent::MouseMove {
+            position: Point::new(x, y),
+        }
+    }
+
+    #[test]
+    fn scrollbar_geom_matches_the_documented_layout() {
+        let sv = ScrollView::new().content_height(1000.0);
+        let g = sv
+            .scrollbar_geom(drag_layout())
+            .expect("content overflows, so there is a bar");
+        assert_eq!(g.thumb_rect.size.height, 40.0);
+        assert_eq!(g.travel, 160.0);
+        assert_eq!(g.max_scroll, 800.0);
+        // Track sits at right − width − inset = 100 − 6 − 2.
+        assert_eq!(g.track_rect.origin.x, 92.0);
+    }
+
+    #[test]
+    fn no_bar_when_content_fits() {
+        // Content shorter than the viewport: nothing to scroll, no geometry.
+        let sv = ScrollView::new().content_height(100.0);
+        assert!(sv.scrollbar_geom(drag_layout()).is_none());
+    }
+
+    #[test]
+    fn dragging_the_thumb_scrubs_the_offset() {
+        let mut sv = ScrollView::new().content_height(1000.0);
+        let mut ctx = EventContext::new();
+
+        // Press the very top of the thumb (grab_dy = 0): nothing moves yet.
+        let r = sv.event(&down(94.0, 0.0), drag_layout(), &mut ctx);
+        assert_eq!(r, EventResult::Consumed);
+        assert_eq!(ctx.take_capture_change(), Some(true), "press captures");
+        assert_eq!(sv.scroll_y(), 0.0);
+
+        // Drag to the middle of the travel → half of max_scroll.
+        sv.event(&mv(94.0, 80.0), drag_layout(), &mut ctx);
+        assert_eq!(sv.scroll_y(), 400.0, "80/160 of 800");
+
+        // Past the end clamps at max, and the offset snaps (no glide): the
+        // displayed value equals the target immediately.
+        sv.event(&mv(94.0, 300.0), drag_layout(), &mut ctx);
+        assert_eq!(sv.scroll_y(), 800.0);
+        assert_eq!(sv.scroll_offset(), (0.0, 800.0), "drag snaps, no lag");
+
+        // Release ends the drag and hands the pointer back.
+        let r = sv.event(
+            &WidgetEvent::MouseUp {
+                position: Point::new(94.0, 300.0),
+                button: MouseButton::Left,
+            },
+            drag_layout(),
+            &mut ctx,
+        );
+        assert_eq!(r, EventResult::Consumed);
+        assert_eq!(ctx.take_capture_change(), Some(false), "release lets go");
+        assert!(sv.dragging.is_none());
+    }
+
+    #[test]
+    fn the_grab_point_is_anchored_under_the_cursor() {
+        // Pressing partway down the thumb must not teleport it: the same spot on
+        // the thumb stays under the cursor. Grab at thumb-y 30 (grab_dy = 30),
+        // then a move to cursor-y 110 puts the thumb top at 80 → offset 400.
+        let mut sv = ScrollView::new().content_height(1000.0);
+        let mut ctx = EventContext::new();
+        sv.event(&down(94.0, 30.0), drag_layout(), &mut ctx);
+        assert_eq!(sv.scroll_y(), 0.0, "pressing the thumb does not jump it");
+        sv.event(&mv(94.0, 110.0), drag_layout(), &mut ctx);
+        assert_eq!(sv.scroll_y(), 400.0);
+    }
+
+    #[test]
+    fn pressing_the_track_jumps_the_thumb_centre_to_the_cursor() {
+        // A press on the bare track below the thumb centres the thumb on the
+        // cursor: cursor-y 150, thumb_h/2 = 20 → thumb top 130 → offset 650.
+        let mut sv = ScrollView::new().content_height(1000.0);
+        let mut ctx = EventContext::new();
+        sv.event(&down(94.0, 150.0), drag_layout(), &mut ctx);
+        assert_eq!(sv.scroll_y(), 650.0);
+    }
+
+    #[test]
+    fn a_press_in_the_content_area_is_left_for_the_children() {
+        // Left of the grab band (x < 88) is content, not scrollbar: the press
+        // must fall through untouched so a child can handle it, and no drag or
+        // capture begins.
+        let mut sv = ScrollView::new().content_height(1000.0);
+        let mut ctx = EventContext::new();
+        let r = sv.event(&down(10.0, 100.0), drag_layout(), &mut ctx);
+        assert_eq!(r, EventResult::Ignored);
+        assert!(sv.dragging.is_none());
+        assert_eq!(ctx.take_capture_change(), None, "no capture requested");
+    }
+
+    #[test]
+    fn a_press_with_nothing_to_scroll_is_ignored() {
+        // No overflow → no bar → the press is not ours even inside the gutter.
+        let mut sv = ScrollView::new().content_height(100.0);
+        let mut ctx = EventContext::new();
+        let r = sv.event(&down(94.0, 100.0), drag_layout(), &mut ctx);
+        assert_eq!(r, EventResult::Ignored);
+        assert!(sv.dragging.is_none());
+    }
+
+    #[test]
+    fn hover_over_the_thumb_sets_the_paint_cue_without_consuming() {
+        // A hover move over the thumb marks it (for the brighten) but must not
+        // consume the move — content hover routing has to keep working.
+        let mut sv = ScrollView::new().content_height(1000.0);
+        let mut ctx = EventContext::new();
+
+        let r = sv.event(&mv(94.0, 20.0), drag_layout(), &mut ctx);
+        assert_eq!(r, EventResult::Ignored, "hover moves are never consumed");
+        assert!(sv.thumb_hovered, "cursor is over the thumb");
+
+        // Moving off the thumb (still in the viewport) clears it.
+        sv.event(&mv(94.0, 150.0), drag_layout(), &mut ctx);
+        assert!(!sv.thumb_hovered);
+
+        // Re-hover, then leave the viewport entirely: the cue drops.
+        sv.event(&mv(94.0, 20.0), drag_layout(), &mut ctx);
+        assert!(sv.thumb_hovered);
+        sv.event(&WidgetEvent::MouseLeave, drag_layout(), &mut ctx);
+        assert!(!sv.thumb_hovered);
+    }
+
+    #[test]
+    fn a_captured_move_past_the_track_top_clamps_at_zero() {
+        // Mid-drag the pointer can wander above the viewport (capture keeps
+        // delivering moves). A negative thumb-top must clamp to offset 0, not
+        // scroll to a negative position. Park deterministically at offset 400
+        // (thumb at y ∈ [80, 120]) so the grab is timing-independent.
+        let mut sv = view_displayed_at(400.0);
+        let mut ctx = EventContext::new();
+        sv.event(&down(94.0, 80.0), drag_layout(), &mut ctx);
+        assert_eq!(sv.scroll_y(), 400.0, "grabbing the thumb top holds");
+        sv.event(&mv(94.0, -50.0), drag_layout(), &mut ctx);
+        assert_eq!(sv.scroll_y(), 0.0);
     }
 }
