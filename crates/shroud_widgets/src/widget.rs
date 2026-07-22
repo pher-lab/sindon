@@ -175,6 +175,24 @@ pub trait Widget: std::any::Any {
     /// Return the flex style for layout computation.
     fn style(&self) -> FlexStyle;
 
+    /// Whether this widget's [`style`](Self::style) can change from frame to
+    /// frame and must be re-read every layout pass.
+    ///
+    /// The tree caches each node's flex style in the layout engine and only
+    /// re-installs it when [`visible`](Self::visible) flips or a
+    /// viewport-relative dimension needs re-resolving. A reactive *content*
+    /// change already reflows through `measure`, but a reactive *style* — a
+    /// split pane whose `flex-grow` a divider drag drives — has no such trigger,
+    /// so its new `style()` would never reach layout. Returning `true` opts the
+    /// widget into a per-frame `style()` re-read so its box tracks live state.
+    ///
+    /// Default `false`. Override only for genuinely dynamic styles (a resizable
+    /// [`SplitPane`](crate::SplitPane) pane): a `true` here re-installs the
+    /// style every frame, which is wasted work for a static widget.
+    fn style_is_dynamic(&self) -> bool {
+        false
+    }
+
     /// Report this widget's intrinsic size for flex layout.
     ///
     /// Returning `None` (the default) means the widget has no intrinsic size

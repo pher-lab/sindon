@@ -1103,7 +1103,10 @@ impl WidgetTree {
                 let node = slot.as_ref()?;
                 let vis_flip = node.widget.visible() != node.last_applied_visible;
                 let vp_reflow = node.has_viewport_dims && viewport_changed;
-                (vis_flip || vp_reflow).then_some(i)
+                // A dynamic-style widget (a resizable split pane) re-reads its
+                // style every frame so a drag-driven flex-grow reaches layout.
+                let dyn_style = node.widget.style_is_dynamic();
+                (vis_flip || vp_reflow || dyn_style).then_some(i)
             })
             .collect();
         for i in dirty {
