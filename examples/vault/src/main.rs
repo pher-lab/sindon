@@ -4,23 +4,23 @@
 //! Knot (the first grounding) handles *few large* secret documents you edit in
 //! place. A credential vault is the opposite secret shape: *many small,
 //! high-churn* secrets you copy without ever revealing. That shape is what
-//! stresses the one release-blocking framework gap Knot never forced — a
+//! forced the one release-blocking framework gap Knot never did — a plain
 //! [`ScrollView`](shroud::widgets::ScrollView) instantiates *all* its children,
-//! so a vault of hundreds of entries lays out hundreds of rows every frame.
-//!
-//! This first cut is deliberately the *pre-virtualization* version: the entry
-//! list is a plain `ScrollView` so the wall is real and measurable (run with
-//! `SHROUD_PERF=1` to see the frame interval balloon at [`SEED_COUNT`] rows).
-//! The next milestone replaces the list with a `VirtualList` primitive built to
-//! serve exactly this demand.
+//! so a vault of hundreds of entries lays out every row every frame. The list
+//! here is a [`VirtualList`](shroud::widgets::VirtualList), which materializes
+//! only the visible window; `VAULT_PLAIN=1` switches back to the plain
+//! `ScrollView` as an A/B baseline (run either with `SHROUD_PERF=1` to feel it).
 //!
 //! Secret handling mirrors Knot: the master password never leaves a
-//! `SecureString`; each entry's secret is sealed under an Argon2-derived key and
-//! only decrypted into a `SecureString` on unlock; Copy routes through
-//! [`SecureClipboard`] with a 10 s auto-clear. Persistence (SQLCipher) is a
-//! later milestone — this build seeds the vault in memory.
+//! `SecureString`; the SQLCipher DB is page-encrypted under the Argon2-derived
+//! key and each entry's secret is additionally sealed per-row; secrets are
+//! decrypted into `SecureString`s only while unlocked (relock drops them, which
+//! zeroizes); Copy routes through [`SecureClipboard`] with a 10 s auto-clear.
 //!
-//! Demo master password: `hunter2`.
+//! First run seeds [`SEED_COUNT`] entries under the demo password and persists
+//! them; later runs load from disk. Demo master password: `hunter2`.
+
+mod storage;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,11 +39,13 @@ use shroud::widgets::shortcut::Shortcut;
 use shroud::widgets::tree::WidgetTree;
 use shroud::widgets::{Button, Container, ScrollView, TextWidget, VirtualList};
 
-/// Demo master password, baked in like `password_manager` — this is a
-/// framework validation example, not a shipping product.
+use storage::{StoredEntry, VaultPaths, VaultStorage};
+
+/// Demo master password, baked in like `password_manager` — this is a framework
+/// validation example, not a shipping product.
 const DEMO_PASSWORD: &str = "hunter2";
 
-/// How many entries to seed. Chosen large enough that a plain `ScrollView`
+/// How many entries to seed on first run. Large enough that a plain `ScrollView`
 /// (which materializes every child) visibly stutters — the wall this example
 /// exists to knock down.
 const SEED_COUNT: usize = 1000;
@@ -58,18 +60,12 @@ const HEADING: Color = Color::rgb(0.92, 0.94, 1.0);
 const MUTED: Color = Color::rgb(0.70, 0.72, 0.80);
 const ROW: Color = Color::rgb(0.16, 0.17, 0.23);
 
-/// An entry as it lives at rest: identifying metadata in the clear, the secret
-/// payload sealed. Mirrors the on-disk row the SQLCipher milestone will persist.
-struct EncryptedEntry {
+/// A decrypted entry, live only while the vault is unlocked. Site/username are
+/// plaintext (not the secret); the secret lives in a `SecureString` that
+/// zeroizes when the `Unlocked` vec is dropped on relock.
+struct UnlockedEntry {
     site: String,
     username: String,
-    nonce: [u8; 12],
-    ciphertext: Vec<u8>,
-}
-
-/// The decrypted secret for one entry, held in a `SecureString` so it zeroizes
-/// on relock. Site/username stay plaintext (they are not the secret).
-struct UnlockedEntry {
     password: SecureString,
 }
 
@@ -81,8 +77,8 @@ enum VaultState {
 }
 
 struct AppState {
-    salt: [u8; 16],
-    encrypted: Vec<EncryptedEntry>,
+    paths: VaultPaths,
+    salt: [u8; storage::SALT_SIZE],
     state: VaultState,
     clipboard: SecureClipboard,
 }
@@ -102,46 +98,75 @@ fn derive_key(password: &[u8], salt: &[u8]) -> Zeroizing<[u8; 32]> {
     key
 }
 
-/// Seed an in-memory vault of [`SEED_COUNT`] entries encrypted under the demo
-/// master password. One key derivation, then a cheap per-row seal — so seeding
-/// a thousand rows costs one Argon2, not a thousand.
-fn make_demo_vault() -> ([u8; 16], Vec<EncryptedEntry>) {
-    let mut salt = [0u8; 16];
+/// Seal `plaintext` under `key` with a fresh nonce.
+fn seal(key: &[u8; 32], plaintext: &[u8]) -> ([u8; storage::NONCE_SIZE], Vec<u8>) {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let ciphertext = cipher.encrypt(&nonce, plaintext).expect("seal");
+    (nonce.into(), ciphertext)
+}
+
+/// Ensure a vault exists on disk, returning its salt. On first run: generate a
+/// salt, seal [`SEED_COUNT`] entries under the demo password, and persist. On
+/// later runs: just read the stored salt back.
+fn ensure_vault(paths: &VaultPaths) -> [u8; storage::SALT_SIZE] {
+    if paths.exists() {
+        return paths.read_salt().expect("read vault salt");
+    }
+
+    let mut salt = [0u8; storage::SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
-
     let key = derive_key(DEMO_PASSWORD.as_bytes(), &salt);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
 
-    let entries = (0..SEED_COUNT)
+    let entries: Vec<StoredEntry> = (0..SEED_COUNT)
         .map(|i| {
-            let site = format!("service{i:04}.example.com");
-            let username = format!("user{i:04}@example.com");
             let secret = format!("pw-{i:04}-correct-horse-battery");
-            let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-            let ciphertext = cipher
-                .encrypt(&nonce, secret.as_bytes())
-                .expect("encrypt seed entry");
-            EncryptedEntry {
-                site,
-                username,
-                nonce: nonce.into(),
+            let (nonce, ciphertext) = seal(&key, secret.as_bytes());
+            StoredEntry {
+                id: i as i64,
+                site: format!("service{i:04}.example.com"),
+                username: format!("user{i:04}@example.com"),
+                nonce,
                 ciphertext,
             }
         })
         .collect();
 
-    (salt, entries)
+    let mut store = VaultStorage::open(&paths.db, &key).expect("create vault db");
+    store.save_all(&entries).expect("seed vault");
+    paths.write_salt(&salt).expect("write vault salt");
+    salt
 }
 
-/// Derive the master key from the entered password and decrypt every row into a
-/// `SecureString`. Any AEAD tag failure flips state to `Error` (wrong password).
+/// Derive the key from the entered password, open the DB (a `BadKey` is the
+/// wrong-password signal), load every row, and decrypt each secret into a
+/// `SecureString`.
 fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) {
     let mut s = state.borrow_mut();
     let key = master.expose(|m| derive_key(m.as_bytes(), &s.salt));
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
 
-    let mut unlocked = Vec::with_capacity(s.encrypted.len());
-    for e in &s.encrypted {
+    let store = match VaultStorage::open(&s.paths.db, &key) {
+        Ok(store) => store,
+        Err(storage::StorageError::BadKey) => {
+            s.state = VaultState::Error("wrong master password".into());
+            return;
+        }
+        Err(e) => {
+            s.state = VaultState::Error(format!("{e}"));
+            return;
+        }
+    };
+    let stored = match store.load_entries() {
+        Ok(v) => v,
+        Err(e) => {
+            s.state = VaultState::Error(format!("{e}"));
+            return;
+        }
+    };
+
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
+    let mut unlocked = Vec::with_capacity(stored.len());
+    for e in stored {
         match cipher.decrypt(Nonce::from_slice(&e.nonce), e.ciphertext.as_ref()) {
             Ok(pt) => {
                 let mut pt = Zeroizing::new(pt);
@@ -153,10 +178,14 @@ fn try_unlock(state: &Rc<RefCell<AppState>>, master: &SecureString) {
                     }
                 };
                 pt.as_mut_slice().fill(0);
-                unlocked.push(UnlockedEntry { password });
+                unlocked.push(UnlockedEntry {
+                    site: e.site,
+                    username: e.username,
+                    password,
+                });
             }
             Err(_) => {
-                s.state = VaultState::Error("wrong master password".into());
+                s.state = VaultState::Error("corrupt entry (auth failed)".into());
                 return;
             }
         }
@@ -217,8 +246,8 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     );
 }
 
-/// Vault screen — the entry list (plain `ScrollView` for now), a Lock button,
-/// and a clipboard-countdown status line.
+/// Vault screen — the entry list, a Lock button, and a clipboard-countdown
+/// status line.
 fn build_vault_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let root = tree.set_root(
         Container::column()
@@ -299,9 +328,12 @@ fn build_row(tree: &mut WidgetTree, parent: usize, state: &Rc<RefCell<AppState>>
 
     let label = {
         let s = state.borrow();
-        match s.encrypted.get(idx) {
-            Some(e) => format!("{}  \u{00b7}  {}", e.site, e.username),
-            None => String::new(),
+        match &s.state {
+            VaultState::Unlocked(v) => match v.get(idx) {
+                Some(e) => format!("{}  \u{00b7}  {}", e.site, e.username),
+                None => String::new(),
+            },
+            _ => String::new(),
         }
     };
     tree.add_child(row, TextWidget::new(label));
@@ -326,36 +358,45 @@ fn build_row(tree: &mut WidgetTree, parent: usize, state: &Rc<RefCell<AppState>>
     );
 }
 
+/// Number of entries currently unlocked (0 while locked).
+fn entry_count(state: &Rc<RefCell<AppState>>) -> usize {
+    match &state.borrow().state {
+        VaultState::Unlocked(v) => v.len(),
+        _ => 0,
+    }
+}
+
 /// Virtualized list — only the rows in (or near) the viewport are ever
 /// materialized, regardless of [`SEED_COUNT`].
 fn build_virtual_list(tree: &mut WidgetTree, sv_parent: usize, state: Rc<RefCell<AppState>>) {
     let count_state = Rc::clone(&state);
     VirtualList::new(ROW_H)
-        .items(move || count_state.borrow().encrypted.len())
+        .items(move || entry_count(&count_state))
         .on_row(move |tree, parent, idx| build_row(tree, parent, &state, idx))
         .build(tree, sv_parent);
 }
 
 /// Plain list — the O(n) baseline: every entry's row exists at once.
 fn build_plain_rows(tree: &mut WidgetTree, parent: usize, state: Rc<RefCell<AppState>>) {
-    let count = state.borrow().encrypted.len();
-    for idx in 0..count {
+    for idx in 0..entry_count(&state) {
         build_row(tree, parent, &state, idx);
     }
 }
 
 fn main() {
+    let paths = VaultPaths::default_for_app().expect("resolve a config dir for the vault");
+    let salt = ensure_vault(&paths);
+
     App::new()
         .title("shroud \u{2014} Vault")
         .size(680, 620)
         // Kept off during the build so layout can be screenshotted; flip to
         // `true` for the shipping-secret posture (blacks out OS screen capture).
         .capture_prevention(false)
-        .run(|scope| {
-            let (salt, encrypted) = make_demo_vault();
+        .run(move |scope| {
             let state = Rc::new(RefCell::new(AppState {
+                paths,
                 salt,
-                encrypted,
                 state: VaultState::Locked,
                 clipboard: SecureClipboard::new(),
             }));

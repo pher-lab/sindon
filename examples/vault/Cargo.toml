@@ -17,6 +17,10 @@ shroud = { path = "../../crates/shroud" }
 argon2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
 zeroize = { workspace = true }
-# NOTE: SQLCipher persistence (rusqlite, bundled-sqlcipher-vendored-openssl)
-# is added in a later milestone so the slow cold build stays out of the
-# UI + VirtualList iteration loop. Until then the vault seeds in memory.
+# SQLCipher 4.x via rusqlite — the DB is page-encrypted under the master key,
+# same dependency Knot uses. `bundled-sqlcipher-vendored-openssl` builds SQLite
+# + the SQLCipher patch set + OpenSSL from source (reproducible, no system
+# OpenSSL). First build is slow; subsequent builds cache.
+# NOTE: build via PowerShell so the vendored OpenSSL finds Strawberry Perl on
+# PATH (the Git-Bash `perl` is msys2's, which fails OpenSSL's configure).
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
