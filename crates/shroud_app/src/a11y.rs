@@ -48,6 +48,7 @@ fn to_role(role: AccessRole) -> Role {
         AccessRole::RadioButton => Role::RadioButton,
         AccessRole::Switch => Role::Switch,
         AccessRole::Slider => Role::Slider,
+        AccessRole::ProgressIndicator => Role::ProgressIndicator,
         AccessRole::TabList => Role::TabList,
         AccessRole::Tab => Role::Tab,
         AccessRole::MenuItem => Role::MenuItem,
@@ -114,10 +115,10 @@ pub fn snapshot_to_tree_update(snapshot: &AccessSnapshot, scale: f32) -> TreeUpd
             if info.role.is_activatable() {
                 node.add_action(Action::Click);
             }
-            // Range controls: stepping and absolute set. Keyed off the numeric
-            // state rather than the role, so only a node that actually reports
-            // a range claims them.
-            if info.numeric.is_some() {
+            // Range controls: stepping and absolute set. A node must both report
+            // a range *and* have an operable role — a `ProgressIndicator` reports
+            // a numeric value but is read-only, so it advertises none of these.
+            if info.numeric.is_some() && info.role.is_value_adjustable() {
                 node.add_action(Action::Increment);
                 node.add_action(Action::Decrement);
                 node.add_action(Action::SetValue);
@@ -292,6 +293,42 @@ mod tests {
         assert!(
             !node.supports_action(Action::Click),
             "a slider is not pressable — Slider is not an activatable role"
+        );
+    }
+
+    #[test]
+    fn a_progress_indicator_reports_a_value_but_is_not_operable() {
+        // A determinate progress bar reports where it is (min/max/now) so a
+        // screen reader can announce the percentage, but it is read-only: unlike
+        // a Slider it must advertise none of the value-setting actions, since its
+        // widget honours none.
+        let mut e = entry(
+            1,
+            AccessNode::new(AccessRole::ProgressIndicator)
+                .name("Uploading")
+                .numeric(AccessRange {
+                    min: 0.0,
+                    max: 1.0,
+                    now: 0.6,
+                }),
+        );
+        e.focusable = false;
+        let node = translate_one(e);
+        let dump = format!("{node:?}");
+        assert!(
+            dump.contains("ProgressIndicator"),
+            "role maps to accesskit ProgressIndicator"
+        );
+        assert!(dump.contains("Uploading"), "the name maps through");
+        for action in [Action::Increment, Action::Decrement, Action::SetValue] {
+            assert!(
+                !node.supports_action(action),
+                "a progress indicator must not offer {action:?} — it is read-only"
+            );
+        }
+        assert!(
+            !node.supports_action(Action::Click),
+            "a progress indicator is not activatable"
         );
     }
 

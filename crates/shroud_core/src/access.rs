@@ -52,6 +52,12 @@ pub enum AccessRole {
     Switch,
     /// A value-in-a-range slider.
     Slider,
+    /// A progress indicator — a determinate bar reports a fraction complete, an
+    /// indeterminate bar or spinner reports only that work is ongoing. Reports a
+    /// numeric range when determinate, and is never operable: it carries no
+    /// value-adjusting actions ([`is_value_adjustable`](AccessRole::is_value_adjustable)),
+    /// the read-only counterpart to [`Slider`](AccessRole::Slider).
+    ProgressIndicator,
     /// The container of a segmented control — a list of mutually exclusive tabs.
     TabList,
     /// One option within a [`TabList`](AccessRole::TabList).
@@ -88,6 +94,22 @@ impl AccessRole {
                 | AccessRole::Tab
                 | AccessRole::MenuItem
         )
+    }
+
+    /// Whether an assistive technology may *change* the value of a range control
+    /// of this role — the [`Increment`](AccessAction::Increment) /
+    /// [`Decrement`](AccessAction::Decrement) / [`SetValue`](AccessAction::SetValue)
+    /// actions.
+    ///
+    /// Like [`is_activatable`](Self::is_activatable), a property of the vocabulary
+    /// rather than of any one widget: it gates which numeric nodes advertise the
+    /// value-setting actions to the OS. A [`Slider`](AccessRole::Slider) can be
+    /// driven; a [`ProgressIndicator`](AccessRole::ProgressIndicator) reports a
+    /// value but is read-only, so it stays perceivable without ever becoming
+    /// operable. Keyed off the role so a numeric node can't accidentally offer an
+    /// action its widget refuses.
+    pub fn is_value_adjustable(self) -> bool {
+        matches!(self, AccessRole::Slider)
     }
 }
 

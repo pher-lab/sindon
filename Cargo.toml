@@ -27,6 +27,7 @@ members = [
     "examples/modal_demo",
     "examples/number_input_demo",
     "examples/password_manager",
+    "examples/progress_demo",
     "examples/secure_password_form",
     "examples/system_demo",
     "examples/textarea_demo",
