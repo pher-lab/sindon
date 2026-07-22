@@ -32,6 +32,7 @@ members = [
     "examples/system_demo",
     "examples/textarea_demo",
     "examples/theme_swap_demo",
+    "examples/toast_demo",
 ]
 
 [workspace.package]

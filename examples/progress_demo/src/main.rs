@@ -74,9 +74,7 @@ fn main() {
             }
             tree.add_child(
                 bars,
-                ProgressBar::new(looping)
-                    .thickness(10.0)
-                    .label("Looping"),
+                ProgressBar::new(looping).thickness(10.0).label("Looping"),
             );
 
             // ── ProgressBar (indeterminate) ───────────────────────────────

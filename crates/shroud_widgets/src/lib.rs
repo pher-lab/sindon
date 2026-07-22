@@ -30,6 +30,7 @@ pub mod shortcut;
 mod slider;
 mod switch;
 mod text;
+pub mod toast;
 pub mod tree;
 mod widget;
 
@@ -61,5 +62,6 @@ pub use shortcut::{Shortcut, ShortcutContext, ShortcutId, ShortcutRouter, Shortc
 pub use slider::Slider;
 pub use switch::Switch;
 pub use text::TextWidget;
+pub use toast::{ToastHost, ToastId, ToastKind};
 pub use tree::WidgetTree;
 pub use widget::{MeasureContext, Widget};
