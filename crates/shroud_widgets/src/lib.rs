@@ -34,6 +34,7 @@ mod text;
 pub mod toast;
 pub mod tree;
 mod tree_view;
+mod virtual_list;
 mod widget;
 
 pub use accessibility::{
@@ -68,4 +69,5 @@ pub use text::TextWidget;
 pub use toast::{ToastHost, ToastId, ToastKind};
 pub use tree::WidgetTree;
 pub use tree_view::{TreeItem, TreeView};
+pub use virtual_list::VirtualList;
 pub use widget::{MeasureContext, Widget};

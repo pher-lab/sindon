@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::accessibility::{
     A11Y_WINDOW_ROOT, AccessEntry, AccessSnapshot, AccessTarget, access_target, push_child_entries,
 };
+use crate::container::Container;
 use crate::event::{
     EventContext, EventResult, Key, MouseButton, NamedKey, TreeCommand, WidgetEvent,
 };
@@ -15,6 +16,7 @@ use crate::paint::PaintContext;
 use crate::reactive_children::ReactiveChildren;
 use crate::scroll_view::ScrollView;
 use crate::shortcut::ShortcutRouter;
+use crate::virtual_list::VirtualList;
 use crate::widget::{MeasureContext, Widget};
 use shroud_core::{AccessAction, AccessNode, AccessRole, Point, Rect, SecurityLevel, Size, Theme};
 use shroud_layout::{FlexStyle, LayoutEngine, LayoutNodeId};
@@ -1002,6 +1004,7 @@ impl WidgetTree {
     pub fn compute_layout(&mut self, width: f32, height: f32) {
         self.viewport = (width, height);
         self.sync_reactive_children();
+        self.sync_virtual_lists();
         self.refresh_styles();
         if let Some(root) = self.root {
             let root_node = self
@@ -1145,6 +1148,7 @@ impl WidgetTree {
     ) {
         self.viewport = (width, height);
         self.sync_reactive_children();
+        self.sync_virtual_lists();
         self.refresh_styles();
 
         // Invalidate Taffy's measure cache. Taffy memoizes leaf measure
@@ -1289,6 +1293,172 @@ impl WidgetTree {
                 }
             }
         }
+    }
+
+    /// Windowing pass for [`VirtualList`](crate::VirtualList) nodes. Runs right
+    /// after [`Self::sync_reactive_children`] (before layout): for each virtual
+    /// list, read the eased scroll offset + viewport height from the enclosing
+    /// `ScrollView`, pin that scroll view's content height to the full logical
+    /// extent (item count × row height), compute the visible integer row range,
+    /// and rebuild the row subtree only when the current visible range has left
+    /// the previously-built (overscanned) window — or the app bumped the content
+    /// version, or the item count changed.
+    ///
+    /// The scroll view keeps owning scroll/ease/clip/scrollbar; this pass only
+    /// decides which rows exist and inserts a leading spacer so the first
+    /// materialized row sits at its true logical `y`.
+    fn sync_virtual_lists(&mut self) {
+        let candidates: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                let node = slot.as_ref()?;
+                let w: &dyn Widget = node.widget.as_ref();
+                (w as &dyn std::any::Any)
+                    .downcast_ref::<VirtualList>()
+                    .map(|_| i)
+            })
+            .collect();
+
+        for vl_idx in candidates {
+            // Fixed parameters + the app's count / version.
+            let (row_h, overscan, count, data_v) = {
+                let Some(node) = self.node(vl_idx) else {
+                    continue;
+                };
+                let w: &dyn Widget = node.widget.as_ref();
+                let Some(vl) = (w as &dyn std::any::Any).downcast_ref::<VirtualList>() else {
+                    continue;
+                };
+                (
+                    vl.row_height(),
+                    vl.overscan_rows(),
+                    vl.item_count(),
+                    vl.content_version(),
+                )
+            };
+
+            // Enclosing scroll view: its eased offset + viewport height (from the
+            // previous layout pass) define the visible window. Missing on the
+            // first pass — the fallback below then materializes a screenful.
+            let sv_idx = self.enclosing_scroll_view(vl_idx);
+            let (offset_y, viewport_h) = match sv_idx {
+                Some(sv) => {
+                    let node = self
+                        .node(sv)
+                        .expect("scroll-view idx from parent walk is live");
+                    let off = node.widget.scroll_offset().1;
+                    let vh = self.layout.layout(node.layout_node).size.height;
+                    (off, vh)
+                }
+                None => (0.0, f32::MAX),
+            };
+
+            // Pin the scroll view's content height to the full logical extent so
+            // the scrollbar + clamp span all rows though only a window exists.
+            if let Some(sv) = sv_idx {
+                if let Some(node) = self.node_mut(sv) {
+                    let widget_any: &mut dyn std::any::Any = node.widget.as_mut();
+                    if let Some(scroll) = widget_any.downcast_mut::<ScrollView>() {
+                        scroll.set_pinned_content_height(count as f32 * row_h);
+                    }
+                }
+            }
+
+            // Current visible integer row range [visible_first, visible_last).
+            let vh = if viewport_h.is_finite() && viewport_h > 1.0 {
+                viewport_h
+            } else {
+                1000.0
+            };
+            let visible_first = (offset_y / row_h).floor().max(0.0) as usize;
+            let visible_last = (((offset_y + vh) / row_h).ceil() as usize).min(count);
+
+            // Skip the rebuild while the last-built window still covers the
+            // visible range and nothing structural changed.
+            if let Some((bf, bl, bv, bc)) = {
+                let node = self.node(vl_idx);
+                node.and_then(|n| {
+                    let w: &dyn Widget = n.widget.as_ref();
+                    (w as &dyn std::any::Any)
+                        .downcast_ref::<VirtualList>()
+                        .and_then(|vl| vl.last_window())
+                })
+            } {
+                if bv == data_v && bc == count && bf <= visible_first && visible_last <= bl {
+                    continue;
+                }
+            }
+
+            // Rebuild: overscan the visible range so nearby scrolls stay cheap.
+            let first = visible_first.saturating_sub(overscan);
+            let last = (visible_last + overscan).min(count);
+            let window = (first, last, data_v, count);
+
+            let builder = {
+                let Some(node) = self.node(vl_idx) else {
+                    continue;
+                };
+                let w: &dyn Widget = node.widget.as_ref();
+                let Some(vl) = (w as &dyn std::any::Any).downcast_ref::<VirtualList>() else {
+                    continue;
+                };
+                vl.set_last_window(window);
+                match vl.take_builder() {
+                    Some(b) => b,
+                    None => continue, // no row builder, or a reentrant take
+                }
+            };
+
+            // Tombstone the current spacer + rows, then repopulate the window.
+            let children: Vec<usize> = self
+                .node(vl_idx)
+                .map(|n| n.children.clone())
+                .unwrap_or_default();
+            for c in children {
+                self.remove(c);
+            }
+
+            if first > 0 {
+                self.add_child(
+                    vl_idx,
+                    Container::column()
+                        .width_full()
+                        .height(first as f32 * row_h),
+                );
+            }
+            let mut builder = builder;
+            for i in first..last {
+                builder(self, vl_idx, i);
+            }
+
+            if let Some(node) = self.node(vl_idx) {
+                let w: &dyn Widget = node.widget.as_ref();
+                if let Some(vl) = (w as &dyn std::any::Any).downcast_ref::<VirtualList>() {
+                    vl.restore_builder(builder);
+                }
+            }
+        }
+    }
+
+    /// Nearest ancestor that is a [`ScrollView`], walking `parent` links. `None`
+    /// if the node has no scroll-view ancestor.
+    fn enclosing_scroll_view(&self, start: usize) -> Option<usize> {
+        let mut idx = start;
+        while let Some(node) = self.node(idx) {
+            let parent = node.parent?;
+            let parent_node = self.node(parent)?;
+            let w: &dyn Widget = parent_node.widget.as_ref();
+            if (w as &dyn std::any::Any)
+                .downcast_ref::<ScrollView>()
+                .is_some()
+            {
+                return Some(parent);
+            }
+            idx = parent;
+        }
+        None
     }
 
     /// Walk every live widget; for each `ScrollView`, sum the relative

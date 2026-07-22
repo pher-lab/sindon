@@ -1,0 +1,26 @@
+[package]
+name = "vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# The framework under test. This example is shroud's *second* grounding app
+# (after Knot): a credential vault exercises the "collection shape" of secret —
+# many small, high-churn secrets you copy without revealing — which Knot's
+# few-large-documents shape never forced. Its release-blocking demand is list
+# virtualization, which this example is built to drive into the framework.
+shroud = { path = "../../crates/shroud" }
+# Same secret-handling chain Knot uses. Argon2id derives the key from the
+# master password; XChaCha/ChaCha seals each entry's secret payload.
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+zeroize = { workspace = true }
+# SQLCipher 4.x via rusqlite — the DB is page-encrypted under the master key,
+# same dependency Knot uses. `bundled-sqlcipher-vendored-openssl` builds SQLite
+# + the SQLCipher patch set + OpenSSL from source (reproducible, no system
+# OpenSSL). First build is slow; subsequent builds cache.
+# NOTE: build via PowerShell so the vendored OpenSSL finds Strawberry Perl on
+# PATH (the Git-Bash `perl` is msys2's, which fails OpenSSL's configure).
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
