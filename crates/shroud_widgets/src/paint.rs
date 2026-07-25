@@ -212,6 +212,30 @@ impl PaintContext {
         self.clip_stack.last().copied()
     }
 
+    /// Whether a draw quad at *composited* `(x, y, w, h)` would be scissored
+    /// away entirely by the active clip — i.e. recording it would cost a
+    /// vertex, an atlas slot and a batch entry to produce zero pixels.
+    ///
+    /// This is the exact converse of what `apply_scissor` does in the
+    /// renderer, so dropping such a command is invisible by construction: no
+    /// containment assumption about widget layout is involved, only the quad
+    /// the renderer would have emitted. It matters because the glyph atlas has
+    /// no per-frame bound — a document taller than its `ScrollView` piles every
+    /// glyph it contains into the shared atlas even though only a screenful can
+    /// ever show, which is what eventually exhausts it and blanks new glyphs
+    /// (the culling `Input` already does by hand for its own viewport, here
+    /// generalized to every widget under any clip).
+    ///
+    /// The test is *strict* disjointness rather than an empty intersection, so
+    /// a degenerate quad (a zero-area glyph — a space — or a hairline rect)
+    /// inside the clip is kept, exactly as before.
+    fn clipped_out(&self, x: f32, y: f32, w: f32, h: f32) -> bool {
+        let Some(clip) = self.clip_stack.last() else {
+            return false;
+        };
+        x + w <= clip.origin.x || x >= clip.right() || y + h <= clip.origin.y || y >= clip.bottom()
+    }
+
     /// Round a logical coordinate to the nearest device-pixel boundary, using
     /// the text engine's current scale (physical pixels per logical pixel).
     ///
@@ -296,6 +320,18 @@ impl PaintContext {
 
     fn push_rect(&mut self, rect: Rect, color: Color, radius: f32, border_width: f32, blur: f32) {
         let (ox, oy) = self.current_offset();
+        // A blurred shadow inflates its quad by `blur` on every side (the
+        // renderer does the same when it builds the geometry), so grow the
+        // cull box to match or a halo reaching into the clip would vanish.
+        let m = blur.max(0.0);
+        if self.clipped_out(
+            rect.origin.x + ox - m,
+            rect.origin.y + oy - m,
+            rect.size.width + 2.0 * m,
+            rect.size.height + 2.0 * m,
+        ) {
+            return;
+        }
         self.rects.push(DrawRect {
             x: rect.origin.x + ox,
             y: rect.origin.y + oy,
@@ -321,6 +357,9 @@ impl PaintContext {
         let (ox, oy) = self.current_offset();
         let rotation = self.current_rotation();
         let (x, y) = self.snap_glyph_origin(x + ox, y + oy, rotation.is_some());
+        if self.glyph_clipped_out(x, y, &image, rotation.is_some()) {
+            return;
+        }
         self.glyphs.push(DrawGlyph {
             x,
             y,
@@ -358,11 +397,45 @@ impl PaintContext {
         }
     }
 
+    /// Whether the quad the renderer would build for this glyph falls entirely
+    /// outside the active clip. See [`clipped_out`](Self::clipped_out).
+    ///
+    /// The quad is reconstructed exactly as `build_glyph_geometry` does: the
+    /// bitmap is rasterized at device resolution, so its size and bearings
+    /// divide by the text scale to land back in the logical space the clip
+    /// lives in. A *rotated* glyph is never culled — its quad is placed by
+    /// rotation math about a pivot, so the axis-aligned box computed here does
+    /// not describe where it actually lands.
+    fn glyph_clipped_out(&self, x: f32, y: f32, image: &GlyphImage, rotated: bool) -> bool {
+        if rotated || self.clip_stack.is_empty() {
+            return false;
+        }
+        let scale = self.text_engine.scale();
+        if scale <= 0.0 {
+            return false;
+        }
+        let inv = 1.0 / scale;
+        self.clipped_out(
+            x + image.left as f32 * inv,
+            y - image.top as f32 * inv,
+            image.width as f32 * inv,
+            image.height as f32 * inv,
+        )
+    }
+
     /// Record a draw call for `image` at the given rect, tinted by
     /// `tint` (use [`Color::WHITE`] for unmodified pixels). The active
     /// offset and clip stack are applied automatically.
     pub fn draw_image(&mut self, rect: Rect, image: Arc<DecodedImage>, tint: Color) {
         let (ox, oy) = self.current_offset();
+        if self.clipped_out(
+            rect.origin.x + ox,
+            rect.origin.y + oy,
+            rect.size.width,
+            rect.size.height,
+        ) {
+            return;
+        }
         self.images.push(DrawImage {
             x: rect.origin.x + ox,
             y: rect.origin.y + oy,
@@ -388,6 +461,9 @@ impl PaintContext {
         let (ox, oy) = self.current_offset();
         let rotation = self.current_rotation();
         let (x, y) = self.snap_glyph_origin(x + ox, y + oy, rotation.is_some());
+        if self.glyph_clipped_out(x, y, &image, rotation.is_some()) {
+            return;
+        }
         self.secure_glyphs.push(DrawGlyph {
             x,
             y,
@@ -809,6 +885,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_rect_outside_the_clip_is_dropped() {
+        // The renderer would scissor it to nothing; recording it only costs a
+        // vertex and a batch entry. This is what bounds the draw list for
+        // content taller than its ScrollView.
+        let mut ctx = PaintContext::default();
+        ctx.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
+        ctx.fill_rect(Rect::new(0.0, -50.0, 100.0, 20.0), Color::WHITE);
+        assert!(ctx.rects.is_empty(), "fully-above rect must be dropped");
+        ctx.fill_rect(Rect::new(0.0, -10.0, 100.0, 20.0), Color::WHITE);
+        assert_eq!(ctx.rects.len(), 1, "a straddling rect must be kept");
+        ctx.pop_clip();
+    }
+
+    #[test]
+    fn culling_is_off_without_a_clip() {
+        // Unclipped draws (the main tree, an overlay layer) are untouched —
+        // there is nothing to be outside of.
+        let mut ctx = PaintContext::default();
+        ctx.fill_rect(Rect::new(-1000.0, -1000.0, 10.0, 10.0), Color::WHITE);
+        assert_eq!(ctx.rects.len(), 1);
+    }
+
+    #[test]
+    fn a_degenerate_quad_inside_the_clip_survives() {
+        // Zero-area draws — a space's empty glyph bitmap, a collapsed
+        // separator — must behave exactly as before culling: the test is
+        // strict disjointness, not an empty intersection.
+        let mut ctx = PaintContext::default();
+        ctx.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
+        ctx.fill_rect(Rect::new(50.0, 50.0, 0.0, 0.0), Color::WHITE);
+        assert_eq!(ctx.rects.len(), 1);
+        ctx.pop_clip();
+    }
+
+    #[test]
+    fn a_shadow_halo_reaching_into_the_clip_survives() {
+        // A shadow's quad is inflated by `blur` on every side (the renderer
+        // does the same), so the casting box can sit outside the clip while
+        // the halo still shows. Culling on the un-inflated box would erase it.
+        let mut ctx = PaintContext::default();
+        ctx.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
+        // Box ends 10px above the clip; a 24px blur reaches 14px inside it.
+        ctx.fill_shadow(Rect::new(0.0, -60.0, 100.0, 50.0), Color::BLACK, 0.0, 24.0);
+        assert_eq!(ctx.rects.len(), 1, "the halo overlaps the clip");
+        ctx.rects.clear();
+        // Same box, no reach: the blur is too small to cross the edge.
+        ctx.fill_shadow(Rect::new(0.0, -60.0, 100.0, 50.0), Color::BLACK, 0.0, 4.0);
+        assert!(ctx.rects.is_empty());
+        ctx.pop_clip();
+    }
+
+    #[test]
+    fn a_rotated_glyph_is_never_culled() {
+        // Rotated glyphs are placed by rotation math about a pivot, so the
+        // axis-aligned box reconstructed from the bitmap's bearings does not
+        // describe where the quad lands — culling on it could erase a visible
+        // chevron. `glyph_clipped_out` opts them out wholesale.
+        let ctx = {
+            let mut c = PaintContext::default();
+            c.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
+            c
+        };
+        let image = GlyphImage {
+            data: Vec::new(),
+            width: 8,
+            height: 8,
+            left: 0,
+            top: 8,
+            is_color: false,
+        };
+        assert!(
+            ctx.glyph_clipped_out(0.0, -500.0, &image, false),
+            "an upright glyph far above the clip is culled"
+        );
+        assert!(
+            !ctx.glyph_clipped_out(0.0, -500.0, &image, true),
+            "the same glyph under a rotation is kept"
+        );
     }
 
     #[test]

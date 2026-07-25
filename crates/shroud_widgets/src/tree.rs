@@ -22,6 +22,19 @@ use shroud_core::{AccessAction, AccessNode, AccessRole, Point, Rect, SecurityLev
 use shroud_layout::{FlexStyle, LayoutEngine, LayoutNodeId};
 use shroud_text::TextEngine;
 
+/// Slack allowed when skipping the `paint` of a widget scrolled outside the
+/// active clip (see [`WidgetTree::clipped_away`]).
+///
+/// Sized to swallow everything a stock widget draws beyond its own layout
+/// rect: a focus ring reaches `ring_offset + ring_width` (4 px in both built-in
+/// themes) and the deepest `Container::elevation` shadow reaches `offset_y +
+/// blur` = 36 px. The contract this sets for widget authors: **a widget that
+/// paints more than this far outside its layout rect must not count on running
+/// while it is scrolled out of a clipping ancestor.** Nothing in the framework
+/// comes close today; a hypothetical wide-halo widget would need to declare its
+/// overflow rather than rely on the constant being generous.
+const PAINT_CULL_MARGIN: f32 = 64.0;
+
 /// An entry in the widget tree.
 struct WidgetNode {
     widget: Box<dyn Widget>,
@@ -1634,13 +1647,60 @@ impl WidgetTree {
             return;
         }
         let layout_rect = self.layout.absolute_rect(node.layout_node);
-        node.widget.paint(layout_rect, ctx);
+        // Scrolled out of view? Skip the widget's own paint. Dropping the draw
+        // commands it would emit is already handled exactly by `PaintContext`
+        // (they'd be scissored away); the point of stopping one level earlier
+        // is the *work upstream of them* — a `TextWidget` shapes its string and
+        // rasterizes every glyph before it draws anything, so a 500-block
+        // markdown preview pays for the whole document on every frame to show
+        // one screenful. `Input` already culled its own glyphs this way; this
+        // generalizes it to any widget under any clip.
+        //
+        // Children are still walked: a widget's subtree is not guaranteed to
+        // sit inside its box (a `ScrollView`'s content column is taller than
+        // the viewport by definition), and the walk itself is cheap next to
+        // the shaping it guards.
+        if !self.clipped_away(layout_rect, idx, ctx) {
+            node.widget.paint(layout_rect, ctx);
+        }
 
         node.widget.paint_pre_children(layout_rect, ctx);
         for &child in &node.children {
             self.paint_node(child, ctx);
         }
         node.widget.paint_post_children(layout_rect, ctx);
+    }
+
+    /// Whether node `idx`, laid out at `layout_rect`, sits far enough outside
+    /// the active clip that skipping its `paint` cannot change a pixel.
+    ///
+    /// Unlike the per-command test in [`PaintContext`], this one is a
+    /// *heuristic*, because a widget may legitimately draw outside its own
+    /// layout rect: a focus ring sits `ring_offset + ring_width` px beyond the
+    /// edge, and `Container::shadow` casts a halo reaching `offset + blur` px
+    /// past it. [`PAINT_CULL_MARGIN`] is sized to clear both with room to
+    /// spare — see its docs for the contract a widget has to honor.
+    ///
+    /// The focused widget is never culled. Its `paint` is not purely visual:
+    /// `Input` republishes the IME cursor area and schedules the next caret
+    /// blink from there, and silently dropping that while the field is merely
+    /// scrolled out of view would leave the OS candidate window anchored to a
+    /// stale position.
+    fn clipped_away(&self, layout_rect: Rect, idx: usize, ctx: &PaintContext) -> bool {
+        let Some(clip) = ctx.current_clip() else {
+            return false;
+        };
+        if self.focus.focused() == Some(idx) {
+            return false;
+        }
+        let (ox, oy) = ctx.current_offset();
+        let m = PAINT_CULL_MARGIN;
+        let (left, top) = (layout_rect.origin.x + ox - m, layout_rect.origin.y + oy - m);
+        let (right, bottom) = (layout_rect.right() + ox + m, layout_rect.bottom() + oy + m);
+        right <= clip.origin.x
+            || left >= clip.right()
+            || bottom <= clip.origin.y
+            || top >= clip.bottom()
     }
 
     /// Build a framework-native accessibility snapshot of the whole tree

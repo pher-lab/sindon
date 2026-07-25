@@ -2260,11 +2260,15 @@ fn scroll_view_child_paint_uses_offset_and_clip() {
             // Instant scroll so the child's shifted position is deterministic.
             .scroll_transition(std::time::Duration::ZERO),
     );
+    // Tall enough to still straddle the viewport after the scroll below: a
+    // child shifted entirely above the clip is culled outright (see
+    // `offscreen_scroll_view_children_are_culled`), which would leave this
+    // test nothing to measure the offset against.
     let child = tree.add_child(
         root,
         Container::row()
             .width(200.0)
-            .height(50.0)
+            .height(400.0)
             .background(Color::rgb(1.0, 0.0, 0.0)),
     );
     tree.compute_layout(400.0, 400.0);
