@@ -81,6 +81,28 @@ IME — see below.
   utilities).
 - Linux / macOS: no-op today; reserved for future seccomp / sandbox hooks.
 
+**Not offered** — Code Integrity Guard (`ProcessSignaturePolicy` with
+`MicrosoftSignedOnly`): rejects every non-Microsoft-signed DLL mapped after
+it is applied. shroud deliberately exposes no `App` switch for this. It was
+measured on Windows 11 rather than reasoned about, and the result is that
+its cost lands in the wrong place:
+
+- It works, and it defends something real — under enforcement a running
+  shroud app kept rendering (GPU driver DLLs are WHQL-signed and pass) while
+  a third-party overlay DLL that had been injecting itself was rejected.
+- But it silently breaks third-party IMEs. Microsoft's own IME survives;
+  Google Japanese Input loses conversion entirely, leaving the user able to
+  type ASCII and nothing else. **No event is logged when this happens** —
+  the text service simply fails to activate — so an app author who enabled
+  it would have no way to connect the bug report to the cause.
+
+`shroud_security::hardening` keeps `enable_signature_audit()` and
+`enable_signature_enforcement()` so the measurement is reproducible, and
+`SHROUD_CIG_AUDIT=1` / `=enforce` applies them to any shroud app for a run.
+These are diagnostics, not a supported configuration. Note that audit mode
+under-reports: it stayed silent about a DLL that enforcement then blocked,
+so audit findings alone cannot clear this policy for an app.
+
 ### Display-capture prevention (Windows)
 
 - `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` is applied when

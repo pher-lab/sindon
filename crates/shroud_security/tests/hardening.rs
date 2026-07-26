@@ -13,7 +13,7 @@
 
 use shroud_security::hardening::{
     disable_core_dumps, enable_exploit_mitigation, enable_image_load_hardening,
-    enable_ptrace_protection,
+    enable_ptrace_protection, enable_signature_audit,
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -30,4 +30,16 @@ fn hardening_hooks_return_ok_on_host() {
     // to the test process only constrains subsequent loads, which is benign
     // for a local, system-IL test binary.
     enable_image_load_hardening().expect("enable_image_load_hardening failed on host");
+}
+
+/// Audit-mode Code Integrity Guard. Separate from the smoke test above
+/// because this one carries real information: it fails if
+/// `ProcessSignaturePolicy` turns out to be creation-time only, which is
+/// exactly the question a CIG feasibility study has to answer before any
+/// enforcing variant can be considered. Applying it to the test process
+/// blocks nothing — audit mode only writes to the CodeIntegrity log.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[test]
+fn signature_audit_policy_applies_at_runtime() {
+    enable_signature_audit().expect("enable_signature_audit failed on host");
 }

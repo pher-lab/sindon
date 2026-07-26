@@ -745,6 +745,37 @@ impl App {
                 log::warn!("Failed to enable image-load hardening: {}", e);
             }
         }
+        // Diagnostic escape hatch, deliberately env-var-only and absent
+        // from the builder: `SHROUD_CIG_AUDIT=1` turns on Code Integrity
+        // Guard in audit mode so a normal session records which DLLs an
+        // enforcing `MicrosoftSignedOnly` policy would have rejected.
+        // Nothing is blocked; findings land in the Windows
+        // `Microsoft-Windows-CodeIntegrity/Operational` event log. This
+        // exists to measure whether an opt-in enforcing variant is even
+        // affordable on a wgpu + IME process — see `docs/SECURITY.md`.
+        // Reported through `eprintln!` rather than `log::` because shroud
+        // installs no logger, and a silent probe is a useless probe.
+        // `SHROUD_CIG_AUDIT=enforce` runs the same probe with the policy
+        // actually enforcing, which is the only way to tell an honest
+        // "audit found nothing" from an audit that under-reports.
+        match std::env::var("SHROUD_CIG_AUDIT").as_deref() {
+            Ok("enforce") => match hardening::enable_signature_enforcement() {
+                Ok(()) => eprintln!(
+                    "[shroud] CIG ENFORCING — non-Microsoft-signed DLLs will be \
+                     rejected from here on. Experimental probe, not a supported mode."
+                ),
+                Err(e) => eprintln!("[shroud] CIG enforcement FAILED to apply: {}", e),
+            },
+            Ok(v) if v != "0" => match hardening::enable_signature_audit() {
+                Ok(()) => eprintln!(
+                    "[shroud] CIG audit mode ON (nothing is blocked). \
+                     Read findings with: Get-WinEvent -LogName \
+                     Microsoft-Windows-CodeIntegrity/Operational"
+                ),
+                Err(e) => eprintln!("[shroud] CIG audit mode FAILED to apply: {}", e),
+            },
+            _ => {}
+        }
 
         let event_loop = EventLoop::<AppEvent>::with_user_event()
             .build()
