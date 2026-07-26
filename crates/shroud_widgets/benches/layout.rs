@@ -236,6 +236,21 @@ fn bench_edit_keystroke(c: &mut Criterion) {
             },
         );
 
+        // The frame that changes nothing — ~91% of a real editing session.
+        // Line reuse alone still walked the whole document here to discover
+        // that; the input digest skips the walk entirely.
+        let mut engine = TextEngine::new();
+        let _ = engine.shape_edit_rich(&spans_a, fs, lh, wrap);
+        group.bench_with_input(
+            BenchmarkId::new("idle_repaint_rich", paragraphs),
+            &paragraphs,
+            |bencher, _| {
+                bencher.iter(|| {
+                    black_box(engine.shape_edit_rich(black_box(&spans_a), fs, lh, wrap));
+                });
+            },
+        );
+
         let mut engine = TextEngine::new();
         let mut flip = false;
         group.bench_with_input(

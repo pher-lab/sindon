@@ -1660,6 +1660,69 @@ fn incremental_rich_edits_reshape_only_the_touched_lines() {
 }
 
 #[test]
+fn an_unchanged_repaint_does_no_shaping_work_at_all() {
+    // Line reuse made a keystroke cheap, but every frame still walked the whole
+    // document just to discover nothing had changed — and in a real editing
+    // session ~91% of frames change nothing. `take_shape_stats` is where the
+    // skip shows: a repeat repaint must record no shaping *time*, not merely
+    // zero re-shaped lines.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let attrs = TextAttrs::default();
+    let doc: String = (0..40)
+        .map(|i| format!("line {i} with some words on it\n"))
+        .collect();
+
+    let first = engine.shape_edit_plain(&doc, fs, lh, None, &attrs);
+    let first_glyphs = first.shaped().glyphs.len();
+    let (_, warm_ns) = engine.take_shape_stats();
+    assert!(warm_ns > 0, "the cold shape must actually do work");
+    let _ = engine.take_reshaped_lines();
+
+    let again = engine.shape_edit_plain(&doc, fs, lh, None, &attrs);
+    assert_eq!(
+        engine.take_shape_stats(),
+        (0, 0),
+        "an unchanged repaint must not touch the buffer at all"
+    );
+    assert_eq!(engine.take_reshaped_lines(), 0);
+    assert_eq!(
+        again.shaped().glyphs.len(),
+        first_glyphs,
+        "the reused glyphs must be the ones the first shape produced"
+    );
+
+    // A real edit still goes through the line walk.
+    let edited = doc.replace("line 20 ", "line 20! ");
+    let _ = engine.shape_edit_plain(&edited, fs, lh, None, &attrs);
+    assert_eq!(engine.take_reshaped_lines(), 1);
+}
+
+#[test]
+fn an_unchanged_rich_repaint_does_no_shaping_work_at_all() {
+    // Same skip on the path a highlighted editor takes.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let doc: String = (0..40)
+        .map(|i| format!("line {i} with some words on it\n"))
+        .collect();
+    let spans = highlight_tiling(&doc);
+
+    let _ = engine.shape_edit_rich(&spans, fs, lh, None);
+    let (_, warm_ns) = engine.take_shape_stats();
+    assert!(warm_ns > 0, "the cold shape must actually do work");
+    let _ = engine.take_reshaped_lines();
+
+    let _ = engine.shape_edit_rich(&spans, fs, lh, None);
+    assert_eq!(
+        engine.take_shape_stats(),
+        (0, 0),
+        "an unchanged rich repaint must not re-tile or walk the document"
+    );
+    assert_eq!(engine.take_reshaped_lines(), 0);
+}
+
+#[test]
 fn clearing_the_shape_cache_drops_the_edit_buffer() {
     // The persistent buffer's lines hold the focused field's plaintext, so a
     // screen swap / lock — which clears the shape cache for exactly that
@@ -1679,6 +1742,13 @@ fn clearing_the_shape_cache_drops_the_edit_buffer() {
         engine.edit_selection_rects_with_trailing(text, 0, 3, fs),
         None
     );
+
+    // The memo of the previous frame's glyphs must go with it: serving it after
+    // the buffer is gone would pair live glyphs with a dead geometry source.
+    let _ = engine.take_shape_stats();
+    let _ = engine.shape_edit_plain(text, fs, lh, None, &attrs);
+    let (_, ns) = engine.take_shape_stats();
+    assert!(ns > 0, "the first shape after a clear must rebuild");
 }
 
 #[test]

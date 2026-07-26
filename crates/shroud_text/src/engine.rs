@@ -142,6 +142,11 @@ pub struct ComposedBlock {
 /// click / arrow-move resolution), so they must be readable after the buffer
 /// is shaped.
 ///
+/// Holds the glyphs behind an `Rc` because a repaint whose inputs are
+/// unchanged hands back the *same* `ShapedText` the previous frame produced.
+/// Cloning it instead would reintroduce exactly the cost the `measure_*` split
+/// was added to remove.
+///
 /// The cosmic buffer itself lives on the engine (`edit_slot`), not here, so it
 /// can be **reused across frames** — that is what makes an edit re-shape only
 /// the lines it touched. This value is therefore just the frame's glyphs plus
@@ -151,7 +156,7 @@ pub struct ComposedBlock {
 /// [`edit_caret`](TextEngine::edit_caret)) read the slot and are only valid in
 /// the same frame that shaped it.
 pub struct EditBuffer {
-    shaped: ShapedText,
+    shaped: std::rc::Rc<ShapedText>,
 }
 
 impl EditBuffer {
@@ -422,6 +427,20 @@ pub struct TextEngine {
     /// a missed optimization, never a wrong answer: the line sync makes the
     /// buffer's content equal the requested text either way.
     edit_slot: Option<Buffer>,
+    /// Digest of the inputs `edit_slot` was last shaped for, paired with the
+    /// glyphs that came out.
+    ///
+    /// Line reuse made a keystroke cheap, but it still walked the whole
+    /// document every frame to *discover* what changed — and in a real editing
+    /// session only ~9% of frames change anything, so ~91% were paying that
+    /// walk for nothing (measured on knot at 0.78 ms mean, 3.0 ms worst, per
+    /// idle frame). Comparing one digest first skips the walk outright.
+    ///
+    /// Keyed by the same `shape_key_*` digest the shape cache uses, so — like
+    /// that cache — it stores **no plaintext**, only a hash and the resulting
+    /// glyph positions. Dropped alongside the slot in
+    /// [`clear_shape_cache`](Self::clear_shape_cache).
+    edit_memo: Option<(u64, std::rc::Rc<ShapedText>)>,
 }
 
 impl Default for TextEngine {
@@ -442,6 +461,7 @@ impl TextEngine {
             shape_ns: 0,
             reshaped_lines: 0,
             edit_slot: None,
+            edit_memo: None,
         }
     }
 
@@ -488,6 +508,7 @@ impl TextEngine {
     pub fn clear_shape_cache(&mut self) {
         self.shape_cache.clear();
         self.edit_slot = None;
+        self.edit_memo = None;
     }
 
     /// Access the underlying FontSystem (for advanced usage).
@@ -1318,6 +1339,9 @@ impl TextEngine {
     /// **Incremental.** The buffer survives between frames and only the lines
     /// whose text actually changed are re-shaped, so typing inside one line of
     /// a long note costs one line's shaping rather than the whole document's.
+    /// A repaint whose inputs are unchanged skips even the line walk and hands
+    /// back the previous frame's glyphs — the common case by a wide margin,
+    /// since most frames in an editing session change nothing.
     /// Still not routed through the shape cache — every keystroke's value is a
     /// unique key, so caching would only churn the LRU; the reuse lives in the
     /// buffer's per-line caches instead.
@@ -1329,14 +1353,31 @@ impl TextEngine {
         max_width: Option<f32>,
         attrs: &TextAttrs,
     ) -> EditBuffer {
+        let key = shape_key_plain(text, font_size, line_height, max_width, attrs, self.scale);
+        if let Some(shaped) = self.edit_memo_hit(key) {
+            return EditBuffer { shaped };
+        }
         let mut buffer = self.take_edit_buffer(font_size, line_height, max_width);
         let t0 = std::time::Instant::now();
         let changed = sync_edit_lines(&mut buffer, text, &attrs.as_cosmic());
         buffer.shape_until_scroll(&mut self.font_system, false);
         self.record_shape(t0, changed);
-        let shaped = extract_shaped_plain(&buffer, font_size, self.scale);
+        let shaped = std::rc::Rc::new(extract_shaped_plain(&buffer, font_size, self.scale));
         self.edit_slot = Some(buffer);
+        self.edit_memo = Some((key, std::rc::Rc::clone(&shaped)));
         EditBuffer { shaped }
+    }
+
+    /// The glyphs from the previous frame, when `key` says nothing that affects
+    /// them has changed since.
+    ///
+    /// Requires the buffer to still be parked: the caret / hit-test / selection
+    /// queries read *that*, not the memo, so handing back cached glyphs without
+    /// a live buffer behind them would pair correct glyphs with a dead
+    /// geometry source.
+    fn edit_memo_hit(&self, key: u64) -> Option<std::rc::Rc<ShapedText>> {
+        let (memo_key, shaped) = self.edit_memo.as_ref()?;
+        (*memo_key == key && self.edit_slot.is_some()).then(|| std::rc::Rc::clone(shaped))
     }
 
     /// Take the persistent edit buffer — creating an empty one when the slot is
@@ -1411,14 +1452,19 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> EditBuffer {
+        let key = shape_key_rich(spans, font_size, line_height, max_width, self.scale);
+        if let Some(shaped) = self.edit_memo_hit(key) {
+            return EditBuffer { shaped };
+        }
         let mut buffer = self.take_edit_buffer(font_size, line_height, max_width);
         let t0 = std::time::Instant::now();
         let default_attrs = TextAttrs::default();
         let changed = sync_edit_lines_rich(&mut buffer, spans, &default_attrs.as_cosmic());
         buffer.shape_until_scroll(&mut self.font_system, false);
         self.record_shape(t0, changed);
-        let shaped = extract_shaped_rich(&buffer, spans, font_size, self.scale);
+        let shaped = std::rc::Rc::new(extract_shaped_rich(&buffer, spans, font_size, self.scale));
         self.edit_slot = Some(buffer);
+        self.edit_memo = Some((key, std::rc::Rc::clone(&shaped)));
         EditBuffer { shaped }
     }
 
