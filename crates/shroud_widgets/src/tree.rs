@@ -959,6 +959,14 @@ impl WidgetTree {
                 TreeCommand::AdvanceFocus { dir } => {
                     self.advance_focus(dir, event_ctx);
                 }
+                TreeCommand::Reveal { idx } => {
+                    // Assigned, not or-ed — the same rule the focus path uses
+                    // (see `focus_with_reason`), which is what lets a reveal
+                    // queued after a focus supersede the one that focus armed.
+                    if self.contains(idx) {
+                        self.pending_reveal = Some(idx);
+                    }
+                }
             }
         }
     }

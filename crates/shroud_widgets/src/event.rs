@@ -220,6 +220,11 @@ pub(crate) enum TreeCommand {
     AdvanceFocus {
         dir: FocusDirection,
     },
+    /// Scroll a widget into view in its scrolling ancestors, without touching
+    /// focus — the reveal half of a focus change, on its own.
+    Reveal {
+        idx: usize,
+    },
 }
 
 /// Keyboard modifier state at the time of an event.
@@ -477,6 +482,26 @@ impl EventContext {
     /// its own neighbour will disagree with Tab sooner or later.
     pub fn advance_focus(&mut self, dir: FocusDirection) {
         self.commands.push(TreeCommand::AdvanceFocus { dir });
+    }
+
+    /// Queue a scroll-into-view for `idx` — the same reveal a focus change
+    /// performs, without moving focus.
+    ///
+    /// For a *roving* container, whose cursor walks between children that are
+    /// not themselves focus targets: focus stays on the container, so nothing
+    /// would otherwise scroll the child the user just arrowed onto back into
+    /// view. A [`TreeView`](crate::TreeView) row is the case this exists for.
+    ///
+    /// Applied against the next layout pass, so it works from a handler that
+    /// runs before the tree has been laid out. Silently dropped if `idx` is
+    /// tombstoned by then, and revealing a widget that is already fully
+    /// visible moves nothing.
+    ///
+    /// Queued reveals are *assigned*, not merged — the last request of a
+    /// dispatch is the one that fires, including over the reveal a
+    /// [`focus`](Self::focus) queued earlier in the same dispatch.
+    pub fn reveal(&mut self, idx: usize) {
+        self.commands.push(TreeCommand::Reveal { idx });
     }
 
     /// Open a new overlay layer. `root_widget` provides the layer's root
