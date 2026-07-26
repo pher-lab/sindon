@@ -337,7 +337,7 @@ pub fn build(
     tree.add_child(
         editor_area,
         Input::new()
-            .placeholder(i18n::tr(Key::EditorTitlePlaceholder))
+            .reactive_placeholder(|| i18n::tr(Key::EditorTitlePlaceholder).to_string())
             .value(title_sig)
             .font_size(20.0)
             .on_change(move |new_title, _ctx| {
@@ -406,7 +406,7 @@ pub fn build(
     let body_node = tree.add_child(
         body_wrap,
         Input::new()
-            .placeholder(i18n::tr(Key::EditorBodyPlaceholder))
+            .reactive_placeholder(|| i18n::tr(Key::EditorBodyPlaceholder).to_string())
             .multiline()
             .height_full()
             .value(body_sig)

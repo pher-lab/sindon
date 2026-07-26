@@ -512,7 +512,11 @@ pub struct Input {
     /// caller that rewrites the value should also write the intended post-edit
     /// selection here — `Some(range)` to re-select, `None` to clear.
     selection_source: Option<Signal<Option<(usize, usize)>>>,
-    placeholder: String,
+    /// Prompt shown while the value is empty. Reactive so a language switch
+    /// (or any other signal-driven relabel) reaches it on the next frame
+    /// rather than waiting for the screen to be rebuilt — the placeholder is
+    /// also this field's accessible name, so a stale one is read aloud too.
+    placeholder: Reactive<String>,
     font_size: Option<f32>,
     focused: bool,
     /// Multi-line / textarea mode. When `true`, Enter inserts `\n`
@@ -745,7 +749,7 @@ impl Input {
             source: None,
             cursor_source: None,
             selection_source: None,
-            placeholder: String::new(),
+            placeholder: Reactive::Static(String::new()),
             font_size: None,
             focused: false,
             multiline: false,
@@ -868,8 +872,24 @@ impl Input {
     }
 
     /// Set the placeholder text.
+    ///
+    /// Callers whose prompt can change while the field is on screen — a
+    /// language switch, most commonly — should use
+    /// [`reactive_placeholder`](Self::reactive_placeholder) instead.
     pub fn placeholder(mut self, text: impl Into<String>) -> Self {
-        self.placeholder = text.into();
+        self.placeholder = Reactive::Static(text.into());
+        self
+    }
+
+    /// Set a placeholder produced by a closure on every frame.
+    ///
+    /// Parallel to [`Button::reactive_label`](crate::Button::reactive_label)
+    /// and [`TextWidget::reactive`](crate::TextWidget::reactive). The closure
+    /// is re-read on each paint *and* on each accessibility snapshot, so a
+    /// signal write (`language.set(Ja)`) reaches both the drawn prompt and the
+    /// screen-reader name on the next frame — no tree rebuild required.
+    pub fn reactive_placeholder(mut self, f: impl Fn() -> String + 'static) -> Self {
+        self.placeholder = Reactive::derive(f);
         self
     }
 
@@ -1842,8 +1862,9 @@ impl Widget for Input {
         // what a screen-reader user needs to read their own document. Secret
         // entry is `SecureInput`, which is protected separately.
         let mut node = AccessNode::new(AccessRole::TextInput).value(self.value_clone());
-        if !self.placeholder.is_empty() {
-            node = node.name(self.placeholder.clone());
+        let placeholder = self.placeholder.get();
+        if !placeholder.is_empty() {
+            node = node.name(placeholder);
         }
         Some(node)
     }
@@ -2439,9 +2460,10 @@ impl Widget for Input {
         {
             let value = self.value.borrow();
             if value_is_empty {
-                if !self.placeholder.is_empty() {
+                let placeholder = self.placeholder.get();
+                if !placeholder.is_empty() {
                     let shaped = ctx.text_engine.shape_text(
-                        &self.placeholder,
+                        &placeholder,
                         font_size,
                         line_height,
                         wrap_width,

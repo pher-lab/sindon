@@ -2921,6 +2921,82 @@ fn reactive_text_paints_current_value() {
     );
 }
 
+// ── Reactive placeholder ──────────────────────────────────────────
+
+#[test]
+fn reactive_placeholder_repaints_without_a_rebuild() {
+    // The i18n case: the language flips while the field is on screen, and the
+    // prompt has to follow on the next frame — the screen is not rebuilt.
+    // Glyph count stands in for "which string got shaped", as in
+    // `reactive_text_paints_current_value` above.
+    let long = Signal::new(false);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    tree.add_child(
+        root,
+        Input::new()
+            .reactive_placeholder(move || if long.get() { "aaaaaaaa" } else { "a" }.to_string()),
+    );
+    tree.compute_layout(400.0, 100.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    let short_glyphs = ctx.glyphs.len();
+    assert!(short_glyphs >= 1, "the placeholder paints while empty");
+
+    long.set(true);
+    let mut ctx2 = PaintContext::default();
+    tree.paint(&mut ctx2);
+
+    assert!(
+        ctx2.glyphs.len() > short_glyphs,
+        "the placeholder should re-read its closure each paint \
+         (got {} glyphs, then {})",
+        short_glyphs,
+        ctx2.glyphs.len(),
+    );
+}
+
+#[test]
+fn secure_reactive_placeholder_repaints_without_a_rebuild() {
+    let long = Signal::new(false);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(100.0));
+    tree.add_child(
+        root,
+        SecureInput::new()
+            .reactive_placeholder(move || if long.get() { "aaaaaaaa" } else { "a" }.to_string()),
+    );
+    tree.compute_layout(400.0, 100.0);
+
+    let mut ctx = PaintContext::default();
+    tree.paint(&mut ctx);
+    let short_glyphs = ctx.glyphs.len();
+    assert!(short_glyphs >= 1, "the placeholder paints while empty");
+
+    long.set(true);
+    let mut ctx2 = PaintContext::default();
+    tree.paint(&mut ctx2);
+
+    assert!(
+        ctx2.glyphs.len() > short_glyphs,
+        "a masked field's prompt is not a secret and follows its closure too \
+         (got {} glyphs, then {})",
+        short_glyphs,
+        ctx2.glyphs.len(),
+    );
+}
+
+#[test]
+fn static_placeholder_still_accepts_a_literal() {
+    // The `impl Into<String>` builder is unchanged — the reactive field must
+    // not have forced existing callers onto a closure.
+    let _ = Input::new().placeholder("Enter text");
+    let _ = SecureInput::new().placeholder(String::from("Enter password"));
+}
+
 #[test]
 fn text_color_accepts_literal_via_reactive() {
     // Literal `Color` should still work — proves the `impl<T> From<T>`

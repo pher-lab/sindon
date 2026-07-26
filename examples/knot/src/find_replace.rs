@@ -115,7 +115,7 @@ pub fn build(
         tree.add_child(
             find_row,
             Input::new()
-                .placeholder(i18n::tr(Key::FindReplaceFindPlaceholder))
+                .reactive_placeholder(|| i18n::tr(Key::FindReplaceFindPlaceholder).to_string())
                 .value(sigs.query)
                 .grow(1.0)
                 // Enter in the Find field jumps to the next match.
@@ -214,7 +214,7 @@ pub fn build(
         tree.add_child(
             replace_row,
             Input::new()
-                .placeholder(i18n::tr(Key::FindReplaceReplacePlaceholder))
+                .reactive_placeholder(|| i18n::tr(Key::FindReplaceReplacePlaceholder).to_string())
                 .value(sigs.replace)
                 .grow(1.0)
                 // Enter in the Replace field replaces the current match.

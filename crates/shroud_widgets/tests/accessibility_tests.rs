@@ -128,6 +128,75 @@ fn plain_input_exposes_its_text() {
     assert!(!field.node.is_protected());
 }
 
+// ── Reactive names ────────────────────────────────────────────────
+
+#[test]
+fn reactive_placeholder_renames_both_field_kinds_without_a_rebuild() {
+    // A placeholder is the accessible *name* of both field kinds — the only
+    // text a `SecureInput` gives an AT at all. So a language switch that never
+    // reached it would leave a screen reader announcing the old language,
+    // silently, long after the visible UI had moved on. The snapshot is walked
+    // fresh every frame, so re-reading the closure is all it takes.
+    let ja = shroud_reactive::Signal::new(false);
+    let (a, b) = (ja, ja);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    tree.add_child(
+        root,
+        Input::new()
+            .reactive_placeholder(move || if a.get() { "検索" } else { "Search" }.to_string()),
+    );
+    tree.add_child(
+        root,
+        SecureInput::new().reactive_placeholder(move || {
+            if b.get() {
+                "マスターパスワード"
+            } else {
+                "Master password"
+            }
+            .to_string()
+        }),
+    );
+    tree.compute_layout(800.0, 600.0);
+
+    let snap = tree.accessibility_snapshot();
+    assert_eq!(
+        find_role(&snap, AccessRole::TextInput)
+            .unwrap()
+            .node
+            .name
+            .as_deref(),
+        Some("Search")
+    );
+    assert_eq!(
+        find_role(&snap, AccessRole::PasswordInput)
+            .unwrap()
+            .node
+            .name
+            .as_deref(),
+        Some("Master password")
+    );
+
+    // Flip the language — no rebuild, no relayout, just the next snapshot.
+    ja.set(true);
+    let snap = tree.accessibility_snapshot();
+    assert_eq!(
+        find_role(&snap, AccessRole::TextInput)
+            .unwrap()
+            .node
+            .name
+            .as_deref(),
+        Some("検索")
+    );
+    let pw = find_role(&snap, AccessRole::PasswordInput).unwrap();
+    assert_eq!(pw.node.name.as_deref(), Some("マスターパスワード"));
+    assert!(
+        pw.node.is_protected() && pw.node.exposed_value().is_none(),
+        "a reactive name must not have loosened the protected-value gate"
+    );
+}
+
 // ── Roles, names, state ───────────────────────────────────────────
 
 #[test]

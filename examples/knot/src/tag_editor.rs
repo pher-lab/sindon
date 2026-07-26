@@ -136,7 +136,7 @@ pub fn build(
     tree.add_child(
         section,
         Input::new()
-            .placeholder(i18n::tr(Key::TagsAddPlaceholder))
+            .reactive_placeholder(|| i18n::tr(Key::TagsAddPlaceholder).to_string())
             .value(input_sig)
             .font_size(13.0)
             // Enter commits the input (preferring the top autocomplete match,
