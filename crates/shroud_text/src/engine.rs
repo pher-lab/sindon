@@ -3,8 +3,8 @@
 use crate::attrs::{FontStyle, TextAttrs};
 use crate::span::{TextSpan, cosmic_to_shroud, shroud_to_cosmic};
 use cosmic_text::{
-    AttrsList, Buffer, BufferLine, Cursor, FontSystem, LineEnding, LineIter, Metrics, Scroll,
-    Shaping, SwashCache, SwashContent,
+    Attrs, AttrsList, BidiParagraphs, Buffer, BufferLine, Cursor, FontSystem, LineEnding, LineIter,
+    Metrics, Scroll, Shaping, SwashCache, SwashContent,
 };
 use shroud_core::{Color, Rect};
 use std::collections::HashMap;
@@ -1399,6 +1399,11 @@ impl TextEngine {
     /// Color-only spans shape to the identical layout as the plain value (see
     /// the `Input` highlighter invariant), so caret / hit / selection queries
     /// against this buffer agree with the plain-attrs standalone methods.
+    ///
+    /// Incremental on the same persistent buffer as the plain path — this is
+    /// the path a highlighted editor actually takes, so it is the one that
+    /// decides what a keystroke in a long note costs. See `sync_edit_lines_rich`
+    /// for the two ways the rich line model differs from the plain one.
     pub fn shape_edit_rich(
         &mut self,
         spans: &[TextSpan],
@@ -1406,12 +1411,13 @@ impl TextEngine {
         line_height: f32,
         max_width: Option<f32>,
     ) -> EditBuffer {
-        let buffer = self.build_rich_buffer(spans, font_size, line_height, max_width);
+        let mut buffer = self.take_edit_buffer(font_size, line_height, max_width);
+        let t0 = std::time::Instant::now();
+        let default_attrs = TextAttrs::default();
+        let changed = sync_edit_lines_rich(&mut buffer, spans, &default_attrs.as_cosmic());
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        self.record_shape(t0, changed);
         let shaped = extract_shaped_rich(&buffer, spans, font_size, self.scale);
-        // Parks in the same slot as the plain path so the derived queries read
-        // one place. Still a full rebuild per frame — the rich span run has to
-        // be tiled back into per-line `AttrsList`s before it can be diffed the
-        // way `sync_edit_lines` diffs plain text.
         self.edit_slot = Some(buffer);
         EditBuffer { shaped }
     }
@@ -1627,6 +1633,122 @@ fn set_or_push_line(
             true
         }
     }
+}
+
+/// Rich twin of [`sync_edit_lines`]: rewrite `buffer`'s lines to spell the
+/// concatenation of `spans`, touching only the lines that differ.
+///
+/// Mirrors `Buffer::set_rich_text`, **including the two ways the rich line
+/// model differs from the plain one** — get either wrong and the reused buffer
+/// stops matching a freshly built one:
+///
+/// 1. Paragraphs are split with `BidiParagraphs`, not `LineIter`. It yields the
+///    line *contents* (separators dropped) and swallows a trailing empty
+///    paragraph.
+/// 2. Every line is stamped with `LineEnding::default()` rather than its real
+///    ending, so the trailing empty line can't be keyed off the last line's
+///    ending the way `sync_edit_lines` does — it is keyed off the source
+///    string's last character instead, exactly as the fork's `set_rich_text`
+///    does. Without it the rich buffer is one line shorter than the plain one
+///    for any value ending in a break, and a caret can't reach the final blank
+///    line.
+///
+/// Note what makes a line "differ" here: the per-line `AttrsList` carries each
+/// span's *index* as metadata (that is how `extract_shaped_rich` groups glyphs
+/// back into span boxes). So an edit that changes how many spans precede a line
+/// invalidates it even when its glyphs would be identical — correct, but
+/// pessimistic. Ordinary typing inside an existing span leaves the indices
+/// alone, which is the case that matters.
+fn sync_edit_lines_rich<'a>(
+    buffer: &mut Buffer,
+    spans: &'a [TextSpan],
+    default_attrs: &Attrs<'_>,
+) -> usize {
+    // Concatenate the run and remember each span's byte range, tagging its
+    // attrs with the span index the way `build_rich_buffer` does.
+    let mut string = String::new();
+    let mut ranges: Vec<((usize, usize), Attrs<'a>)> = Vec::with_capacity(spans.len());
+    for (i, s) in spans.iter().enumerate() {
+        let start = string.len();
+        string.push_str(&s.text);
+        let mut a = s.attrs.as_cosmic().metadata(i);
+        if let Some(c) = s.color {
+            a = a.color(shroud_to_cosmic(c));
+        }
+        ranges.push(((start, string.len()), a));
+    }
+
+    let string_start = string.as_ptr() as usize;
+    let mut count = 0usize;
+    let mut changed = 0usize;
+
+    // Both lines and spans run left to right, so walk them together rather
+    // than intersecting every span with every line — a highlighted document
+    // has a span per word, and the quadratic version costs more than the
+    // shaping this whole function exists to avoid.
+    let mut first_span = 0usize;
+
+    for line in BidiParagraphs::new(&string) {
+        let line_start = line.as_ptr() as usize - string_start;
+        let line_end = line_start + line.len();
+
+        // Spans that end at or before this line's start can never be reached
+        // again. A span straddling the boundary ends *after* it, so it stays.
+        while first_span < ranges.len() && ranges[first_span].0.1 <= line_start {
+            first_span += 1;
+        }
+
+        // Intersect the overlapping spans with this line. Ranges are
+        // line-relative, and a span matching the defaults is skipped — both
+        // matching what `set_rich_text` builds.
+        let mut attrs_list = AttrsList::new(default_attrs);
+        for ((span_start, span_end), attrs) in ranges[first_span..]
+            .iter()
+            .take_while(|((span_start, _), _)| *span_start < line_end)
+        {
+            let start = (*span_start).max(line_start);
+            let end = (*span_end).min(line_end);
+            if start < end && *attrs != attrs_list.defaults() {
+                attrs_list.add_span(start - line_start..end - line_start, attrs);
+            }
+        }
+
+        if set_or_push_line(buffer, count, line, LineEnding::default(), attrs_list) {
+            changed += 1;
+        }
+        count += 1;
+    }
+
+    // `BidiParagraphs` yields nothing at all for an empty run, but
+    // `set_rich_text` still emits one empty line — its "reached only if this
+    // text is empty" branch. An empty field is one row tall, not zero, and the
+    // caret has to have a row to sit on.
+    if count == 0 {
+        if set_or_push_line(
+            buffer,
+            0,
+            "",
+            LineEnding::default(),
+            AttrsList::new(default_attrs),
+        ) {
+            changed += 1;
+        }
+        count = 1;
+    } else if matches!(string.chars().next_back(), Some('\n' | '\r')) {
+        if set_or_push_line(
+            buffer,
+            count,
+            "",
+            LineEnding::None,
+            AttrsList::new(default_attrs),
+        ) {
+            changed += 1;
+        }
+        count += 1;
+    }
+
+    buffer.lines.truncate(count);
+    changed
 }
 
 /// Selection/underline rects for the cursor range `[start, end)` over an

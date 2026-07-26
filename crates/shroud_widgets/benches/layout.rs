@@ -216,8 +216,57 @@ fn bench_edit_keystroke(c: &mut Criterion) {
                 });
             },
         );
+
+        // The same two documents through the *rich* path — what a field with a
+        // live highlighter (knot's editor) actually costs per keystroke.
+        let (spans_a, spans_b) = (highlight_tiling(&a), highlight_tiling(&b));
+
+        let mut engine = TextEngine::new();
+        let _ = engine.shape_edit_rich(&spans_a, fs, lh, wrap);
+        let mut flip = false;
+        group.bench_with_input(
+            BenchmarkId::new("incremental_rich", paragraphs),
+            &paragraphs,
+            |bencher, _| {
+                bencher.iter(|| {
+                    flip = !flip;
+                    let spans = if flip { &spans_b } else { &spans_a };
+                    black_box(engine.shape_edit_rich(black_box(spans), fs, lh, wrap));
+                });
+            },
+        );
+
+        let mut engine = TextEngine::new();
+        let mut flip = false;
+        group.bench_with_input(
+            BenchmarkId::new("full_rebuild_rich", paragraphs),
+            &paragraphs,
+            |bencher, _| {
+                bencher.iter(|| {
+                    flip = !flip;
+                    let spans = if flip { &spans_b } else { &spans_a };
+                    // Clearing first forces the miss, which is the whole-buffer
+                    // rebuild the rich editing path used to do every frame.
+                    engine.clear_shape_cache();
+                    black_box(engine.shape_rich(black_box(spans), fs, lh, wrap));
+                });
+            },
+        );
     }
     group.finish();
+}
+
+/// Tile a document into color-only spans the way a live highlighter does: one
+/// span per whitespace-delimited word, every third one colored.
+fn highlight_tiling(text: &str) -> Vec<shroud_text::TextSpan> {
+    let accent = shroud_core::Color::rgb(0.85, 0.4, 0.2);
+    text.split_inclusive(' ')
+        .enumerate()
+        .map(|(i, chunk)| {
+            let span = shroud_text::TextSpan::new(chunk);
+            if i % 3 == 0 { span.color(accent) } else { span }
+        })
+        .collect()
 }
 
 criterion_group!(

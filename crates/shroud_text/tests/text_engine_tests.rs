@@ -1539,6 +1539,126 @@ fn incremental_edits_match_a_cold_shape() {
     }
 }
 
+/// Tile `text` into color-only spans the way a live highlighter does: one span
+/// per whitespace-delimited word, every third one colored.
+fn highlight_tiling(text: &str) -> Vec<TextSpan> {
+    let mut spans = Vec::new();
+    let accent = Color::rgb(0.85, 0.4, 0.2);
+    for (i, chunk) in text.split_inclusive(' ').enumerate() {
+        let span = TextSpan::new(chunk);
+        spans.push(if i % 3 == 0 { span.color(accent) } else { span });
+    }
+    if spans.is_empty() {
+        spans.push(TextSpan::new(""));
+    }
+    spans
+}
+
+#[test]
+fn incremental_rich_edits_match_a_cold_shape() {
+    // The rich path is the one a highlighted editor takes, and its line model
+    // differs from the plain one twice over (BidiParagraphs split, synthetic
+    // line endings). Pin every intermediate state of an edit sequence against
+    // the from-scratch rich shape, and the derived caret against the plain
+    // standalone path — the highlighter invariant says color-only spans lay out
+    // identically to the plain value.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let attrs = TextAttrs::default();
+    let wrap = Some(140.0);
+
+    let sequence = [
+        "",
+        "alpha",
+        "alpha beta",
+        "alpha beta\n",
+        "alpha beta\ngamma",
+        "alpha beta\ngamma delta\nepsilon",
+        "alpha beta\ngamma delta epsilon zeta eta theta iota kappa",
+        "alpha beta\n\u{65E5}\u{672C}\u{8A9E} mixed\ntail",
+        "alpha beta\ntail",
+        "",
+    ];
+
+    for text in sequence {
+        let spans = highlight_tiling(text);
+        let got = engine.shape_edit_rich(&spans, fs, lh, wrap);
+        // `shape_rich` builds a fresh buffer, so it is the cold ground truth.
+        let want = engine.shape_rich(&spans, fs, lh, wrap);
+
+        assert_eq!(
+            got.shaped().glyphs.len(),
+            want.glyphs.len(),
+            "rich glyph count after {text:?}"
+        );
+        for (a, b) in got.shaped().glyphs.iter().zip(&want.glyphs) {
+            assert_eq!((a.x, a.y), (b.x, b.y), "rich glyph position after {text:?}");
+            assert_eq!(a.color, b.color, "rich glyph color after {text:?}");
+            assert_eq!(
+                a.cache_key, b.cache_key,
+                "rich glyph identity after {text:?}"
+            );
+        }
+        assert_eq!(
+            got.shaped().span_boxes,
+            want.span_boxes,
+            "span boxes after {text:?}"
+        );
+        assert_eq!(
+            (got.shaped().width, got.shaped().height),
+            (want.width, want.height),
+            "rich block extent after {text:?}"
+        );
+
+        for off in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+            assert_eq!(
+                engine.edit_caret(text, off, fs, lh, wrap, &attrs),
+                engine.caret_at_offset_attrs(text, off, fs, lh, wrap, &attrs),
+                "rich caret at offset {off} after {text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn incremental_rich_edits_reshape_only_the_touched_lines() {
+    // Same reuse guarantee as the plain path, on the path knot's editor
+    // actually uses.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+
+    let mut lines: Vec<String> = (0..40)
+        .map(|i| format!("line {i} with some words on it"))
+        .collect();
+
+    let spans = highlight_tiling(&lines.join("\n"));
+    let _ = engine.shape_edit_rich(&spans, fs, lh, None);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        40,
+        "a cold buffer shapes every line"
+    );
+
+    // Typing inside one line does not change how many spans precede the
+    // others, so their tiling — and their cached shaping — survives.
+    lines[20].push('x');
+    let spans = highlight_tiling(&lines.join("\n"));
+    let _ = engine.shape_edit_rich(&spans, fs, lh, None);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        1,
+        "typing inside one line must not re-shape the rest of the document"
+    );
+
+    let spans = highlight_tiling(&lines.join("\n"));
+    let _ = engine.shape_edit_rich(&spans, fs, lh, None);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        0,
+        "an unchanged repaint must not shape"
+    );
+}
+
 #[test]
 fn clearing_the_shape_cache_drops_the_edit_buffer() {
     // The persistent buffer's lines hold the focused field's plaintext, so a
