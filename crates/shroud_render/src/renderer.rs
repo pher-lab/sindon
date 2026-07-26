@@ -307,7 +307,7 @@ pub struct RenderTimings {
     pub acquire: Duration,
     /// The `present()` call.
     pub present: Duration,
-    /// [`post_frame_secure_clear`](Self::post_frame_secure_clear): zeroing
+    /// `post_frame_secure_clear`: zeroing
     /// the secure atlas plus the `device.poll(Wait)` that proves the GPU
     /// finished doing so. Runs on every frame, not only frames that drew
     /// secure glyphs.
