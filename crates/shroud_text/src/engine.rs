@@ -272,6 +272,23 @@ impl ShapeCache {
         })
     }
 
+    /// Return just the cached `(width, height)` for `key`, bumping recency,
+    /// without copying the glyph vector.
+    ///
+    /// The layout pass only ever asks text how big it is, and it asks several
+    /// times per widget per frame (Taffy probes min-content and max-content
+    /// before the final pass). Serving those through [`get`](Self::get) meant
+    /// a full `Vec<ShapedGlyph>` clone every time — measured at ~5.2 ns per
+    /// glyph, which is ~90% of the layout cost of a text-heavy tree.
+    fn dimensions(&mut self, key: u64) -> Option<(f32, f32)> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.map.get_mut(&key).map(|entry| {
+            entry.1 = clock;
+            (entry.0.width, entry.0.height)
+        })
+    }
+
     /// Insert `value` under `key`, evicting the least-recently-used entry first
     /// if a *new* key would push the map past the cap.
     fn insert(&mut self, key: u64, value: ShapedText) {
@@ -593,6 +610,53 @@ impl TextEngine {
         shaped
     }
 
+    /// Size of `text` under the given metrics / wrap / attrs, without
+    /// materialising its glyphs.
+    ///
+    /// Same inputs, same cache and same answer as
+    /// [`shape_text_attrs`](Self::shape_text_attrs) — but a cache hit returns
+    /// two floats instead of cloning the whole `ShapedText`. Use this from
+    /// `Widget::measure`, which only ever needs the box; use `shape_text_attrs`
+    /// when the glyphs themselves are going to be drawn.
+    ///
+    /// A miss still shapes and populates the cache, so the following paint
+    /// finds the glyphs already there.
+    pub fn measure_text_attrs(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+        attrs: &TextAttrs,
+    ) -> (f32, f32) {
+        let key = shape_key_plain(text, font_size, line_height, max_width, attrs, self.scale);
+        if let Some(dims) = self.shape_cache.dimensions(key) {
+            return dims;
+        }
+        let shaped = self.shape_text_attrs_uncached(text, font_size, line_height, max_width, attrs);
+        let dims = (shaped.width, shaped.height);
+        self.shape_cache.insert(key, shaped);
+        dims
+    }
+
+    /// Size of `text` with default attributes — the [`shape_text`](Self::shape_text)
+    /// twin of [`measure_text_attrs`](Self::measure_text_attrs).
+    pub fn measure_text(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> (f32, f32) {
+        self.measure_text_attrs(
+            text,
+            font_size,
+            line_height,
+            max_width,
+            &TextAttrs::default(),
+        )
+    }
+
     /// Shape plain text with default attributes, **bypassing the cache**.
     ///
     /// For `SecureText`'s transient secret reveal: the shaped glyphs encode the
@@ -687,6 +751,27 @@ impl TextEngine {
         let shaped = self.shape_rich_uncached(spans, font_size, line_height, max_width);
         self.shape_cache.insert(key, shaped.clone());
         shaped
+    }
+
+    /// Size of a rich span run — the [`shape_rich`](Self::shape_rich) twin of
+    /// [`measure_text_attrs`](Self::measure_text_attrs), and the one that
+    /// matters most for a markdown preview, where every paragraph is a rich
+    /// run measured several times per frame.
+    pub fn measure_rich(
+        &mut self,
+        spans: &[TextSpan],
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> (f32, f32) {
+        let key = shape_key_rich(spans, font_size, line_height, max_width, self.scale);
+        if let Some(dims) = self.shape_cache.dimensions(key) {
+            return dims;
+        }
+        let shaped = self.shape_rich_uncached(spans, font_size, line_height, max_width);
+        let dims = (shaped.width, shaped.height);
+        self.shape_cache.insert(key, shaped);
+        dims
     }
 
     /// Build a shaped cosmic-text buffer for a rich span run — the rich twin

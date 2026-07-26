@@ -276,8 +276,8 @@ impl Widget for Dropdown {
             .chain(self.placeholder.iter())
             .map(|label| {
                 ctx.text_engine
-                    .shape_text(label, font_size, line_height, None)
-                    .width
+                    .measure_text(label, font_size, line_height, None)
+                    .0
             })
             .fold(0.0_f32, f32::max);
         // Content width = widest label + gap + chevron (~font_size wide). Taffy

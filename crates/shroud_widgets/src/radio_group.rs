@@ -276,10 +276,10 @@ impl Widget for RadioGroup {
         let row_h = font_size + 2.0 * ROW_PAD_Y;
         let mut widest = 0.0f32;
         for label in &self.labels {
-            let shaped = ctx
-                .text_engine
-                .shape_text(label, font_size, font_size * 1.2, None);
-            widest = widest.max(shaped.width);
+            let (label_w, _) =
+                ctx.text_engine
+                    .measure_text(label, font_size, font_size * 1.2, None);
+            widest = widest.max(label_w);
         }
         let w = (ring_d + RING_GAP + widest).ceil().max(1.0);
         let h = (row_h * self.labels.len().max(1) as f32).ceil();
