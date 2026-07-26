@@ -35,6 +35,7 @@ use crate::paint::PaintContext;
 use crate::widget::Widget;
 use shroud_core::{AccessNode, AccessRole, Color, FocusIndicator, Point, Rect, SecurityLevel};
 use shroud_layout::FlexStyle;
+use shroud_reactive::Reactive;
 use shroud_reactive::animation;
 use shroud_security::SecureString;
 
@@ -95,8 +96,12 @@ pub struct SecureInput {
     /// clear-driven reset in [`sync_clear`](Self::sync_clear) runs from the
     /// `&self` paint path.
     revealed: Cell<bool>,
-    /// Placeholder text (shown when empty).
-    placeholder: String,
+    /// Placeholder text (shown when empty). Reactive so a signal-driven
+    /// relabel (a language switch) reaches it without a tree rebuild. It is
+    /// also this field's accessible name — the *only* text a screen reader
+    /// gets from a `SecureInput` — so a stale one is announced, not just
+    /// drawn. Non-secret by construction: it is a prompt, never the buffer.
+    placeholder: Reactive<String>,
     /// Font size in pixels (None = theme body size).
     font_size: Option<f32>,
     /// Whether this input has focus.
@@ -180,7 +185,7 @@ impl SecureInput {
             mask_char: '●',
             revealable: false,
             revealed: Cell::new(false),
-            placeholder: String::new(),
+            placeholder: Reactive::Static(String::new()),
             font_size: None,
             focused: false,
             cursor: Cell::new(0),
@@ -221,8 +226,25 @@ impl SecureInput {
     }
 
     /// Set the placeholder text.
+    ///
+    /// Callers whose prompt can change while the field is on screen — a
+    /// language switch, most commonly — should use
+    /// [`reactive_placeholder`](Self::reactive_placeholder) instead.
     pub fn placeholder(mut self, text: impl Into<String>) -> Self {
-        self.placeholder = text.into();
+        self.placeholder = Reactive::Static(text.into());
+        self
+    }
+
+    /// Set a placeholder produced by a closure on every frame.
+    ///
+    /// Mirrors [`Input::reactive_placeholder`](crate::Input::reactive_placeholder).
+    /// The closure feeds both the drawn prompt and the accessible name, and is
+    /// re-read per frame, so a signal write reaches both on the next one. The
+    /// closure must return a *prompt*, never anything derived from the secret
+    /// buffer — its return value is placed in the accessibility tree, which
+    /// the protected value deliberately never enters.
+    pub fn reactive_placeholder(mut self, f: impl Fn() -> String + 'static) -> Self {
+        self.placeholder = Reactive::derive(f);
         self
     }
 
@@ -539,10 +561,11 @@ impl Widget for SecureInput {
         // here, but NEVER read the characters. `.protected()` force-suppresses
         // the value; the name is the (non-secret) placeholder label, or a
         // generic fallback — the buffer is never touched.
-        let name = if self.placeholder.is_empty() {
+        let placeholder = self.placeholder.get();
+        let name = if placeholder.is_empty() {
             "Password".to_string()
         } else {
-            self.placeholder.clone()
+            placeholder
         };
         Some(
             AccessNode::new(AccessRole::PasswordInput)
@@ -622,9 +645,10 @@ impl Widget for SecureInput {
             // can only sit at the start. Drop any pending click.
             self.pending_click.set(None);
             // Show placeholder
-            if !self.placeholder.is_empty() {
+            let placeholder = self.placeholder.get();
+            if !placeholder.is_empty() {
                 let shaped = ctx.text_engine.shape_text(
-                    &self.placeholder,
+                    &placeholder,
                     font_size,
                     font_size * 1.2,
                     Some(max_width),

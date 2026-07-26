@@ -289,7 +289,7 @@ pub fn build(
         let search_input = tree.add_child(
             search_wrap,
             Input::new()
-                .placeholder(i18n::tr(Key::SidebarSearchPlaceholder))
+                .reactive_placeholder(|| i18n::tr(Key::SidebarSearchPlaceholder).to_string())
                 .value(w.search)
                 .font_size(13.0)
                 // Rounded, pill-ish search-bar chrome (FW-14) instead of the

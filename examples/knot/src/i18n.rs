@@ -14,19 +14,22 @@
 //! Switching language is **live**, exactly like a theme swap: every visible
 //! string is rendered through a reactive constructor
 //! ([`shroud::widgets::TextWidget::reactive`] /
-//! [`shroud::widgets::Button::reactive_label`]) whose closure calls [`tr`]
-//! on each paint, so flipping the setting re-renders the UI without a tree
-//! rebuild. The one exception is `Input` placeholders, which the framework
-//! takes as a plain `String` — those resolve at screen-build time, so a
-//! placeholder behind the open settings modal keeps its old-language text
-//! until that screen is next built (a lock cycle, or app relaunch). Minor,
-//! and language is typically a set-once preference.
+//! [`shroud::widgets::Button::reactive_label`] /
+//! [`shroud::widgets::Input::reactive_placeholder`]) whose closure calls
+//! [`tr`] on each paint, so flipping the setting re-renders the UI without a
+//! tree rebuild.
+//!
+//! Screens that can only be reached *after* a language change — lock, setup,
+//! recovery, change-password — build fresh anyway (the setting lives in the
+//! main screen's settings modal), so their placeholders stay on the one-shot
+//! [`shroud::widgets::SecureInput::placeholder`]. Fields that share the
+//! screen with the modal use the reactive form.
 //!
 //! ## Usage
 //!
 //! * Reactive text:  `TextWidget::reactive(move || tr(Key::Foo).to_string())`
 //! * Reactive label: `Button::reactive_label(move || tr(Key::Foo).to_string())`
-//! * Placeholder:    `.placeholder(tr(Key::Foo))`  (one-shot, see above)
+//! * Placeholder:    `.reactive_placeholder(|| tr(Key::Foo).to_string())`
 //! * Parameterized:  `tr(Key::Foo).replace("{n}", &n.to_string())`
 //! * Prefix + detail (errors): `format!("{}{e}", tr(Key::FooPrefix))`
 //!
