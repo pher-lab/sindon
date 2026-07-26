@@ -267,6 +267,53 @@ fn bench_edit_keystroke(c: &mut Criterion) {
                 });
             },
         );
+
+        // Enter halfway down the note. This one is not a keystroke like the
+        // others: it changes how *many* lines there are, and the line walk
+        // compares line `i` against line `i`, so before the realignment every
+        // line after the split shifted out of alignment and re-shaped — 102 of
+        // 200 lines, 8.8 ms on a real note against a 6.1 ms budget. Appending
+        // to a line (the arms above) never showed it, and neither did the first
+        // round of real-machine measurements, where the caret sat near the end
+        // of the document and there was no tail to shift.
+        let split = {
+            let start = a.match_indices('\n').nth(paragraphs / 2).unwrap().0 + 1;
+            let at = start + a[start..].find(' ').unwrap();
+            let mut s = a.clone();
+            s.insert(at, '\n');
+            s
+        };
+        let spans_split = highlight_tiling(&split);
+
+        let mut engine = TextEngine::new();
+        let _ = engine.shape_edit_plain(&a, fs, lh, wrap, &attrs);
+        let mut flip = false;
+        group.bench_with_input(
+            BenchmarkId::new("line_split", paragraphs),
+            &paragraphs,
+            |bencher, _| {
+                bencher.iter(|| {
+                    flip = !flip;
+                    let text = if flip { &split } else { &a };
+                    black_box(engine.shape_edit_plain(black_box(text), fs, lh, wrap, &attrs));
+                });
+            },
+        );
+
+        let mut engine = TextEngine::new();
+        let _ = engine.shape_edit_rich(&spans_a, fs, lh, wrap);
+        let mut flip = false;
+        group.bench_with_input(
+            BenchmarkId::new("line_split_rich", paragraphs),
+            &paragraphs,
+            |bencher, _| {
+                bencher.iter(|| {
+                    flip = !flip;
+                    let spans = if flip { &spans_split } else { &spans_a };
+                    black_box(engine.shape_edit_rich(black_box(spans), fs, lh, wrap));
+                });
+            },
+        );
     }
     group.finish();
 }

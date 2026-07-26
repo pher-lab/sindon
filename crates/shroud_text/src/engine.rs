@@ -1740,35 +1740,97 @@ const TRAILING_SELECTION_EM: f32 = 0.33;
 /// buffer must be indistinguishable from a freshly built one, or the caret,
 /// hit-tests and glyphs computed from it drift apart from the standalone paths.
 fn sync_edit_lines(buffer: &mut Buffer, text: &str, attrs: &cosmic_text::Attrs<'_>) -> usize {
-    let mut count = 0usize;
-    let mut changed = 0usize;
-
-    for (range, ending) in LineIter::new(text) {
-        if set_or_push_line(buffer, count, &text[range], ending, AttrsList::new(attrs)) {
-            changed += 1;
-        }
-        count += 1;
-    }
+    // Materialize the line list before writing any of it: the realignment below
+    // has to know how long the result will be, and where the two agree, before
+    // the first line is touched.
+    let mut lines: Vec<(&str, LineEnding)> = LineIter::new(text)
+        .map(|(range, ending)| (&text[range], ending))
+        .collect();
 
     // `Buffer::set_text` guarantees a final line that carries no ending, so a
     // text ending in `\n` gets an empty last row — and empty text gets exactly
     // one empty line (its `lines.last()` is `None`, whose default ending is
     // `Lf`, so the empty line is pushed).
-    let last_ending = match count.checked_sub(1) {
-        Some(i) => buffer.lines[i].ending(),
-        None => LineEnding::default(),
-    };
+    let last_ending = lines.last().map_or(LineEnding::default(), |&(_, e)| e);
     if last_ending != LineEnding::None {
-        if set_or_push_line(buffer, count, "", LineEnding::None, AttrsList::new(attrs)) {
+        lines.push(("", LineEnding::None));
+    }
+
+    let prefix = lines
+        .iter()
+        .zip(buffer.lines.iter())
+        .take_while(|(new, old)| old.text() == new.0)
+        .count();
+    realign_lines(buffer, lines.len(), prefix, attrs);
+
+    let mut changed = 0usize;
+    for (i, &(line, ending)) in lines.iter().enumerate() {
+        if set_or_push_line(buffer, i, line, ending, AttrsList::new(attrs)) {
             changed += 1;
         }
-        count += 1;
     }
 
     // Surplus lines from a shorter text. Dropping them wipes their plaintext —
     // the vendored cosmic-text zeroizes `BufferLine.text` on drop.
-    buffer.lines.truncate(count);
+    buffer.lines.truncate(lines.len());
     changed
+}
+
+/// Move `buffer`'s existing lines to the indices they are about to be written
+/// at, when an edit changed how many lines there are.
+///
+/// [`set_or_push_line`] compares line `i` against line `i`, so inserting a
+/// newline halfway down a note shifts every line after it by one and makes all
+/// of them miss: 102 of 200 lines re-shaped for a single Enter, measured at
+/// 8.8 ms on a real note against a 6.1 ms frame budget. (It never showed up in
+/// the first round of measurements because the caret was near the end of the
+/// document, where there is no tail to shift — `Enter near end -> 5 lines`.)
+/// Splicing the shift out or in first leaves the tail sitting at the index the
+/// walk expects, so only the lines the edit really touched get rewritten.
+///
+/// `prefix` is how many leading lines already agree; the shift is applied
+/// immediately after them. This is a **hint only** — it relocates `BufferLine`s
+/// and never changes their contents, so anything it gets wrong the following
+/// walk still corrects. That is what lets callers compute `prefix` from line
+/// text alone and ignore endings and attrs, and why it cannot put the
+/// `Buffer::set_text` equivalence contract at risk.
+fn realign_lines(buffer: &mut Buffer, new_len: usize, prefix: usize, defaults: &Attrs<'_>) {
+    let old_len = buffer.lines.len();
+    if new_len == old_len {
+        return;
+    }
+    let at = prefix.min(old_len).min(new_len);
+    // Nothing sits after the splice point, so there is no tail to rescue and
+    // realigning could only cost: every placeholder pays for an `AttrsList` the
+    // walk immediately replaces. This is the cold buffer (`old_len == 0`, the
+    // first shape of a note just opened) and the pure append (typing at the end
+    // of the document), where `set_or_push_line` already does the right thing by
+    // pushing.
+    if at >= old_len {
+        return;
+    }
+    if new_len > old_len {
+        // Placeholders, immediately overwritten by the walk. They exist only so
+        // the lines after them land on their new indices.
+        let extra = new_len - old_len;
+        buffer.lines.splice(
+            at..at,
+            std::iter::repeat_with(|| {
+                BufferLine::new(
+                    "",
+                    LineEnding::None,
+                    AttrsList::new(defaults),
+                    Shaping::Advanced,
+                )
+            })
+            .take(extra),
+        );
+    } else {
+        // Dropping the removed lines wipes their plaintext, same as the
+        // `truncate` at the end of a sync.
+        let gone = (old_len - new_len).min(old_len - at);
+        buffer.lines.drain(at..at + gone);
+    }
 }
 
 /// Overwrite line `index` in place when it exists, otherwise append it.
@@ -1836,16 +1898,46 @@ fn sync_edit_lines_rich<'a>(
     }
 
     let string_start = string.as_ptr() as usize;
-    let mut count = 0usize;
     let mut changed = 0usize;
+
+    // Materialize the paragraph list up front, both to avoid running the bidi
+    // split twice and because the realignment needs the final line count before
+    // anything is written. Collecting `&str` slices copies no text.
+    let mut lines: Vec<&str> = BidiParagraphs::new(&string).collect();
+
+    // The trailing-empty-line rules, hoisted here so `lines.len()` is the real
+    // final length. `BidiParagraphs` yields nothing at all for an empty run, but
+    // `set_rich_text` still emits one empty line — its "reached only if this
+    // text is empty" branch. An empty field is one row tall, not zero, and the
+    // caret has to have a row to sit on. Otherwise a run ending in a break gets
+    // the extra blank row, keyed off the source string's last character because
+    // every rich line carries `LineEnding::default()` rather than its real one.
+    let trailing_blank = if lines.is_empty() {
+        Some(LineEnding::default())
+    } else if matches!(string.chars().next_back(), Some('\n' | '\r')) {
+        Some(LineEnding::None)
+    } else {
+        None
+    };
+    if trailing_blank.is_some() {
+        lines.push("");
+    }
+
+    let prefix = lines
+        .iter()
+        .zip(buffer.lines.iter())
+        .take_while(|(new, old)| old.text() == **new)
+        .count();
+    realign_lines(buffer, lines.len(), prefix, default_attrs);
 
     // Both lines and spans run left to right, so walk them together rather
     // than intersecting every span with every line — a highlighted document
     // has a span per word, and the quadratic version costs more than the
     // shaping this whole function exists to avoid.
     let mut first_span = 0usize;
+    let body = lines.len() - usize::from(trailing_blank.is_some());
 
-    for line in BidiParagraphs::new(&string) {
+    for (count, &line) in lines[..body].iter().enumerate() {
         let line_start = line.as_ptr() as usize - string_start;
         let line_end = line_start + line.len();
 
@@ -1873,38 +1965,15 @@ fn sync_edit_lines_rich<'a>(
         if set_or_push_line(buffer, count, line, LineEnding::default(), attrs_list) {
             changed += 1;
         }
-        count += 1;
     }
 
-    // `BidiParagraphs` yields nothing at all for an empty run, but
-    // `set_rich_text` still emits one empty line — its "reached only if this
-    // text is empty" branch. An empty field is one row tall, not zero, and the
-    // caret has to have a row to sit on.
-    if count == 0 {
-        if set_or_push_line(
-            buffer,
-            0,
-            "",
-            LineEnding::default(),
-            AttrsList::new(default_attrs),
-        ) {
+    if let Some(ending) = trailing_blank {
+        if set_or_push_line(buffer, body, "", ending, AttrsList::new(default_attrs)) {
             changed += 1;
         }
-        count = 1;
-    } else if matches!(string.chars().next_back(), Some('\n' | '\r')) {
-        if set_or_push_line(
-            buffer,
-            count,
-            "",
-            LineEnding::None,
-            AttrsList::new(default_attrs),
-        ) {
-            changed += 1;
-        }
-        count += 1;
     }
 
-    buffer.lines.truncate(count);
+    buffer.lines.truncate(lines.len());
     changed
 }
 

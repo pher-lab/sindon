@@ -1660,6 +1660,154 @@ fn incremental_rich_edits_reshape_only_the_touched_lines() {
 }
 
 #[test]
+fn mid_document_line_count_changes_reshape_only_the_edit() {
+    // `set_or_push_line` compares line `i` against line `i`, so inserting a
+    // newline halfway down a note shifted every line after it out of alignment
+    // and re-shaped all of them: 102 of 200 lines for one Enter, measured at
+    // 8.8 ms on a real note against a 6.1 ms frame budget. It stayed hidden
+    // through the first round of measurements because the caret was near the
+    // end of the document, where there is no tail to shift.
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let attrs = TextAttrs::default();
+
+    let base: String = (0..200)
+        .map(|i| format!("line {i} with some words on it"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mid = base.find("line 100").unwrap() + 4;
+    let mut split = base.clone();
+    split.insert(mid, '\n');
+
+    let mut engine = TextEngine::new();
+    let _ = engine.shape_edit_plain(&base, fs, lh, None, &attrs);
+    let _ = engine.take_reshaped_lines();
+
+    let _ = engine.shape_edit_plain(&split, fs, lh, None, &attrs);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        2,
+        "an Enter mid-document must re-shape the two halves of the split line, \
+         not the whole tail"
+    );
+
+    let _ = engine.shape_edit_plain(&base, fs, lh, None, &attrs);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        1,
+        "and joining them back must re-shape only the line that results"
+    );
+
+    // The rich path takes the same alignment — and it is the one knot's editor
+    // actually goes through, so it is the one the 8.8 ms was measured on.
+    let mut engine = TextEngine::new();
+    let _ = engine.shape_edit_rich(&highlight_tiling(&base), fs, lh, None);
+    let _ = engine.take_reshaped_lines();
+
+    let _ = engine.shape_edit_rich(&highlight_tiling(&split), fs, lh, None);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        2,
+        "an Enter mid-document must not re-shape the tail on the rich path either"
+    );
+}
+
+#[test]
+fn realigned_line_edits_match_a_cold_shape() {
+    // The realignment relocates `BufferLine`s between indices, which is exactly
+    // the kind of shortcut that can leave the reused buffer subtly different
+    // from a freshly built one — and the caret and hit-tests read that buffer.
+    // Walk splits, double-splits, joins and a multi-line deletion at several
+    // depths, re-checking the whole equivalence contract after each.
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let attrs = TextAttrs::default();
+    let wrap = Some(140.0);
+
+    // Ends in a break, so the synthetic trailing blank line is in play too.
+    let base: String = (0..8)
+        .map(|i| format!("line {i} with enough words to wrap\n"))
+        .collect();
+
+    let mut texts = vec![base.clone()];
+    for needle in ["line 0 ", "line 4 ", "line 7 "] {
+        let at = base.find(needle).unwrap() + 4;
+        let mut one = base.clone();
+        one.insert(at, '\n');
+        let mut two = base.clone();
+        two.insert_str(at, "\n\n");
+        texts.push(one);
+        texts.push(base.clone());
+        texts.push(two);
+        texts.push(base.clone());
+    }
+    // Whole lines removed from the middle, then restored, then everything gone.
+    let (from, to) = (base.find("line 2 ").unwrap(), base.find("line 6 ").unwrap());
+    let mut cut = base.clone();
+    cut.replace_range(from..to, "");
+    texts.push(cut);
+    texts.push(base.clone());
+    texts.push(String::new());
+
+    let mut engine = TextEngine::new();
+    for text in &texts {
+        let got = engine.shape_edit_plain(text, fs, lh, wrap, &attrs);
+        let want = engine.shape_text_attrs(text, fs, lh, wrap, &attrs);
+
+        assert_eq!(
+            got.shaped().glyphs.len(),
+            want.glyphs.len(),
+            "glyph count for {text:?}"
+        );
+        for (a, b) in got.shaped().glyphs.iter().zip(&want.glyphs) {
+            assert_eq!((a.x, a.y), (b.x, b.y), "glyph position for {text:?}");
+            assert_eq!(a.cache_key, b.cache_key, "glyph identity for {text:?}");
+        }
+        assert_eq!(
+            (got.shaped().width, got.shaped().height),
+            (want.width, want.height),
+            "block extent for {text:?}"
+        );
+        for off in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+            assert_eq!(
+                engine.edit_caret(text, off, fs, lh, wrap, &attrs),
+                engine.caret_at_offset_attrs(text, off, fs, lh, wrap, &attrs),
+                "caret at offset {off} for {text:?}"
+            );
+        }
+    }
+
+    // Same walk on the rich path, whose line model differs twice over
+    // (BidiParagraphs split, synthetic endings) — the realignment has to hold
+    // for both or a highlighted editor drifts where a plain one doesn't.
+    let mut engine = TextEngine::new();
+    for text in &texts {
+        let spans = highlight_tiling(text);
+        let got = engine.shape_edit_rich(&spans, fs, lh, wrap);
+        let want = engine.shape_rich(&spans, fs, lh, wrap);
+
+        assert_eq!(
+            got.shaped().glyphs.len(),
+            want.glyphs.len(),
+            "rich glyph count for {text:?}"
+        );
+        for (a, b) in got.shaped().glyphs.iter().zip(&want.glyphs) {
+            assert_eq!((a.x, a.y), (b.x, b.y), "rich glyph position for {text:?}");
+            assert_eq!(a.color, b.color, "rich glyph color for {text:?}");
+            assert_eq!(a.cache_key, b.cache_key, "rich glyph identity for {text:?}");
+        }
+        assert_eq!(
+            got.shaped().span_boxes,
+            want.span_boxes,
+            "span boxes for {text:?}"
+        );
+        assert_eq!(
+            (got.shaped().width, got.shaped().height),
+            (want.width, want.height),
+            "rich block extent for {text:?}"
+        );
+    }
+}
+
+#[test]
 fn an_unchanged_repaint_does_no_shaping_work_at_all() {
     // Line reuse made a keystroke cheap, but every frame still walked the whole
     // document just to discover nothing had changed — and in a real editing
