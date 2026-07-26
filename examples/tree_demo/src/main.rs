@@ -24,6 +24,17 @@
 //! - typing `r` jumps to the next row starting with r (again to cycle), and
 //!   `re` refines to `render`/`README.md`;
 //! - expanding with → keeps the keyboard: the arrows still work straight after.
+//!
+//! Screen-reader check (Windows Narrator, Ctrl+Win+Enter — a11y is judged by
+//! listening, never by a screenshot):
+//! - Tab into the tree: it announces the tree by name ("Project files") and then
+//!   the cursor row — not just the container, and then silence;
+//! - ↑/↓: each row is announced as you arrive, with its level ("level 2");
+//! - →/←: opening and closing are announced as expanded / collapsed, and a leaf
+//!   offers neither;
+//! - Enter: the row is announced as selected;
+//! - Narrator's own item commands (scan mode, or "expand"/"collapse") operate the
+//!   tree without the keyboard cursor and selection drifting apart.
 
 use shroud::app::App;
 use shroud::core::Color;
@@ -145,6 +156,9 @@ fn main() {
 
             let sel = selected;
             TreeView::new(model())
+                // Names the tree for a screen reader; nothing is painted, so
+                // this echoes the visible "Project" heading above the panel.
+                .label("Project files")
                 .expanded([1, 3, 7, 15])
                 .selected(5)
                 .on_select(move |id, _ctx| sel.set(Some(id)))

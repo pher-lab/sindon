@@ -51,6 +51,8 @@ fn to_role(role: AccessRole) -> Role {
         AccessRole::ProgressIndicator => Role::ProgressIndicator,
         AccessRole::TabList => Role::TabList,
         AccessRole::Tab => Role::Tab,
+        AccessRole::Tree => Role::Tree,
+        AccessRole::TreeItem => Role::TreeItem,
         AccessRole::MenuItem => Role::MenuItem,
         AccessRole::TextInput => Role::TextInput,
         AccessRole::PasswordInput => Role::PasswordInput,
@@ -103,6 +105,16 @@ pub fn snapshot_to_tree_update(snapshot: &AccessSnapshot, scale: f32) -> TreeUpd
             node.set_selected(selected);
         }
 
+        // Hierarchy, for rows flattened into one list: the depth is what tells a
+        // screen reader "level 3" where the indentation tells a sighted user.
+        if let Some(level) = info.level {
+            node.set_level(level);
+        }
+
+        if let Some(expanded) = info.expanded {
+            node.set_expanded(expanded);
+        }
+
         // What the AT may ask of this node. An AT only offers the actions a
         // node advertises, so this list is the operable surface — kept in step
         // with what `Widget::accessibility_action` actually honours, and
@@ -122,6 +134,16 @@ pub fn snapshot_to_tree_update(snapshot: &AccessSnapshot, scale: f32) -> TreeUpd
                 node.add_action(Action::Increment);
                 node.add_action(Action::Decrement);
                 node.add_action(Action::SetValue);
+            }
+            // Disclosure: only the direction the node isn't already in, and only
+            // for a branch — a leaf reports no `expanded` state at all, so it
+            // offers neither.
+            if info.role.is_expandable() {
+                match info.expanded {
+                    Some(true) => node.add_action(Action::Collapse),
+                    Some(false) => node.add_action(Action::Expand),
+                    None => {}
+                }
             }
         }
 
@@ -185,6 +207,8 @@ pub fn action_from_request(request: &ActionRequest) -> Option<(u64, AccessAction
         (Action::Increment, _) => AccessAction::Increment,
         (Action::Decrement, _) => AccessAction::Decrement,
         (Action::SetValue, Some(ActionData::NumericValue(v))) => AccessAction::SetValue(*v),
+        (Action::Expand, _) => AccessAction::Expand,
+        (Action::Collapse, _) => AccessAction::Collapse,
         _ => return None,
     };
     Some((request.target_node.0, action))
@@ -395,6 +419,77 @@ mod tests {
     }
 
     #[test]
+    fn a_tree_row_carries_its_depth_and_disclosure() {
+        // The rows reach the AT as one flat list, so `level` is the whole
+        // hierarchy as far as a screen reader is concerned.
+        let node = translate_one(entry(
+            1,
+            AccessNode::new(AccessRole::TreeItem)
+                .name("widgets")
+                .level(2)
+                .expanded(true),
+        ));
+        let dump = format!("{node:?}");
+        assert!(dump.contains("TreeItem"), "role maps to accesskit TreeItem");
+        assert_eq!(node.level(), Some(2));
+        assert_eq!(node.is_expanded(), Some(true));
+    }
+
+    #[test]
+    fn a_branch_only_offers_the_disclosure_it_is_not_already_in() {
+        let closed = translate_one(entry(
+            1,
+            AccessNode::new(AccessRole::TreeItem)
+                .name("src")
+                .expanded(false),
+        ));
+        assert!(closed.supports_action(Action::Expand), "a closed row opens");
+        assert!(
+            !closed.supports_action(Action::Collapse),
+            "and must not offer to close what is already closed"
+        );
+
+        let open = translate_one(entry(
+            1,
+            AccessNode::new(AccessRole::TreeItem)
+                .name("src")
+                .expanded(true),
+        ));
+        assert!(open.supports_action(Action::Collapse));
+        assert!(!open.supports_action(Action::Expand));
+    }
+
+    #[test]
+    fn a_leaf_row_is_clickable_but_offers_no_disclosure() {
+        // A leaf reports no `expanded` state at all, which is what keeps the
+        // disclosure actions off it — while it stays selectable like any item.
+        let leaf = translate_one(entry(
+            1,
+            AccessNode::new(AccessRole::TreeItem).name("main.rs"),
+        ));
+        assert!(leaf.supports_action(Action::Click), "an item is selectable");
+        for action in [Action::Expand, Action::Collapse] {
+            assert!(
+                !leaf.supports_action(action),
+                "a leaf must not offer {action:?} — it has nothing to disclose"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_tree_node_never_advertises_a_disclosure() {
+        // The gate is the role, not the state: nothing else can be talked into
+        // offering Expand by carrying an `expanded` flag.
+        let node = translate_one(entry(
+            1,
+            AccessNode::new(AccessRole::Button)
+                .name("Save")
+                .expanded(false),
+        ));
+        assert!(!node.supports_action(Action::Expand));
+    }
+
+    #[test]
     fn focus_id_maps_to_node_id() {
         let snap = AccessSnapshot {
             root_id: A11Y_WINDOW_ROOT,
@@ -403,6 +498,24 @@ mod tests {
         };
         let update = snapshot_to_tree_update(&snap, 1.0);
         assert_eq!(update.focus, NodeId(7));
+    }
+
+    #[test]
+    fn disclosure_requests_translate_inbound() {
+        // The other direction of the same pair — the AT asking, rather than
+        // being told what it may ask for.
+        for (ak, expected) in [
+            (Action::Expand, AccessAction::Expand),
+            (Action::Collapse, AccessAction::Collapse),
+        ] {
+            let request = ActionRequest {
+                action: ak,
+                target_tree: TreeId::ROOT,
+                target_node: NodeId(12),
+                data: None,
+            };
+            assert_eq!(action_from_request(&request), Some((12, expected)));
+        }
     }
 
     #[test]

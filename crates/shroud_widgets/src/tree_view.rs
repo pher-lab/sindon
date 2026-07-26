@@ -48,11 +48,21 @@
 //!     .build(&mut tree, parent);
 //! ```
 //!
-//! # Scope
+//! # Accessibility
 //!
-//! Mouse and keyboard are both wired; OS a11y tree exposure is the remaining
-//! deliberate follow-up — the [`AccessRole`](shroud_core::AccessRole) vocabulary
-//! has no tree role yet, so a screen reader still sees the rows as plain groups.
+//! The host reports itself as a [`Tree`](shroud_core::AccessRole::Tree) and each
+//! row as a [`TreeItem`](shroud_core::AccessRole::TreeItem) carrying its label,
+//! selection, 1-based depth, and — on a branch — its open state. Because the
+//! rows are flattened into one list, that depth is what conveys the hierarchy to
+//! a screen reader.
+//!
+//! Focus is the one place the roving design needs help: OS focus stays on the
+//! host, so the host names the cursor row as its
+//! [`accessibility_focus_delegate`](Widget::accessibility_focus_delegate) and
+//! the a11y tree reports focus there instead (ARIA's `aria-activedescendant`).
+//! An assistive technology can select a row (`Click`) and open or close a branch
+//! (`Expand` / `Collapse`) — the same two things a mouse can do to a row, and
+//! nothing more. Name the tree with [`TreeView::label`].
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -65,7 +75,7 @@ use crate::paint::PaintContext;
 use crate::reactive_children::ReactiveChildren;
 use crate::tree::WidgetTree;
 use crate::widget::Widget;
-use shroud_core::{Color, Rect};
+use shroud_core::{AccessAction, AccessNode, AccessRole, Color, Rect};
 use shroud_layout::FlexStyle;
 use shroud_text::TextAttrs;
 
@@ -276,6 +286,7 @@ pub struct TreeView {
     items: Vec<TreeItem>,
     expanded: HashSet<u64>,
     selected: Option<u64>,
+    label: Option<String>,
     on_select: Option<SelectHandler>,
 }
 
@@ -286,6 +297,7 @@ impl TreeView {
             items,
             expanded: HashSet::new(),
             selected: None,
+            label: None,
             on_select: None,
         }
     }
@@ -299,6 +311,16 @@ impl TreeView {
     /// The initially selected row id.
     pub fn selected(mut self, id: u64) -> Self {
         self.selected = Some(id);
+        self
+    }
+
+    /// The tree's accessible name — what a screen reader announces on entry
+    /// ("Files, tree"). Purely a11y: nothing is painted.
+    ///
+    /// Unnamed is legal but unhelpful, since the container is the tab stop; give
+    /// it whatever the visible heading next to the tree says.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 
@@ -332,6 +354,7 @@ impl TreeView {
             parent,
             TreeHost {
                 state: Rc::clone(&state),
+                label: self.label,
             },
         );
         state.host.set(Some(host));
@@ -373,6 +396,8 @@ impl TreeView {
 /// toggle rebuilds them.
 struct TreeHost {
     state: Rc<TreeState>,
+    /// The tree's accessible name, if the caller gave one. Never painted.
+    label: Option<String>,
 }
 
 impl TreeHost {
@@ -505,6 +530,28 @@ impl Widget for TreeHost {
 
     fn paint(&self, _layout: Rect, _ctx: &mut PaintContext) {}
 
+    fn accessibility(&self) -> Option<AccessNode> {
+        let node = AccessNode::new(AccessRole::Tree);
+        Some(match &self.label {
+            Some(label) => node.name(label.clone()),
+            None => node,
+        })
+    }
+
+    /// Point a11y focus at the cursor row: OS focus lives here on the host, but
+    /// what a screen reader should be reading is wherever the arrows last moved.
+    ///
+    /// Resolved through the same [`TreeState::cursor`] the keyboard uses, so the
+    /// row announced and the row → acts on can never disagree. A cursor whose
+    /// row is not currently built yields `None`, and the snapshot falls back to
+    /// the host.
+    fn accessibility_focus_delegate(&self) -> Option<usize> {
+        let rows = self.state.visible_rows();
+        self.state
+            .cursor(&rows)
+            .and_then(|id| self.state.node_of(id))
+    }
+
     fn event(&mut self, event: &WidgetEvent, _layout: Rect, ctx: &mut EventContext) -> EventResult {
         match event {
             WidgetEvent::FocusGained => {
@@ -579,6 +626,29 @@ impl TreeRow {
     /// The row-local x where this row's chevron slot begins.
     fn chevron_x(&self, layout: Rect) -> f32 {
         layout.origin.x + LEFT_PAD + self.depth as f32 * INDENT
+    }
+
+    /// Park the roving cursor on this row and hand the keyboard back to the
+    /// host, so the arrows carry on from the row just touched.
+    ///
+    /// The tail of every way of operating a row from outside the keyboard —
+    /// a click, or an assistive technology's action. (Built-in click-to-focus
+    /// can't do it: it only ever focuses the widget actually hit, and a row is
+    /// deliberately not a tab stop.)
+    fn park_cursor(&self, ctx: &mut EventContext) {
+        self.state.active.set(Some(self.id));
+        self.state.clear_search();
+        if let Some(host) = self.state.host.get() {
+            ctx.focus(host);
+            // ⚠ That focus arms a scroll-into-view for the *host* — the whole
+            // tree — which in a scrolled viewport would yank the list under the
+            // cursor mid-click. Queue this row's reveal behind it: the last
+            // reveal of a dispatch wins, and revealing a row you just clicked
+            // (so, a visible one) moves nothing.
+            if let Some(idx) = self.state.node_of(self.id) {
+                ctx.reveal(idx);
+            }
+        }
     }
 }
 
@@ -681,28 +751,55 @@ impl Widget for TreeRow {
                 } else {
                     self.state.select(self.id, ctx);
                 }
-                // A click also parks the cursor here and hands the keyboard to
-                // the host, so the arrows carry on from the row just touched.
-                // (Built-in click-to-focus can't do it: it only ever focuses the
-                // widget actually hit, and a row is deliberately not a tab stop.)
-                self.state.active.set(Some(self.id));
-                self.state.clear_search();
-                if let Some(host) = self.state.host.get() {
-                    ctx.focus(host);
-                    // ⚠ That focus arms a scroll-into-view for the *host* — the
-                    // whole tree — which in a scrolled viewport would yank the
-                    // list under the cursor mid-click. Queue this row's reveal
-                    // behind it: the last reveal of a dispatch wins, and
-                    // revealing a row you just clicked (so, a visible one) moves
-                    // nothing.
-                    if let Some(idx) = self.state.node_of(self.id) {
-                        ctx.reveal(idx);
-                    }
-                }
+                self.park_cursor(ctx);
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
         }
+    }
+
+    fn accessibility(&self) -> Option<AccessNode> {
+        let node = AccessNode::new(AccessRole::TreeItem)
+            .name(self.label.clone())
+            .selected(self.state.selected.get() == Some(self.id))
+            // 1-based, and the only thing carrying the hierarchy: the rows reach
+            // a screen reader as one flat list.
+            .level(self.depth + 1);
+        // Only a branch discloses. Leaving a leaf's state unset is what stops it
+        // from advertising Expand / Collapse.
+        Some(if self.has_children {
+            node.expanded(self.expanded)
+        } else {
+            node
+        })
+    }
+
+    /// Selection and disclosure for an assistive technology — the same two
+    /// things a mouse can do to a row (the label zone and the chevron zone),
+    /// routed through the same state, and nothing a sighted user couldn't reach.
+    fn accessibility_action(
+        &mut self,
+        action: AccessAction,
+        _option: Option<usize>,
+        _layout: Rect,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        match action {
+            AccessAction::Click => self.state.select(self.id, ctx),
+            // A disclosure request that matches the state we are already in is
+            // ignored rather than treated as a toggle: `Expand` must never close
+            // a row. (The translation withholds the action in that direction, so
+            // this is the second line of the same rule.)
+            AccessAction::Expand if self.has_children && !self.expanded => {
+                self.state.toggle(self.id)
+            }
+            AccessAction::Collapse if self.has_children && self.expanded => {
+                self.state.toggle(self.id)
+            }
+            _ => return EventResult::Ignored,
+        }
+        self.park_cursor(ctx);
+        EventResult::Consumed
     }
 }
 
@@ -756,6 +853,7 @@ mod tests {
     fn focused_host(state: &Rc<TreeState>) -> TreeHost {
         let mut host = TreeHost {
             state: Rc::clone(state),
+            label: None,
         };
         host.event(
             &WidgetEvent::FocusGained,
@@ -1119,6 +1217,7 @@ mod tests {
         let st = state(&[1]);
         let mut host = TreeHost {
             state: Rc::clone(&st),
+            label: None,
         };
         assert_eq!(press(&mut host, NamedKey::ArrowDown), EventResult::Ignored);
         assert_eq!(st.active.get(), None, "no cursor without focus");
@@ -1174,5 +1273,100 @@ mod tests {
         let mut ctx = EventContext::new();
         st.select(4, &mut ctx);
         assert_eq!(seen.get(), 4, "the select handler saw the row id");
+    }
+
+    // ── Accessibility ─────────────────────────────────────────────
+
+    #[test]
+    fn a_row_reports_its_label_depth_and_disclosure() {
+        let st = state(&[1]);
+        let mut branch = row(&st, 1, 0, true, true);
+        branch.label = "src".into();
+        let node = branch.accessibility().expect("a row describes itself");
+        assert_eq!(node.role, AccessRole::TreeItem);
+        assert_eq!(node.name.as_deref(), Some("src"));
+        assert_eq!(node.level, Some(1), "level is 1-based, depth is 0-based");
+        assert_eq!(node.expanded, Some(true));
+
+        let child = row(&st, 2, 1, false, false);
+        let node = child.accessibility().unwrap();
+        assert_eq!(node.level, Some(2));
+        assert_eq!(
+            node.expanded, None,
+            "a leaf discloses nothing — that is what stops it advertising Expand"
+        );
+        assert_eq!(node.selected, Some(false));
+    }
+
+    #[test]
+    fn a_disclosure_action_moves_only_in_its_own_direction() {
+        let st = state(&[]);
+        let mut closed = row(&st, 1, 0, true, false);
+        let mut ctx = EventContext::new();
+        assert_eq!(
+            closed.accessibility_action(AccessAction::Collapse, None, layout(), &mut ctx),
+            EventResult::Ignored,
+            "collapsing a closed row is refused"
+        );
+        assert!(!st.is_expanded(1), "and changed nothing");
+
+        assert_eq!(
+            closed.accessibility_action(AccessAction::Expand, None, layout(), &mut ctx),
+            EventResult::Consumed
+        );
+        assert!(st.is_expanded(1), "the branch opened");
+        assert_eq!(st.active.get(), Some(1), "and the cursor parked on it");
+    }
+
+    #[test]
+    fn a_leaf_honours_a_click_but_no_disclosure() {
+        let st = state(&[]);
+        let mut leaf = row(&st, 5, 0, false, false);
+        let mut ctx = EventContext::new();
+        for action in [AccessAction::Expand, AccessAction::Collapse] {
+            assert_eq!(
+                leaf.accessibility_action(action, None, layout(), &mut ctx),
+                EventResult::Ignored,
+                "{action:?} means nothing to a leaf"
+            );
+        }
+        assert_eq!(
+            leaf.accessibility_action(AccessAction::Click, None, layout(), &mut ctx),
+            EventResult::Consumed,
+        );
+        assert_eq!(
+            st.selected.get(),
+            Some(5),
+            "a click is the AT's mirror of the mouse selecting the row"
+        );
+    }
+
+    #[test]
+    fn the_host_delegates_a11y_focus_to_the_cursor_row() {
+        // The index map is what a rebuild rewrites, so a cursor whose row is not
+        // currently built must yield nothing rather than a stale index.
+        let st = state(&[1]);
+        let host = focused_host(&st);
+        assert_eq!(
+            host.accessibility_focus_delegate(),
+            None,
+            "no rows built yet, so there is nothing to point at"
+        );
+
+        *st.row_nodes.borrow_mut() = vec![(1, 10), (2, 11), (3, 12)];
+        st.active.set(Some(2));
+        assert_eq!(host.accessibility_focus_delegate(), Some(11));
+
+        // A cursor parked on a row that a collapse hid follows the same recovery
+        // the keyboard does (`cursor`), landing on the first row rather than
+        // pointing an AT at something off screen.
+        st.active.set(Some(4)); // inside the still-collapsed `widgets`
+        assert_eq!(host.accessibility_focus_delegate(), Some(10));
+
+        // And a cursor whose row is not in *this* build yields nothing, so the
+        // snapshot falls back to the host instead of naming a tombstone.
+        st.active.set(Some(3));
+        st.row_nodes.borrow_mut().retain(|(id, _)| *id != 3);
+        assert_eq!(host.accessibility_focus_delegate(), None);
     }
 }
