@@ -70,8 +70,9 @@ pub struct FrameTimings {
     /// The `present()` call itself (queues the flip).
     pub present: Duration,
     /// Post-frame secure-atlas clear plus the `device.poll(Wait)` that
-    /// guarantees the GPU finished it. A real per-frame stall the
-    /// zeroize-first promise pays for, so it is counted in `cpu`.
+    /// guarantees the GPU finished it. A real stall the zeroize-first
+    /// promise pays for, so it is counted in `cpu` — but only on frames
+    /// that actually drew secure glyphs; it is zero on every other frame.
     pub sync: Duration,
     /// The perf HUD's own paint, when the overlay is on. Excluded from
     /// every other bucket *and* from [`cpu`](Self::cpu) so switching the

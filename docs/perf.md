@@ -84,6 +84,14 @@ The phases behind `cpu`:
 | `sync`   | the post-frame secure-atlas clear and the `device.poll(Wait)` behind it     |
 | `wait`   | **excluded from `cpu`** — blocked in `get_current_texture()` on vsync       |
 
+`sync` is charged only to frames that actually rendered a secure glyph
+(`SecureText` / `SecureInput`). A frame that drew no secrets has nothing to
+zero — the secure atlas is untouched, so it cannot hold residue — and skips
+both the clear and the GPU wait entirely. A screen with a password field on
+it will show a fraction of a millisecond here; every other screen shows
+`sync=0.0`. If you see a non-zero `sync` on a screen you believe holds no
+secrets, something is routing text through the secure atlas that shouldn't be.
+
 `wait` is back-pressure from the display, not slowness: under `AutoVsync`
 (Fifo) it is large exactly when the app is comfortably *ahead* of the refresh
 rate, and it collapses toward zero when the app falls behind. A frame showing
