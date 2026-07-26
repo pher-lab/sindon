@@ -1,22 +1,35 @@
 //! tree_demo — Tier 2 collapsible tree view.
 //!
-//! A file-tree-shaped `TreeView` in a sidebar panel. Click a chevron to
-//! expand/collapse a folder; click a row to select it (the selection label
-//! updates from the `on_select` callback).
+//! A file-tree-shaped `TreeView` in a scrolling sidebar panel. Click a chevron
+//! to expand/collapse a folder; click a row to select it (the selection label
+//! updates from the `on_select` callback). The tree is deliberately taller than
+//! its panel so the keyboard's scroll-into-view is visible.
 //!
-//! Visual check:
+//! Visual check (mouse):
 //! - parent rows show a chevron (▸ closed, ▾ open); leaves have none and align
 //!   with their siblings' labels;
 //! - clicking a chevron toggles that node without changing the selection;
 //! - clicking a row highlights it and updates the "Selected:" line;
 //! - nested folders indent one step per level, and deep rows clip at the panel
 //!   edge rather than spilling.
+//!
+//! Visual check (keyboard):
+//! - Tab reaches the tree once — not once per row — and a focus ring appears on
+//!   one row: the cursor;
+//! - ↑/↓ move that ring without changing the "Selected:" line, and pull the
+//!   panel along when the cursor walks past the bottom edge;
+//! - → opens a closed folder, then steps into it; ← closes an open one, then
+//!   climbs back out to the parent;
+//! - Enter or Space commits the cursor row, updating "Selected:";
+//! - typing `r` jumps to the next row starting with r (again to cycle), and
+//!   `re` refines to `render`/`README.md`;
+//! - expanding with → keeps the keyboard: the arrows still work straight after.
 
 use shroud::app::App;
 use shroud::core::Color;
 use shroud::reactive::Signal;
 use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, TextWidget, TreeItem, TreeView};
+use shroud::widgets::{Container, ScrollView, TextWidget, TreeItem, TreeView};
 
 const BG: Color = Color::rgb(0.10, 0.11, 0.15);
 const PANEL: Color = Color::rgb(0.13, 0.14, 0.19);
@@ -54,6 +67,15 @@ fn model() -> Vec<TreeItem> {
                 TreeItem::new(12, "dogfood-log.md"),
             ],
         ),
+        TreeItem::with_children(
+            15,
+            "tests",
+            vec![
+                TreeItem::new(16, "focus_reveal_tests.rs"),
+                TreeItem::new(17, "layer_tests.rs"),
+                TreeItem::new(18, "widget_tests.rs"),
+            ],
+        ),
         TreeItem::new(13, "Cargo.toml"),
         TreeItem::new(14, "README.md"),
     ]
@@ -75,6 +97,10 @@ fn label_for(id: u64) -> &'static str {
         12 => "dogfood-log.md",
         13 => "Cargo.toml",
         14 => "README.md",
+        15 => "tests",
+        16 => "focus_reveal_tests.rs",
+        17 => "layer_tests.rs",
+        18 => "widget_tests.rs",
         _ => "?",
     }
 }
@@ -112,12 +138,17 @@ fn main() {
                     .background(PANEL),
             );
 
+            // The rows live in a scroll viewport: expanded, the tree is taller
+            // than the panel, so arrowing off the bottom edge has to bring the
+            // cursor row back into view.
+            let viewport = tree.add_child(panel, ScrollView::new().width_full().grow(1.0));
+
             let sel = selected;
             TreeView::new(model())
-                .expanded([1, 3])
+                .expanded([1, 3, 7, 15])
                 .selected(5)
                 .on_select(move |id, _ctx| sel.set(Some(id)))
-                .build(&mut tree, panel);
+                .build(&mut tree, viewport);
 
             tree.add_child(
                 root,
