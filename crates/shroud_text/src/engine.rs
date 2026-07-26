@@ -344,6 +344,37 @@ fn shape_key_plain(
     h.finish()
 }
 
+/// Digest for a composing (IME preedit) shaping call. Domain-tagged `2`, so it
+/// can never collide with a plain (`0`) or rich (`1`) key — which is what lets
+/// all three share `slot_key` without a composing digest ever being mistaken
+/// for "the slot holds this editable value".
+///
+/// Folds the plain inputs plus the three derived-geometry arguments, because a
+/// [`ComposedBlock`] carries its caret and rects as values: moving the caret
+/// inside an unchanged preedit changes the answer without changing the text.
+#[allow(clippy::too_many_arguments)]
+fn shape_key_composing(
+    text: &str,
+    font_size: f32,
+    line_height: f32,
+    max_width: Option<f32>,
+    attrs: &TextAttrs,
+    scale: f32,
+    caret_offset: usize,
+    underline_range: (usize, usize),
+    target_range: Option<(usize, usize)>,
+) -> u64 {
+    let mut h = DefaultHasher::new();
+    2u8.hash(&mut h);
+    text.hash(&mut h);
+    hash_attrs(attrs, &mut h);
+    hash_metrics(font_size, line_height, max_width, scale, &mut h);
+    caret_offset.hash(&mut h);
+    underline_range.hash(&mut h);
+    target_range.hash(&mut h);
+    h.finish()
+}
+
 /// Digest for a rich (multi-span) shaping call. Domain-tagged `1`. Folds every
 /// input that moves a glyph or a decoration: each span's text, attrs, color,
 /// and decoration flags, plus the shared metrics.
@@ -426,7 +457,28 @@ pub struct TextEngine {
     /// focused at a time, and a slot left over from a *different* field is only
     /// a missed optimization, never a wrong answer: the line sync makes the
     /// buffer's content equal the requested text either way.
+    ///
+    /// Three paths write it — [`shape_edit_plain`](Self::shape_edit_plain),
+    /// [`shape_edit_rich`](Self::shape_edit_rich) and
+    /// [`shape_composing`](Self::shape_composing) — because a field alternates
+    /// between editing and composing and the two strings differ by only the
+    /// preedit, so sharing one buffer makes the commit transition nearly free.
+    /// Each writer must record what it left behind in `slot_key`.
     edit_slot: Option<Buffer>,
+    /// Digest of the text `edit_slot` currently holds, set by every path that
+    /// syncs it.
+    ///
+    /// The buffer is what `edit_caret` / `edit_hit` /
+    /// `edit_selection_rects_with_trailing` read, so serving a memo whose
+    /// glyphs describe a *different* string than the slot holds would pair
+    /// correct glyphs with a geometry source answering about something else.
+    /// That is not hypothetical: cancelling an IME composition leaves `value`
+    /// byte-identical to what it was before composing started, so the edit
+    /// memo's key matches while the slot still holds the composed string.
+    /// Gating the memo on this — rather than on the slot merely being
+    /// non-empty — makes the pairing structural, so a fourth writer of the slot
+    /// inherits the guarantee by setting this field.
+    slot_key: Option<u64>,
     /// Digest of the inputs `edit_slot` was last shaped for, paired with the
     /// glyphs that came out.
     ///
@@ -441,6 +493,19 @@ pub struct TextEngine {
     /// glyph positions. Dropped alongside the slot in
     /// [`clear_shape_cache`](Self::clear_shape_cache).
     edit_memo: Option<(u64, std::rc::Rc<ShapedText>)>,
+    /// The composing twin of `edit_memo`: the last [`ComposedBlock`] and the
+    /// digest of everything it was derived from.
+    ///
+    /// Composition is the one input method that repaints without changing
+    /// anything — the candidate window opening, a hover, the IME watchdog's
+    /// forced redraw — and each of those used to rebuild the whole document.
+    ///
+    /// Unlike `edit_memo` this deliberately does **not** require the slot to
+    /// still describe the same string. A `ComposedBlock` is self-contained: its
+    /// caret, underline and target rects are precomputed fields, not queries
+    /// against the buffer, so it stays correct however the slot has moved on.
+    /// Everything it depends on is in the key.
+    compose_memo: Option<(u64, std::rc::Rc<ComposedBlock>)>,
 }
 
 impl Default for TextEngine {
@@ -461,7 +526,9 @@ impl TextEngine {
             shape_ns: 0,
             reshaped_lines: 0,
             edit_slot: None,
+            slot_key: None,
             edit_memo: None,
+            compose_memo: None,
         }
     }
 
@@ -508,7 +575,9 @@ impl TextEngine {
     pub fn clear_shape_cache(&mut self) {
         self.shape_cache.clear();
         self.edit_slot = None;
+        self.slot_key = None;
         self.edit_memo = None;
+        self.compose_memo = None;
     }
 
     /// Access the underlying FontSystem (for advanced usage).
@@ -1284,9 +1353,19 @@ impl TextEngine {
     /// the caret at `caret_offset`, the underline rects for the preedit
     /// `underline` range, and (when `target_range` is a non-empty `[ts, te)`)
     /// the highlight rects for the converting *target clause* — everything a
-    /// composing `Input` paints. See [`ComposedBlock`]. Uncached by design:
-    /// each keystroke's composed string is unique, so caching would only churn
-    /// the LRU with transient entries.
+    /// composing `Input` paints. See [`ComposedBlock`]. Still not routed
+    /// through the shape cache: each keystroke's composed string is unique, so
+    /// caching would only churn the LRU with transient entries.
+    ///
+    /// **Incremental**, on the same persistent buffer as the editing paths.
+    /// This is the Japanese-input path — composition is what an IME does — and
+    /// it was the last one still rebuilding the whole document every frame, so
+    /// a long note fell back to pre-incremental cost the moment conversion
+    /// started: measured at 3.95 ms per frame at 64 paragraphs and 16.1 ms at
+    /// 256, against a 6.06 ms budget (`ime_composing` bench). Sharing the slot
+    /// with the editing paths also makes the commit transition nearly free —
+    /// the committed value usually equals the last preedit's composed string,
+    /// so the first frame after commit re-shapes nothing.
     #[allow(clippy::too_many_arguments)]
     pub fn shape_composing(
         &mut self,
@@ -1298,8 +1377,28 @@ impl TextEngine {
         caret_offset: usize,
         underline_range: (usize, usize),
         target_range: Option<(usize, usize)>,
-    ) -> ComposedBlock {
-        let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
+    ) -> std::rc::Rc<ComposedBlock> {
+        let key = shape_key_composing(
+            text,
+            font_size,
+            line_height,
+            max_width,
+            attrs,
+            self.scale,
+            caret_offset,
+            underline_range,
+            target_range,
+        );
+        if let Some((memo_key, block)) = self.compose_memo.as_ref() {
+            if *memo_key == key {
+                return std::rc::Rc::clone(block);
+            }
+        }
+        let mut buffer = self.take_edit_buffer(font_size, line_height, max_width);
+        let t0 = std::time::Instant::now();
+        let changed = sync_edit_lines(&mut buffer, text, &attrs.as_cosmic());
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        self.record_shape(t0, changed);
         let shaped = extract_shaped_plain(&buffer, font_size, self.scale);
 
         // Preedit underline (the non-trailing selection body), target-clause
@@ -1322,13 +1421,17 @@ impl TextEngine {
             max_width,
             attrs,
         );
+        self.edit_slot = Some(buffer);
+        self.slot_key = Some(key);
 
-        ComposedBlock {
+        let block = std::rc::Rc::new(ComposedBlock {
             shaped,
             caret,
             underline,
             target,
-        }
+        });
+        self.compose_memo = Some((key, std::rc::Rc::clone(&block)));
+        block
     }
 
     /// Shape a focused `Input`'s plain value into the engine's persistent edit
@@ -1364,6 +1467,7 @@ impl TextEngine {
         self.record_shape(t0, changed);
         let shaped = std::rc::Rc::new(extract_shaped_plain(&buffer, font_size, self.scale));
         self.edit_slot = Some(buffer);
+        self.slot_key = Some(key);
         self.edit_memo = Some((key, std::rc::Rc::clone(&shaped)));
         EditBuffer { shaped }
     }
@@ -1371,13 +1475,19 @@ impl TextEngine {
     /// The glyphs from the previous frame, when `key` says nothing that affects
     /// them has changed since.
     ///
-    /// Requires the buffer to still be parked: the caret / hit-test / selection
-    /// queries read *that*, not the memo, so handing back cached glyphs without
-    /// a live buffer behind them would pair correct glyphs with a dead
-    /// geometry source.
+    /// Requires the parked buffer to hold *this* text (`slot_key`): the caret /
+    /// hit-test / selection queries read the buffer, not the memo, so handing
+    /// back cached glyphs while the slot describes some other string would pair
+    /// correct glyphs with a geometry source answering about something else.
+    /// A dead slot fails the same check, since `slot_key` is cleared with it.
+    ///
+    /// Checking the slot's own key rather than merely that it exists is what
+    /// makes cancelling an IME composition safe: `value` is then byte-identical
+    /// to before the composition, so this memo's key matches, but the slot
+    /// still holds the composed string until the miss re-syncs it.
     fn edit_memo_hit(&self, key: u64) -> Option<std::rc::Rc<ShapedText>> {
         let (memo_key, shaped) = self.edit_memo.as_ref()?;
-        (*memo_key == key && self.edit_slot.is_some()).then(|| std::rc::Rc::clone(shaped))
+        (*memo_key == key && self.slot_key == Some(key)).then(|| std::rc::Rc::clone(shaped))
     }
 
     /// Take the persistent edit buffer — creating an empty one when the slot is
@@ -1464,6 +1574,7 @@ impl TextEngine {
         self.record_shape(t0, changed);
         let shaped = std::rc::Rc::new(extract_shaped_rich(&buffer, spans, font_size, self.scale));
         self.edit_slot = Some(buffer);
+        self.slot_key = Some(key);
         self.edit_memo = Some((key, std::rc::Rc::clone(&shaped)));
         EditBuffer { shaped }
     }

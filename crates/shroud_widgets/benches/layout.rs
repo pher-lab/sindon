@@ -284,12 +284,138 @@ fn highlight_tiling(text: &str) -> Vec<shroud_text::TextSpan> {
         .collect()
 }
 
+/// A paragraph of Japanese prose.
+///
+/// IME composition *is* the Japanese-input path, and CJK text resolves
+/// different fallback fonts and breaks lines differently than the Latin
+/// [`PARAGRAPH`], so measuring the composing path on English text would not be
+/// measuring the thing that actually runs.
+const PARAGRAPH_JA: &str = "素早い茶色の狐が怠けた犬を飛び越えて、それからしばらく走り\
+続けたので、この行は六百ピクセルの幅の欄の中で少なくとも一度は折り返すことになる。";
+
+/// A Japanese note of `paragraphs` paragraphs with `preedit` spliced at the end
+/// of the middle one, plus the byte offset the preedit starts at.
+///
+/// Built the way `Input::paint` builds it: `value[..caret] + preedit +
+/// value[caret..]`. Only the caret's paragraph differs between two calls with
+/// different preedits, which is exactly the property the line reuse exploits.
+fn composing_doc(paragraphs: usize, preedit: &str) -> (String, usize) {
+    let mut s = String::new();
+    let mut preedit_start = 0;
+    for i in 0..paragraphs {
+        s.push_str(&format!("{i}. {PARAGRAPH_JA}"));
+        if i == paragraphs / 2 {
+            preedit_start = s.len();
+            s.push_str(preedit);
+        }
+        s.push('\n');
+    }
+    (s, preedit_start)
+}
+
+/// What one frame of *IME composition* costs on a long note.
+///
+/// [`bench_edit_keystroke`] only covers the non-composing case: `Input::paint`
+/// skips the `EditBuffer` entirely while `preedit` is non-empty and calls
+/// `TextEngine::shape_composing` instead. That path used to build a fresh
+/// buffer over the whole document every frame, so Japanese input — the only
+/// input method that composes — did not get the 9–23x the Latin path did, and
+/// a long note fell back to pre-incremental cost the moment conversion started.
+///
+/// Three arms, same documents, same run:
+///
+/// - `preedit_update`: `shape_composing` across two consecutive states of one
+///   composition. What each kana costs.
+/// - `unchanged_repaint`: `shape_composing` with identical arguments — the
+///   repaint that arrives mid-composition without the preedit changing (the
+///   candidate window opening, a hover, the IME watchdog's forced redraw).
+///   This is the arm the memo serves.
+/// - `full_rebuild`: a fresh buffer over the whole composed string, which is
+///   what the composing path did before. It omits the caret / underline /
+///   target-clause derivations that the other two arms pay, so it slightly
+///   *under*-states the old cost.
+///
+/// `target_range` is `Some` throughout: that is the converting (変換中) state,
+/// where the user is watching the candidate list and a dropped frame is most
+/// visible, and it exercises the extra selection-rect walk the clause
+/// highlight adds.
+fn bench_ime_composing(c: &mut Criterion) {
+    let attrs = shroud_text::TextAttrs::default();
+    let (fs, lh, wrap) = (14.0, 20.0, Some(600.0));
+
+    let mut group = c.benchmark_group("ime_composing");
+    for paragraphs in [16usize, 64, 256] {
+        // Two consecutive states of one composition: "にほん" grown by a kana.
+        // A real preedit grows a character at a time like this, and the note
+        // around it never moves.
+        let (a, a_at) = composing_doc(paragraphs, "にほん");
+        let (b, b_at) = composing_doc(paragraphs, "にほんご");
+        let docs = [(a, a_at, "にほん".len()), (b, b_at, "にほんご".len())];
+
+        // One composing call, spelled out because all three arms need it.
+        let compose = |engine: &mut TextEngine, doc: &(String, usize, usize)| {
+            let (text, at, len) = doc;
+            engine.shape_composing(
+                black_box(text),
+                fs,
+                lh,
+                wrap,
+                &attrs,
+                at + len,
+                (*at, at + len),
+                Some((*at, at + len)),
+            )
+        };
+
+        let mut engine = TextEngine::new();
+        // Warm the slot, so the timed calls are the steady composing state.
+        let _ = compose(&mut engine, &docs[0]);
+        let mut flip = false;
+        group.bench_with_input(
+            BenchmarkId::new("preedit_update", paragraphs),
+            &paragraphs,
+            |bencher, _| {
+                bencher.iter(|| {
+                    flip = !flip;
+                    black_box(compose(&mut engine, &docs[usize::from(flip)]));
+                });
+            },
+        );
+
+        let mut engine = TextEngine::new();
+        let _ = compose(&mut engine, &docs[0]);
+        group.bench_with_input(
+            BenchmarkId::new("unchanged_repaint", paragraphs),
+            &paragraphs,
+            |bencher, _| {
+                bencher.iter(|| black_box(compose(&mut engine, &docs[0])));
+            },
+        );
+
+        let mut engine = TextEngine::new();
+        let mut flip = false;
+        group.bench_with_input(
+            BenchmarkId::new("full_rebuild", paragraphs),
+            &paragraphs,
+            |bencher, _| {
+                bencher.iter(|| {
+                    flip = !flip;
+                    let (text, ..) = &docs[usize::from(flip)];
+                    black_box(engine.shape_text_uncached(black_box(text), fs, lh, wrap));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_preview,
     bench_preview_short,
     bench_editor,
     bench_shape_cache_hit,
-    bench_edit_keystroke
+    bench_edit_keystroke,
+    bench_ime_composing
 );
 criterion_main!(benches);
