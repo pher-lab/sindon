@@ -62,6 +62,15 @@ pub enum AccessRole {
     TabList,
     /// One option within a [`TabList`](AccessRole::TabList).
     Tab,
+    /// The container of a hierarchical, collapsible list of
+    /// [`TreeItem`](AccessRole::TreeItem)s. A single tab stop: focus lands here
+    /// and a roving cursor moves between the items (see
+    /// [`AccessNode::level`](AccessNode::level)).
+    Tree,
+    /// One row within a [`Tree`](AccessRole::Tree). Carries its depth as
+    /// [`level`](AccessNode::level) and, when it has children, its open state as
+    /// [`expanded`](AccessNode::expanded).
+    TreeItem,
     /// One row of a menu — a dropdown's option list, a context menu.
     MenuItem,
     /// An editable single- or multi-line text field.
@@ -92,8 +101,24 @@ impl AccessRole {
                 | AccessRole::RadioButton
                 | AccessRole::Switch
                 | AccessRole::Tab
+                | AccessRole::TreeItem
                 | AccessRole::MenuItem
         )
+    }
+
+    /// Whether an assistive technology may open or close a node of this role —
+    /// the [`Expand`](AccessAction::Expand) / [`Collapse`](AccessAction::Collapse)
+    /// actions.
+    ///
+    /// The third of the vocabulary-level gates, alongside
+    /// [`is_activatable`](Self::is_activatable) and
+    /// [`is_value_adjustable`](Self::is_value_adjustable). Only a
+    /// [`TreeItem`](AccessRole::TreeItem) qualifies, and only a *branch* one at
+    /// that: a node advertises the actions when its role passes this gate **and**
+    /// it reports an [`expanded`](AccessNode::expanded) state, so a leaf never
+    /// offers an AT a disclosure it does not have.
+    pub fn is_expandable(self) -> bool {
+        matches!(self, AccessRole::TreeItem)
     }
 
     /// Whether an assistive technology may *change* the value of a range control
@@ -143,6 +168,13 @@ pub enum AccessAction {
     /// Set a range control to an absolute value (clamped / snapped by the
     /// widget, exactly as a drag would be).
     SetValue(f64),
+    /// Open a collapsed disclosure — a closed [`TreeItem`](AccessRole::TreeItem)
+    /// branch. Only sent to nodes whose role
+    /// [`is_expandable`](AccessRole::is_expandable).
+    Expand,
+    /// Close an open disclosure. The mirror of [`Expand`](Self::Expand), and the
+    /// same gate.
+    Collapse,
 }
 
 /// A synthetic child node a widget contributes to the a11y tree: one option
@@ -195,6 +227,16 @@ pub struct AccessNode {
     pub selected: Option<bool>,
     /// Numeric range + position for [`AccessRole::Slider`].
     pub numeric: Option<AccessRange>,
+    /// Disclosure state for a node that has children to reveal — an open or
+    /// closed [`TreeItem`](AccessRole::TreeItem) branch. `None` means "nothing
+    /// to disclose" (a leaf), which is *not* the same as `Some(false)`: only the
+    /// latter advertises [`AccessAction::Expand`] to an AT.
+    pub expanded: Option<bool>,
+    /// Depth within a hierarchy, **1-based** — a top-level
+    /// [`TreeItem`](AccessRole::TreeItem) is level 1, its children level 2. The
+    /// wire format screen readers speak ("level 3, 2 of 5"), and the only thing
+    /// carrying the tree's shape when the rows are flattened into one list.
+    pub level: Option<usize>,
     /// When set, this node carries a secret: its `value` is force-suppressed
     /// and the role is expected to be a masked one (`PasswordInput`) or a
     /// value-less `Label`. Private so it can only be set via
@@ -216,6 +258,8 @@ impl AccessNode {
             checked: None,
             selected: None,
             numeric: None,
+            expanded: None,
+            level: None,
             protected: false,
             value: None,
         }
@@ -266,6 +310,19 @@ impl AccessNode {
     /// Set the numeric range + position (slider).
     pub fn numeric(mut self, range: AccessRange) -> Self {
         self.numeric = Some(range);
+        self
+    }
+
+    /// Set the disclosure state. Call only on a node that *has* children to
+    /// reveal — leaving it unset is what marks a leaf.
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = Some(expanded);
+        self
+    }
+
+    /// Set the 1-based hierarchy depth (see [`level`](Self::level)).
+    pub fn level(mut self, level: usize) -> Self {
+        self.level = Some(level);
         self
     }
 
@@ -328,6 +385,7 @@ mod tests {
             AccessRole::RadioButton,
             AccessRole::Switch,
             AccessRole::Tab,
+            AccessRole::TreeItem,
         ] {
             assert!(role.is_activatable(), "{role:?} should take a click");
         }
@@ -340,6 +398,9 @@ mod tests {
             AccessRole::Slider,
             AccessRole::RadioGroup,
             AccessRole::TabList,
+            // The tree container is the tab stop, not a pressable thing — its
+            // rows are what an AT clicks.
+            AccessRole::Tree,
             AccessRole::TextInput,
             AccessRole::PasswordInput,
             AccessRole::ScrollView,
@@ -347,6 +408,38 @@ mod tests {
         ] {
             assert!(!role.is_activatable(), "{role:?} should not take a click");
         }
+    }
+
+    #[test]
+    fn only_tree_items_are_expandable() {
+        assert!(AccessRole::TreeItem.is_expandable());
+        // Including the container: a screen reader opens a *row*, and the tree
+        // itself has nothing to disclose.
+        for role in [
+            AccessRole::Tree,
+            AccessRole::Group,
+            AccessRole::MenuItem,
+            AccessRole::Button,
+            AccessRole::Dialog,
+        ] {
+            assert!(!role.is_expandable(), "{role:?} should not expand");
+        }
+    }
+
+    #[test]
+    fn leaf_and_closed_branch_are_distinguishable() {
+        // The distinction the Expand/Collapse advertisement is keyed off: a leaf
+        // leaves `expanded` unset, a closed branch reports `Some(false)`.
+        let leaf = AccessNode::new(AccessRole::TreeItem)
+            .name("main.rs")
+            .level(2);
+        assert_eq!(leaf.expanded, None, "a leaf discloses nothing");
+        assert_eq!(leaf.level, Some(2));
+
+        let closed = AccessNode::new(AccessRole::TreeItem)
+            .name("src")
+            .expanded(false);
+        assert_eq!(closed.expanded, Some(false));
     }
 
     #[test]

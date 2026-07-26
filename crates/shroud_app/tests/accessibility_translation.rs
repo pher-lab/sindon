@@ -135,6 +135,8 @@ fn requests_translate_to_the_framework_vocabulary() {
         (Action::Focus, AccessAction::Focus),
         (Action::Increment, AccessAction::Increment),
         (Action::Decrement, AccessAction::Decrement),
+        (Action::Expand, AccessAction::Expand),
+        (Action::Collapse, AccessAction::Collapse),
     ] {
         assert_eq!(
             action_from_request(&bare(action, 42)),
@@ -149,7 +151,6 @@ fn requests_translate_to_the_framework_vocabulary() {
         Action::Blur,
         Action::ShowContextMenu,
         Action::ScrollIntoView,
-        Action::Expand,
         Action::SetValue, // without the numeric data it carries nothing
     ] {
         assert_eq!(

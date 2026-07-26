@@ -138,6 +138,25 @@ pub trait Widget: std::any::Any {
         EventResult::Ignored
     }
 
+    /// The descendant that should carry *a11y* focus while this widget holds
+    /// the keyboard — the active descendant of a roving container.
+    ///
+    /// `TreeView` is one tab stop with a cursor that roves between its rows, so
+    /// OS focus stays on the container by design. A screen reader following OS
+    /// focus alone would then announce the tree once and go silent as the cursor
+    /// moves. Returning the tree index of the cursor row redirects the a11y
+    /// tree's focus to it, which is how ARIA's `aria-activedescendant` is
+    /// expressed to a platform AT.
+    ///
+    /// Consulted only for the focused widget, and only while an assistive
+    /// technology is connected. The keyboard [`FocusManager`](crate::FocusManager)
+    /// is **not** involved: this redirects what the OS is *told*, never where
+    /// events go. An index that is not currently visible is ignored, so a
+    /// delegate stale from a rebuild degrades to focusing the container.
+    fn accessibility_focus_delegate(&self) -> Option<usize> {
+        None
+    }
+
     /// Whether this widget consumes printable text input when focused.
     ///
     /// Used by the shortcut router (see

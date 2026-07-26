@@ -1759,8 +1759,20 @@ impl WidgetTree {
 
         // Focus must name a node present in the snapshot; fall back to the
         // window root if the focused widget just went invisible / away.
+        //
+        // A roving container (`TreeView`) keeps keyboard focus on itself and
+        // moves a cursor between its rows, so it redirects a11y focus to the
+        // cursor row — otherwise a screen reader, which follows this id, would
+        // announce the container once and stay silent for every arrow key. The
+        // delegate is honored only if it too is in the snapshot, so one left
+        // stale by a rebuild degrades to focusing the container.
+        let present = |id: usize| entries.iter().any(|e| e.id == id as u64);
         let focus_id = match self.focus.focused() {
-            Some(idx) if entries.iter().any(|e| e.id == idx as u64) => idx as u64,
+            Some(idx) if present(idx) => self
+                .node(idx)
+                .and_then(|n| n.widget.accessibility_focus_delegate())
+                .filter(|&d| present(d))
+                .unwrap_or(idx) as u64,
             _ => A11Y_WINDOW_ROOT,
         };
 
