@@ -97,8 +97,10 @@ fn rich_caret_reaches_trailing_empty_line() {
     let end = text.len();
 
     let (_, plain_y) = e.caret_at_offset_attrs(text, end, FS, LH, WRAP, &attrs);
-    let edit = e.shape_edit_rich(&one_span(text, &attrs), FS, LH, WRAP);
-    let (_, rich_y) = e.edit_caret(&edit, text, end, FS, LH, WRAP, &attrs);
+    // Shaping parks the buffer in the engine's edit slot, which is what
+    // `edit_caret` then reads.
+    let _edit = e.shape_edit_rich(&one_span(text, &attrs), FS, LH, WRAP);
+    let (_, rich_y) = e.edit_caret(text, end, FS, LH, WRAP, &attrs);
 
     assert_eq!(
         plain_y, LH,

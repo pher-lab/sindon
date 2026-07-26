@@ -1392,7 +1392,7 @@ fn edit_buffer_plain_matches_the_separate_shapes() {
         // Caret at every char boundary.
         for &off in &boundaries {
             let want = engine.caret_at_offset_attrs(text, off, fs, lh, wrap, &attrs);
-            let got = engine.edit_caret(&edit, text, off, fs, lh, wrap, &attrs);
+            let got = engine.edit_caret(text, off, fs, lh, wrap, &attrs);
             assert_eq!(
                 got, want,
                 "caret mismatch at offset {off} in {text:?} (wrap {wrap:?})"
@@ -1404,7 +1404,9 @@ fn edit_buffer_plain_matches_the_separate_shapes() {
             for &hi in &boundaries[i..] {
                 let want =
                     engine.selection_rects_with_trailing_attrs(text, lo, hi, fs, lh, wrap, &attrs);
-                let got = edit.selection_rects_with_trailing(text, lo, hi, fs);
+                let got = engine
+                    .edit_selection_rects_with_trailing(text, lo, hi, fs)
+                    .expect("edit buffer is live");
                 assert_eq!(
                     got, want,
                     "selection mismatch for {lo}..{hi} in {text:?} (wrap {wrap:?})"
@@ -1420,7 +1422,7 @@ fn edit_buffer_plain_matches_the_separate_shapes() {
             let mut x = -6.0;
             while x < grid_w {
                 let want = engine.offset_at_point_attrs(text, x, y, fs, lh, wrap, &attrs);
-                let got = edit.hit(text, x, y);
+                let got = engine.edit_hit(text, x, y).expect("edit buffer is live");
                 assert_eq!(
                     got, want,
                     "hit mismatch at ({x}, {y}) in {text:?} (wrap {wrap:?})"
@@ -1430,6 +1432,323 @@ fn edit_buffer_plain_matches_the_separate_shapes() {
             y += lh / 2.0;
         }
     }
+}
+
+#[test]
+fn incremental_edits_reshape_only_the_touched_lines() {
+    // The persistent edit buffer rewrites only the lines whose text changed.
+    // That reuse is invisible from the outside — the shaped output is identical
+    // either way — so pin it on the line counter, which is the only place the
+    // difference between "re-shaped one line" and "re-shaped the document"
+    // shows up.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let attrs = TextAttrs::default();
+
+    let mut lines: Vec<String> = (0..40)
+        .map(|i| format!("line {i} with some words on it"))
+        .collect();
+    let doc = lines.join("\n");
+
+    // Cold slot: every line has to be shaped once.
+    let _ = engine.shape_edit_plain(&doc, fs, lh, None, &attrs);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        40,
+        "a cold buffer shapes every line"
+    );
+
+    // One character typed into the middle line.
+    lines[20].push('!');
+    let edited = lines.join("\n");
+    let _ = engine.shape_edit_plain(&edited, fs, lh, None, &attrs);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        1,
+        "typing inside one line must not re-shape the rest of the document"
+    );
+
+    // A repaint of the unchanged value shapes nothing at all — the idle-tick
+    // case (auto-lock's forced repaint) that used to cost a full document.
+    let _ = engine.shape_edit_plain(&edited, fs, lh, None, &attrs);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        0,
+        "an unchanged repaint must not shape"
+    );
+}
+
+#[test]
+fn incremental_edits_match_a_cold_shape() {
+    // Every intermediate state of an edit sequence must stay indistinguishable
+    // from shaping that same text from scratch. If the line reuse ever drifts
+    // from what `Buffer::set_text` would have built, the caret and hit-tests
+    // derived from the reused buffer silently disagree with the standalone
+    // paths — the exact class of bug the `measure`/`shape` agreement contract
+    // exists to prevent.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let attrs = TextAttrs::default();
+    let wrap = Some(140.0);
+
+    // Typing, a hard break, un-breaking it, a soft wrap, mixed script, a
+    // shrink, and back to empty.
+    let sequence = [
+        "",
+        "a",
+        "ab",
+        "ab cd",
+        "ab cd\n",
+        "ab cd\nef",
+        "ab cd\nef\ngh",
+        "ab cd\nefgh",
+        "ab cd\nefgh ijkl mnop qrst uvwx yz",
+        "ab cd\n\u{65E5}\u{672C}\u{8A9E} mixed\nlast",
+        "ab cd\nlast",
+        "",
+    ];
+
+    for text in sequence {
+        // `shape_edit_plain` reuses the warm buffer; `shape_text_attrs` builds
+        // a fresh one, so it is the from-scratch ground truth.
+        let got = engine.shape_edit_plain(text, fs, lh, wrap, &attrs);
+        let want = engine.shape_text_attrs(text, fs, lh, wrap, &attrs);
+
+        assert_eq!(
+            got.shaped().glyphs.len(),
+            want.glyphs.len(),
+            "glyph count after {text:?}"
+        );
+        for (a, b) in got.shaped().glyphs.iter().zip(&want.glyphs) {
+            assert_eq!((a.x, a.y), (b.x, b.y), "glyph position after {text:?}");
+            assert_eq!(a.cache_key, b.cache_key, "glyph identity after {text:?}");
+        }
+        assert_eq!(
+            (got.shaped().width, got.shaped().height),
+            (want.width, want.height),
+            "block extent after {text:?}"
+        );
+
+        for off in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+            assert_eq!(
+                engine.edit_caret(text, off, fs, lh, wrap, &attrs),
+                engine.caret_at_offset_attrs(text, off, fs, lh, wrap, &attrs),
+                "caret at offset {off} after {text:?}"
+            );
+        }
+    }
+}
+
+/// Tile `text` into color-only spans the way a live highlighter does: one span
+/// per whitespace-delimited word, every third one colored.
+fn highlight_tiling(text: &str) -> Vec<TextSpan> {
+    let mut spans = Vec::new();
+    let accent = Color::rgb(0.85, 0.4, 0.2);
+    for (i, chunk) in text.split_inclusive(' ').enumerate() {
+        let span = TextSpan::new(chunk);
+        spans.push(if i % 3 == 0 { span.color(accent) } else { span });
+    }
+    if spans.is_empty() {
+        spans.push(TextSpan::new(""));
+    }
+    spans
+}
+
+#[test]
+fn incremental_rich_edits_match_a_cold_shape() {
+    // The rich path is the one a highlighted editor takes, and its line model
+    // differs from the plain one twice over (BidiParagraphs split, synthetic
+    // line endings). Pin every intermediate state of an edit sequence against
+    // the from-scratch rich shape, and the derived caret against the plain
+    // standalone path — the highlighter invariant says color-only spans lay out
+    // identically to the plain value.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let attrs = TextAttrs::default();
+    let wrap = Some(140.0);
+
+    let sequence = [
+        "",
+        "alpha",
+        "alpha beta",
+        "alpha beta\n",
+        "alpha beta\ngamma",
+        "alpha beta\ngamma delta\nepsilon",
+        "alpha beta\ngamma delta epsilon zeta eta theta iota kappa",
+        "alpha beta\n\u{65E5}\u{672C}\u{8A9E} mixed\ntail",
+        "alpha beta\ntail",
+        "",
+    ];
+
+    for text in sequence {
+        let spans = highlight_tiling(text);
+        let got = engine.shape_edit_rich(&spans, fs, lh, wrap);
+        // `shape_rich` builds a fresh buffer, so it is the cold ground truth.
+        let want = engine.shape_rich(&spans, fs, lh, wrap);
+
+        assert_eq!(
+            got.shaped().glyphs.len(),
+            want.glyphs.len(),
+            "rich glyph count after {text:?}"
+        );
+        for (a, b) in got.shaped().glyphs.iter().zip(&want.glyphs) {
+            assert_eq!((a.x, a.y), (b.x, b.y), "rich glyph position after {text:?}");
+            assert_eq!(a.color, b.color, "rich glyph color after {text:?}");
+            assert_eq!(
+                a.cache_key, b.cache_key,
+                "rich glyph identity after {text:?}"
+            );
+        }
+        assert_eq!(
+            got.shaped().span_boxes,
+            want.span_boxes,
+            "span boxes after {text:?}"
+        );
+        assert_eq!(
+            (got.shaped().width, got.shaped().height),
+            (want.width, want.height),
+            "rich block extent after {text:?}"
+        );
+
+        for off in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+            assert_eq!(
+                engine.edit_caret(text, off, fs, lh, wrap, &attrs),
+                engine.caret_at_offset_attrs(text, off, fs, lh, wrap, &attrs),
+                "rich caret at offset {off} after {text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn incremental_rich_edits_reshape_only_the_touched_lines() {
+    // Same reuse guarantee as the plain path, on the path knot's editor
+    // actually uses.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+
+    let mut lines: Vec<String> = (0..40)
+        .map(|i| format!("line {i} with some words on it"))
+        .collect();
+
+    let spans = highlight_tiling(&lines.join("\n"));
+    let _ = engine.shape_edit_rich(&spans, fs, lh, None);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        40,
+        "a cold buffer shapes every line"
+    );
+
+    // Typing inside one line does not change how many spans precede the
+    // others, so their tiling — and their cached shaping — survives.
+    lines[20].push('x');
+    let spans = highlight_tiling(&lines.join("\n"));
+    let _ = engine.shape_edit_rich(&spans, fs, lh, None);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        1,
+        "typing inside one line must not re-shape the rest of the document"
+    );
+
+    let spans = highlight_tiling(&lines.join("\n"));
+    let _ = engine.shape_edit_rich(&spans, fs, lh, None);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        0,
+        "an unchanged repaint must not shape"
+    );
+}
+
+#[test]
+fn an_unchanged_repaint_does_no_shaping_work_at_all() {
+    // Line reuse made a keystroke cheap, but every frame still walked the whole
+    // document just to discover nothing had changed — and in a real editing
+    // session ~91% of frames change nothing. `take_shape_stats` is where the
+    // skip shows: a repeat repaint must record no shaping *time*, not merely
+    // zero re-shaped lines.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let attrs = TextAttrs::default();
+    let doc: String = (0..40)
+        .map(|i| format!("line {i} with some words on it\n"))
+        .collect();
+
+    let first = engine.shape_edit_plain(&doc, fs, lh, None, &attrs);
+    let first_glyphs = first.shaped().glyphs.len();
+    let (_, warm_ns) = engine.take_shape_stats();
+    assert!(warm_ns > 0, "the cold shape must actually do work");
+    let _ = engine.take_reshaped_lines();
+
+    let again = engine.shape_edit_plain(&doc, fs, lh, None, &attrs);
+    assert_eq!(
+        engine.take_shape_stats(),
+        (0, 0),
+        "an unchanged repaint must not touch the buffer at all"
+    );
+    assert_eq!(engine.take_reshaped_lines(), 0);
+    assert_eq!(
+        again.shaped().glyphs.len(),
+        first_glyphs,
+        "the reused glyphs must be the ones the first shape produced"
+    );
+
+    // A real edit still goes through the line walk.
+    let edited = doc.replace("line 20 ", "line 20! ");
+    let _ = engine.shape_edit_plain(&edited, fs, lh, None, &attrs);
+    assert_eq!(engine.take_reshaped_lines(), 1);
+}
+
+#[test]
+fn an_unchanged_rich_repaint_does_no_shaping_work_at_all() {
+    // Same skip on the path a highlighted editor takes.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let doc: String = (0..40)
+        .map(|i| format!("line {i} with some words on it\n"))
+        .collect();
+    let spans = highlight_tiling(&doc);
+
+    let _ = engine.shape_edit_rich(&spans, fs, lh, None);
+    let (_, warm_ns) = engine.take_shape_stats();
+    assert!(warm_ns > 0, "the cold shape must actually do work");
+    let _ = engine.take_reshaped_lines();
+
+    let _ = engine.shape_edit_rich(&spans, fs, lh, None);
+    assert_eq!(
+        engine.take_shape_stats(),
+        (0, 0),
+        "an unchanged rich repaint must not re-tile or walk the document"
+    );
+    assert_eq!(engine.take_reshaped_lines(), 0);
+}
+
+#[test]
+fn clearing_the_shape_cache_drops_the_edit_buffer() {
+    // The persistent buffer's lines hold the focused field's plaintext, so a
+    // screen swap / lock — which clears the shape cache for exactly that
+    // reason — must drop it too. Dropping is what wipes it: the vendored
+    // cosmic-text zeroizes `BufferLine.text` on drop.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 20.0);
+    let attrs = TextAttrs::default();
+    let text = "note body";
+
+    let _ = engine.shape_edit_plain(text, fs, lh, None, &attrs);
+    assert!(engine.edit_hit(text, 0.0, 0.0).is_some());
+
+    engine.clear_shape_cache();
+    assert_eq!(engine.edit_hit(text, 0.0, 0.0), None);
+    assert_eq!(
+        engine.edit_selection_rects_with_trailing(text, 0, 3, fs),
+        None
+    );
+
+    // The memo of the previous frame's glyphs must go with it: serving it after
+    // the buffer is gone would pair live glyphs with a dead geometry source.
+    let _ = engine.take_shape_stats();
+    let _ = engine.shape_edit_plain(text, fs, lh, None, &attrs);
+    let (_, ns) = engine.take_shape_stats();
+    assert!(ns > 0, "the first shape after a clear must rebuild");
 }
 
 #[test]
@@ -1484,14 +1803,16 @@ fn edit_buffer_rich_matches_rich_glyphs_and_plain_geometry() {
         .collect();
     for &off in &boundaries {
         let want = engine.caret_at_offset_attrs(&text, off, fs, lh, wrap, &attrs);
-        let got = engine.edit_caret(&edit, &text, off, fs, lh, wrap, &attrs);
+        let got = engine.edit_caret(&text, off, fs, lh, wrap, &attrs);
         assert_eq!(got, want, "rich caret mismatch at offset {off}");
     }
     for (i, &lo) in boundaries.iter().enumerate() {
         for &hi in &boundaries[i..] {
             let want =
                 engine.selection_rects_with_trailing_attrs(&text, lo, hi, fs, lh, wrap, &attrs);
-            let got = edit.selection_rects_with_trailing(&text, lo, hi, fs);
+            let got = engine
+                .edit_selection_rects_with_trailing(&text, lo, hi, fs)
+                .expect("edit buffer is live");
             assert_eq!(got, want, "rich selection mismatch for {lo}..{hi}");
         }
     }
@@ -1500,7 +1821,7 @@ fn edit_buffer_rich_matches_rich_glyphs_and_plain_geometry() {
         let mut x = -6.0;
         while x < ref_rich.width.max(fs) + 12.0 {
             let want = engine.offset_at_point_attrs(&text, x, y, fs, lh, wrap, &attrs);
-            let got = edit.hit(&text, x, y);
+            let got = engine.edit_hit(&text, x, y).expect("edit buffer is live");
             assert_eq!(got, want, "rich hit mismatch at ({x}, {y})");
             x += 9.0;
         }
