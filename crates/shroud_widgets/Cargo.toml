@@ -16,6 +16,11 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 image = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "layout"
+harness = false
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.61", features = [

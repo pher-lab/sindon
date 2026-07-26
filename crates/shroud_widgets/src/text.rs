@@ -319,13 +319,17 @@ impl Widget for TextWidget {
                 if text.is_empty() {
                     return Some(Size::ZERO);
                 }
-                let natural = ctx.text_engine.shape_text_attrs(
+                // Dimensions only — `measure` never draws, and the cloning
+                // `shape_text_attrs` made a text-heavy tree's layout pass ~10x
+                // its node-count cost (see `benches/layout.rs`).
+                let natural = ctx.text_engine.measure_text_attrs(
                     &text,
                     font_size,
                     line_height,
                     None,
                     &self.attrs,
                 );
+                let natural = Size::new(natural.0, natural.1);
 
                 if self.truncate {
                     // Single-line height regardless of natural — truncate's
@@ -348,13 +352,14 @@ impl Widget for TextWidget {
                 // natural width actually overflows the available width.
                 let shaped = if let Some(aw) = available_width {
                     if natural.width > aw {
-                        ctx.text_engine.shape_text_attrs(
+                        let wrapped = ctx.text_engine.measure_text_attrs(
                             &text,
                             font_size,
                             line_height,
                             Some(aw),
                             &self.attrs,
-                        )
+                        );
+                        Size::new(wrapped.0, wrapped.1)
                     } else {
                         natural
                     }
@@ -376,18 +381,18 @@ impl Widget for TextWidget {
                 }
                 let natural = ctx
                     .text_engine
-                    .shape_rich(spans, font_size, line_height, None);
+                    .measure_rich(spans, font_size, line_height, None);
                 let shaped = if let Some(aw) = available_width {
-                    if natural.width > aw {
+                    if natural.0 > aw {
                         ctx.text_engine
-                            .shape_rich(spans, font_size, line_height, Some(aw))
+                            .measure_rich(spans, font_size, line_height, Some(aw))
                     } else {
                         natural
                     }
                 } else {
                     natural
                 };
-                Some(Size::new(shaped.width.ceil(), shaped.height.ceil()))
+                Some(Size::new(shaped.0.ceil(), shaped.1.ceil()))
             }
         }
     }

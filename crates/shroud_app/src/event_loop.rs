@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use accesskit_winit::{Adapter, Event as A11yEvent, WindowEvent as A11yWindowEvent};
 
 use crate::a11y::{action_from_request, snapshot_to_tree_update};
+use crate::perf::{FrameRecorder, FrameTimings, PerfHud, PerfSnapshot};
 use shroud_core::{Color, Colors, Point, Rect, Theme};
 use shroud_platform::{PlatformWindow, SecureClipboard, SystemTheme};
 use shroud_reactive::{Reactive, Signal};
@@ -24,6 +25,23 @@ use winit::window::WindowId;
 
 /// Default cadence for the periodic tick when an `on_frame` hook is set.
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Open the frame perf log from `SHROUD_PERF`, or `None` when unset.
+///
+/// `SHROUD_PERF=1` / `stderr` / `-` streams to stderr — the shorthand every
+/// example's docs already reach for; anything else is taken as a file path.
+/// Without the shorthand, `SHROUD_PERF=1` silently created a file named `1`
+/// in the working directory and the run looked like it produced nothing.
+fn open_perf_log() -> Option<Box<dyn std::io::Write>> {
+    let value = std::env::var("SHROUD_PERF").ok()?;
+    match value.as_str() {
+        "" | "0" => None,
+        "1" | "stderr" | "-" => Some(Box::new(std::io::stderr())),
+        path => std::fs::File::create(path)
+            .ok()
+            .map(|f| Box::new(std::io::BufWriter::new(f)) as Box<dyn std::io::Write>),
+    }
+}
 
 type FrameHook = Box<dyn FnMut(&mut FrameContext) + 'static>;
 type ShortcutHandler = Box<dyn FnMut(&mut ShortcutContext) + 'static>;
@@ -46,6 +64,7 @@ pub struct FrameContext<'a> {
     /// from the tick.
     pub event_ctx: &'a mut EventContext,
     idle: Duration,
+    perf: PerfSnapshot,
 }
 
 impl FrameContext<'_> {
@@ -59,6 +78,17 @@ impl FrameContext<'_> {
     /// reading keeps the session active.
     pub fn idle(&self) -> Duration {
         self.idle
+    }
+
+    /// Frame-timing summary of the last second — the same numbers the
+    /// built-in HUD (`App::perf_overlay`) draws, for apps that want to show
+    /// or record them their own way.
+    ///
+    /// `fps` is frames *painted*, so an idle app reads zero; the durable
+    /// figure is `cpu_ms` (what one frame costs). See
+    /// [`crate::perf`] for the full contract.
+    pub fn perf(&self) -> PerfSnapshot {
+        self.perf
     }
 }
 
@@ -380,6 +410,10 @@ struct AppConfig {
     /// lazily (only when an AT actually connects), so the steady-state cost
     /// of leaving it on is a single branch per frame.
     accessibility: bool,
+    /// Whether to draw the frame-timing HUD over the UI. Off unless
+    /// `App::perf_overlay(true)` asks for it or `SHROUD_HUD` is set in the
+    /// environment — see [`App::perf_overlay`].
+    perf_overlay: bool,
 }
 
 impl Default for AppConfig {
@@ -409,6 +443,9 @@ impl Default for AppConfig {
             fonts: Vec::new(),
             default_font_family: None,
             accessibility: true,
+            // Env default so any existing app can be measured without
+            // touching its source — the same reflex as `SHROUD_PERF`.
+            perf_overlay: std::env::var_os("SHROUD_HUD").is_some_and(|v| v != "0"),
         }
     }
 }
@@ -638,6 +675,33 @@ impl App {
         self
     }
 
+    /// Draw the frame-timing HUD in the window's top-right corner: frames
+    /// painted in the last second, what one frame costs, and the
+    /// layout / paint / gpu / vsync-wait split behind that cost.
+    ///
+    /// Off by default, and also switchable per *run* by setting `SHROUD_HUD`
+    /// in the environment (any value but `0`), so an app can be measured
+    /// without editing it. An explicit call wins over the variable.
+    ///
+    /// The overlay is painted straight into the frame after the widget tree
+    /// — it is not a widget, so it can't take focus, can't be hit-tested,
+    /// and never appears in the accessibility tree. Its own paint cost is
+    /// measured separately and excluded from the numbers it reports (and
+    /// shown as `hud`), so switching it on doesn't move them.
+    ///
+    /// Like the `SHROUD_PERF` log, the readout is counts and durations only
+    /// — it never carries text drawn from the tree.
+    ///
+    /// ```no_run
+    /// # use shroud_app::App;
+    /// # use shroud_widgets::tree::WidgetTree;
+    /// App::new().perf_overlay(true).run(|_| WidgetTree::new());
+    /// ```
+    pub fn perf_overlay(mut self, on: bool) -> Self {
+        self.config.perf_overlay = on;
+        self
+    }
+
     /// Cadence for the idle tick when an [`AppScope::on_frame`] hook is
     /// registered. Defaults to 500 ms, which is suitable for coarse
     /// timers (countdown UI, clipboard auto-clear). Lower for smoother
@@ -710,6 +774,9 @@ impl App {
             }
         }
 
+        // Read before `config` moves into the handler below.
+        let perf_overlay = self.config.perf_overlay;
+
         let mut handler = ShroudEventLoop {
             config: self.config,
             handle,
@@ -730,10 +797,9 @@ impl App {
             redraw_pending_since: Cell::new(None),
             redraw_retry_count: Cell::new(0),
             pending_ime_nav: None,
-            perf_log: std::env::var("SHROUD_PERF")
-                .ok()
-                .and_then(|path| std::fs::File::create(path).ok())
-                .map(std::io::BufWriter::new),
+            perf_log: open_perf_log(),
+            perf: FrameRecorder::new(Instant::now()),
+            hud: perf_overlay.then(PerfHud::new),
             perf_input: None,
             perf_start: Instant::now(),
         };
@@ -970,12 +1036,22 @@ struct ShroudEventLoop {
     /// Set on every keypress (non-arrows store `None`), taken by the next
     /// `Ime` event as its [`ImeNav`] hint — see `translate_ime`.
     pending_ime_nav: Option<ImeNav>,
-    /// Frame perf log, enabled by setting `SHROUD_PERF=<file path>` in the
-    /// environment: one line per painted frame with phase timings (layout /
-    /// paint / gpu), the frame's full-shape count/time from the text engine,
-    /// and — when the frame follows an input event — the input→present
-    /// latency. `None` (the normal case) costs nothing but the check.
-    perf_log: Option<std::io::BufWriter<std::fs::File>>,
+    /// Frame perf log, enabled by setting `SHROUD_PERF` in the environment
+    /// to a file path (or to `1` / `stderr` / `-` for stderr). Writes one
+    /// line per painted frame with the phase split (layout / paint / gpu /
+    /// sync / vsync wait), the frame's shape count and time from the text
+    /// engine, and — when the frame follows an input event — the
+    /// input→present latency; a `SECOND` line each time a second closes with
+    /// frames in it; and a `SESSION` line on exit. See `docs/perf.md`.
+    /// `None` (the normal case) costs nothing but the check.
+    perf_log: Option<Box<dyn std::io::Write>>,
+    /// Rolling frame-timing history. Recorded on *every* painted frame, not
+    /// just when logging is on: the HUD and `FrameContext::perf` read it,
+    /// and the cost is a `VecDeque` push plus a histogram bump.
+    perf: FrameRecorder,
+    /// The on-screen frame-timing readout, when `App::perf_overlay` (or
+    /// `SHROUD_HUD`) asked for one.
+    hud: Option<PerfHud>,
     /// Arrival time + short description of the oldest input event not yet
     /// answered by a painted frame, for the perf log's `input=` column.
     /// First-wins until a frame drains it, so a burst of IME events reports
@@ -1031,6 +1107,26 @@ impl ShroudEventLoop {
     fn perf_mark_input(&mut self, desc: &str) {
         if self.perf_log.is_some() && self.perf_input.is_none() {
             self.perf_input = Some((Instant::now(), desc.to_string()));
+        }
+    }
+
+    /// Point the frame recorder's budget at the current monitor's refresh
+    /// interval, so "slow frame" means "missed *this* display's deadline".
+    ///
+    /// Called when the window comes up and again when it moves between
+    /// monitors. Keeps [`crate::perf::FRAME_BUDGET`] (60 Hz) when winit
+    /// can't report a rate, which is the safe direction: a budget that is
+    /// too generous under-reports slow frames rather than inventing them.
+    fn sync_frame_budget(&mut self) {
+        let rate_mhz = self
+            .window
+            .as_ref()
+            .and_then(|w| w.arc().current_monitor())
+            .and_then(|m| m.refresh_rate_millihertz());
+        if let Some(mhz) = rate_mhz.filter(|m| *m > 0) {
+            // millihertz → one refresh interval: 1e12 ns / mHz.
+            self.perf
+                .set_budget(Duration::from_nanos(1_000_000_000_000 / mhz as u64));
         }
     }
 
@@ -1178,6 +1274,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
             let mut ctx = FrameContext {
                 event_ctx: &mut self.event_ctx,
                 idle,
+                perf: self.perf.snapshot(now),
             };
             hook(&mut ctx);
             self.frame_hook = Some(hook);
@@ -1346,6 +1443,7 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         self.window = Some(platform_window);
         self.renderer = Some(renderer);
         self.paint_ctx = Some(paint_ctx);
+        self.sync_frame_budget();
 
         window_arc.request_redraw();
     }
@@ -1354,6 +1452,34 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
         match event {
             AppEvent::Wake => self.request_redraw(),
             AppEvent::Accessibility(a11y) => self.handle_a11y_event(a11y),
+        }
+    }
+
+    /// Close the perf log with a whole-session summary, so a run's numbers
+    /// are readable without post-processing the per-frame lines.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.perf_log.is_none() {
+            return;
+        }
+        let elapsed = self.perf_start.elapsed().as_secs_f64();
+        let s = self.perf.session_summary();
+        let budget_ms = self.perf.budget().as_secs_f64() * 1e3;
+        if let Some(log) = self.perf_log.as_mut() {
+            use std::io::Write;
+            let _ = writeln!(
+                log,
+                "[{:9.1}] SESSION frames={} over {:.1}s  cpu p50={:.1} p95={:.1} max={:.1} mean={:.1}  slow(>{:.1}ms)={}",
+                elapsed * 1e3,
+                s.frames,
+                elapsed,
+                s.p50_ms,
+                s.p95_ms,
+                s.max_ms,
+                s.mean_ms,
+                budget_ms,
+                s.slow,
+            );
+            let _ = log.flush();
         }
     }
 
@@ -1436,6 +1562,11 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
+                // A resize is also what a monitor switch looks like when the
+                // two displays differ in scale, and the new monitor may run
+                // at a different refresh rate — re-read the frame budget.
+                // Cheap, and resizes are rare compared to frames.
+                self.sync_frame_budget();
                 self.request_redraw();
             }
 
@@ -1795,6 +1926,21 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                 tree.paint(paint_ctx);
                 let perf_paint_end = Instant::now();
 
+                // Drain the shape tally *here*, before the HUD shapes its own
+                // lines below — otherwise the overlay's text would show up as
+                // this frame's shaping work.
+                let (perf_shapes, perf_shape_ns) = paint_ctx.text_engine.take_shape_stats();
+
+                // Frame-timing HUD. Painted after the tree and inside its own
+                // layer, so it sits above every widget layer (modals, menus,
+                // toasts) and nothing in the tree can be perturbed by it.
+                if let Some(hud) = self.hud.as_mut() {
+                    let snap = self.perf.snapshot(perf_paint_end);
+                    paint_ctx.begin_layer();
+                    hud.paint(&snap, perf_paint_end, size, paint_ctx);
+                }
+                let perf_hud_end = Instant::now();
+
                 let current_ime_area = paint_ctx.ime_cursor_area();
 
                 let renderer = self.renderer.as_mut().unwrap();
@@ -1812,33 +1958,80 @@ impl ApplicationHandler<AppEvent> for ShroudEventLoop {
                     }
                 }
 
-                // One perf-log line per painted frame (`SHROUD_PERF`). `gpu`
-                // covers encode + submit + present, so vsync waits land there;
-                // `input=` reports event-arrival → present latency for the
-                // first frame after an input event. Text never appears here —
-                // only lengths and timings.
+                // Fold this frame into the rolling recorder. The renderer's
+                // own split separates the three very different things that
+                // used to sit in one `gpu` column: work (`encode`/`present`),
+                // the vsync block (`wait`), and the secure-atlas GPU sync.
+                let perf_frame_end = Instant::now();
+                let render_timings = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.last_timings())
+                    .unwrap_or_default();
+                let timings = FrameTimings {
+                    layout: perf_layout_end - perf_layout_start,
+                    paint: perf_paint_end - perf_layout_end,
+                    encode: render_timings.encode,
+                    acquire: render_timings.acquire,
+                    present: render_timings.present,
+                    sync: render_timings.sync,
+                    overlay: perf_hud_end - perf_paint_end,
+                    shapes: perf_shapes,
+                    shape_time: Duration::from_nanos(perf_shape_ns),
+                };
+                self.perf.record(perf_frame_end, timings);
+
+                // One perf-log line per painted frame (`SHROUD_PERF`), plus a
+                // rolling summary once a second. `input=` reports event-arrival
+                // → present latency for the first frame after an input event.
+                // Text never appears here — only lengths and timings.
                 if self.perf_log.is_some() {
-                    let perf_gpu_end = Instant::now();
-                    let (shapes, shape_ns) = paint_ctx.text_engine.take_shape_stats();
                     let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1e3;
+                    let dur_ms = |d: Duration| d.as_secs_f64() * 1e3;
                     let input = match self.perf_input.take() {
-                        Some((t, desc)) => format!(" input={desc}@{:.1}ms", ms(t, perf_gpu_end)),
+                        Some((t, desc)) => format!(" input={desc}@{:.1}ms", ms(t, perf_frame_end)),
                         None => String::new(),
                     };
+                    let hud = if self.hud.is_some() {
+                        format!(" hud={:.1}", dur_ms(timings.overlay))
+                    } else {
+                        String::new()
+                    };
+                    let summary = self.perf.take_interval(perf_frame_end);
                     if let Some(log) = self.perf_log.as_mut() {
                         use std::io::Write;
                         let _ = writeln!(
                             log,
-                            "[{:9.1}] frame={:5.1} layout={:5.1} paint={:5.1} gpu={:5.1} shapes={} shape_ms={:.1}{}",
-                            ms(self.perf_start, perf_gpu_end),
-                            ms(perf_frame_start, perf_gpu_end),
-                            ms(perf_layout_start, perf_layout_end),
-                            ms(perf_layout_end, perf_paint_end),
-                            ms(perf_paint_end, perf_gpu_end),
-                            shapes,
-                            shape_ns as f64 / 1e6,
+                            "[{:9.1}] frame={:5.1} cpu={:5.1} layout={:5.1} paint={:5.1} gpu={:5.1} sync={:5.1} wait={:5.1} shapes={} shape_ms={:.1}{}{}",
+                            ms(self.perf_start, perf_frame_end),
+                            // Whole-frame wall clock, including the pre-layout
+                            // bookkeeping the phase buckets don't cover.
+                            ms(perf_frame_start, perf_frame_end),
+                            dur_ms(timings.cpu()),
+                            dur_ms(timings.layout),
+                            dur_ms(timings.paint),
+                            dur_ms(timings.encode + timings.present),
+                            dur_ms(timings.sync),
+                            dur_ms(timings.acquire),
+                            timings.shapes,
+                            timings.shape_time.as_secs_f64() * 1e3,
+                            hud,
                             input
                         );
+                        if let Some(s) = summary {
+                            let _ = writeln!(
+                                log,
+                                "[{:9.1}] SECOND fps={:.1} cpu p50={:.1} p95={:.1} max={:.1} mean={:.1} frames={} slow={}",
+                                ms(self.perf_start, perf_frame_end),
+                                s.fps,
+                                s.p50_ms,
+                                s.p95_ms,
+                                s.max_ms,
+                                s.mean_ms,
+                                s.frames,
+                                s.slow,
+                            );
+                        }
                         let _ = log.flush();
                     }
                 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::atlas::{DEFAULT_ATLAS_SIZE, TextureAtlas};
 use crate::image::{DecodedImage, ImageId};
@@ -282,6 +283,35 @@ pub struct Renderer {
     /// LRU eviction pass can drop entries by inspecting weak Arc counts
     /// supplied by widget paints (out of scope for the initial cut).
     image_cache: HashMap<ImageId, GpuImage>,
+    /// Phase split of the most recent successful [`render`](Self::render),
+    /// read back by the event loop's frame instrumentation.
+    last_timings: RenderTimings,
+}
+
+/// Where the wall clock inside one [`Renderer::render`] call went.
+///
+/// The split exists because the three costs mean completely different
+/// things: `encode` is work the app does, `acquire` is the display pacing
+/// the app, and `sync` is the price of the secure atlas's zeroize guarantee.
+/// Lumping them into one "gpu" figure makes a perfectly healthy vsync-bound
+/// frame look like a 16 ms frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RenderTimings {
+    /// Atlas uploads, geometry build, command encoding, queue submit —
+    /// everything except the three below.
+    pub encode: Duration,
+    /// Blocked inside `get_current_texture()` waiting for a free swapchain
+    /// image. Under `AutoVsync` (Fifo) this is back-pressure from the
+    /// display: it grows when the app is *ahead* of the refresh rate and
+    /// collapses toward zero when the app falls behind.
+    pub acquire: Duration,
+    /// The `present()` call.
+    pub present: Duration,
+    /// [`post_frame_secure_clear`](Self::post_frame_secure_clear): zeroing
+    /// the secure atlas plus the `device.poll(Wait)` that proves the GPU
+    /// finished doing so. Runs on every frame, not only frames that drew
+    /// secure glyphs.
+    pub sync: Duration,
 }
 
 impl Renderer {
@@ -581,6 +611,7 @@ impl Renderer {
             secure_text_bind_group,
             image_pipeline,
             image_cache: HashMap::new(),
+            last_timings: RenderTimings::default(),
         }
     }
 
@@ -796,6 +827,7 @@ impl Renderer {
         images: &[DrawImage],
         layer_starts: &[LayerSnapshot],
     ) -> Result<(), RenderError> {
+        let t_render_start = Instant::now();
         // Upload standard glyphs to the matching atlas (cached): mask glyphs
         // to the R8 atlas, color emoji to the RGBA color atlas. The two never
         // collide because each glyph routes to exactly one atlas, so the
@@ -889,7 +921,12 @@ impl Renderer {
             self.secure_atlas.clear_dirty();
         }
 
+        // Timed on its own: under Fifo this call is where the frame waits
+        // for the display, and folding that wait into the render cost would
+        // report every healthy vsync-paced frame as a 16 ms frame.
+        let t_acquire = Instant::now();
         let surface_texture = self.surface.get_current_texture();
+        let acquire = t_acquire.elapsed();
         let output = match surface_texture {
             wgpu::CurrentSurfaceTexture::Success(tex)
             | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
@@ -1080,12 +1117,36 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        let t_present = Instant::now();
         output.present();
+        let present = t_present.elapsed();
 
         // [SEC] Post-frame: clear secure atlas GPU texture + CPU state
+        let t_sync = Instant::now();
         self.post_frame_secure_clear();
+        let sync = t_sync.elapsed();
+
+        self.last_timings = RenderTimings {
+            // Whatever is left after the three measured stalls is the work
+            // this call actually did.
+            encode: t_render_start
+                .elapsed()
+                .saturating_sub(acquire + present + sync),
+            acquire,
+            present,
+            sync,
+        };
 
         Ok(())
+    }
+
+    /// Phase split of the last successful [`render`](Self::render) call.
+    ///
+    /// Unchanged when a frame bails out early (surface lost / outdated), so
+    /// a dropped frame reports the previous frame's numbers rather than a
+    /// row of zeroes; the event loop logs the error separately.
+    pub fn last_timings(&self) -> RenderTimings {
+        self.last_timings
     }
 
     /// Clear all secure GPU memory after frame presentation.

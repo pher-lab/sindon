@@ -3508,6 +3508,7 @@ dependencies = [
 name = "shroud_widgets"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "image",
  "shroud_core",
  "shroud_layout",

@@ -537,12 +537,14 @@ impl Widget for Button {
         // Taffy's flex algorithm don't collapse the label to its min-content
         // shape. Only wrap when the natural width actually exceeds the
         // available width (e.g., long label in a narrow container).
+        // Dimensions only — `measure` never draws, so it takes the
+        // non-cloning cache path (see `TextEngine::measure_text_attrs`).
         let natural =
             ctx.text_engine
-                .shape_text_attrs(&label, font_size, line_height, None, &self.attrs);
-        let shaped = if let Some(aw) = available_width {
-            if natural.width > aw {
-                ctx.text_engine.shape_text_attrs(
+                .measure_text_attrs(&label, font_size, line_height, None, &self.attrs);
+        let (shaped_w, shaped_h) = if let Some(aw) = available_width {
+            if natural.0 > aw {
+                ctx.text_engine.measure_text_attrs(
                     &label,
                     font_size,
                     line_height,
@@ -559,12 +561,12 @@ impl Widget for Button {
         // have the same visual height regardless of font ascent/descent.
         // Ceil width so Taffy's pixel rounding never shortens us below the
         // natural shape width (see TextWidget::measure for the full story).
-        let height = shaped.height.max(font_size).ceil();
+        let height = shaped_h.max(font_size).ceil();
         // `min_width` is a *box* floor, but a measured leaf reports content
         // size and Taffy adds the horizontal padding on top — so subtract it
         // here to keep the guard on `min_size` (the measured-leaf invariant,
         // above). A `min_width` shorter than the label is a no-op.
-        let mut width = shaped.width.ceil();
+        let mut width = shaped_w.ceil();
         if let Some(mw) = self.min_width {
             width = width.max((mw - 2.0 * self.pad_x).max(0.0));
         }

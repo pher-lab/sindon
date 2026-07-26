@@ -172,11 +172,11 @@ impl Widget for MenuItem {
         let line_height = font_size * 1.2;
         let natural = ctx
             .text_engine
-            .shape_text(&self.label, font_size, line_height, None);
-        let shaped = match available_width {
-            Some(aw) if natural.width > aw => {
+            .measure_text(&self.label, font_size, line_height, None);
+        let (shaped_w, shaped_h) = match available_width {
+            Some(aw) if natural.0 > aw => {
                 ctx.text_engine
-                    .shape_text(&self.label, font_size, line_height, Some(aw))
+                    .measure_text(&self.label, font_size, line_height, Some(aw))
             }
             _ => natural,
         };
@@ -188,8 +188,8 @@ impl Widget for MenuItem {
         // below their historical 28px once the style `min_size` is gone.
         let min_content_height = 28.0 - 12.0; // old min_height − vertical padding
         Some(Size::new(
-            shaped.width.ceil(),
-            shaped.height.max(font_size).max(min_content_height).ceil(),
+            shaped_w.ceil(),
+            shaped_h.max(font_size).max(min_content_height).ceil(),
         ))
     }
 

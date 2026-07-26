@@ -285,10 +285,10 @@ impl Widget for Segmented {
         // All segments share the widest label's width so the bar reads as even.
         let mut widest = 0.0f32;
         for label in &self.labels {
-            let shaped = ctx
-                .text_engine
-                .shape_text(label, font_size, font_size * 1.2, None);
-            widest = widest.max(shaped.width);
+            let (label_w, _) =
+                ctx.text_engine
+                    .measure_text(label, font_size, font_size * 1.2, None);
+            widest = widest.max(label_w);
         }
         let seg_w = widest + 2.0 * SEG_PAD_X;
         let w = (seg_w * self.labels.len().max(1) as f32).ceil();

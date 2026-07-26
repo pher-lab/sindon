@@ -9,7 +9,9 @@
 //! so a vault of hundreds of entries lays out every row every frame. The list
 //! here is a [`VirtualList`], which materializes
 //! only the visible window; `VAULT_PLAIN=1` switches back to the plain
-//! `ScrollView` as an A/B baseline (run either with `SHROUD_PERF=1` to feel it).
+//! `ScrollView` as an A/B baseline (run either with `SHROUD_HUD=1` for the
+//! on-screen frame-timing readout, or `SHROUD_PERF=1` for the per-frame log —
+//! see `docs/perf.md`).
 //!
 //! Secret handling mirrors Knot: the master password never leaves a
 //! `SecureString`; the SQLCipher DB is page-encrypted under the Argon2-derived
