@@ -2156,8 +2156,11 @@ impl Widget for Input {
                 // The click always lands on the frame's `EditBuffer` when one
                 // exists; the engine path remains for the edges without one
                 // (e.g. a click routed here mid-composition).
-                match edit_buffer.as_ref() {
-                    Some(edit) => edit.hit(&v, rel_x, rel_y),
+                match edit_buffer
+                    .as_ref()
+                    .and_then(|_| ctx.text_engine.edit_hit(&v, rel_x, rel_y))
+                {
+                    Some(offset) => offset,
                     None => ctx.text_engine.offset_at_point_attrs(
                         &v,
                         rel_x,
@@ -2251,8 +2254,7 @@ impl Widget for Input {
                 let (cx, cy) = {
                     let v = self.value.borrow();
                     match edit_buffer.as_ref() {
-                        Some(edit) => ctx.text_engine.edit_caret(
-                            edit,
+                        Some(_) => ctx.text_engine.edit_caret(
                             &v,
                             cursor,
                             font_size,
@@ -2278,8 +2280,11 @@ impl Widget for Input {
                     // exactly the wanted "ArrowDown on the last line jumps to
                     // end" behavior.
                     let v = self.value.borrow();
-                    match edit_buffer.as_ref() {
-                        Some(edit) => edit.hit(&v, target_x, cy + line_height),
+                    match edit_buffer
+                        .as_ref()
+                        .and_then(|_| ctx.text_engine.edit_hit(&v, target_x, cy + line_height))
+                    {
+                        Some(offset) => offset,
                         None => ctx.text_engine.offset_at_point_attrs(
                             &v,
                             target_x,
@@ -2295,8 +2300,11 @@ impl Widget for Input {
                     0
                 } else {
                     let v = self.value.borrow();
-                    match edit_buffer.as_ref() {
-                        Some(edit) => edit.hit(&v, target_x, cy - line_height),
+                    match edit_buffer
+                        .as_ref()
+                        .and_then(|_| ctx.text_engine.edit_hit(&v, target_x, cy - line_height))
+                    {
+                        Some(offset) => offset,
                         None => ctx.text_engine.offset_at_point_attrs(
                             &v,
                             target_x,
@@ -2337,8 +2345,7 @@ impl Widget for Input {
                 let cursor = self.cursor.get();
                 let v = self.value.borrow();
                 Some(match edit_buffer.as_ref() {
-                    Some(edit) => ctx.text_engine.edit_caret(
-                        edit,
+                    Some(_) => ctx.text_engine.edit_caret(
                         &v,
                         cursor,
                         font_size,
@@ -2430,8 +2437,11 @@ impl Widget for Input {
                     // sliver past each non-final row's last glyph so the
                     // included line breaks are visible (FW-6). Shaped with the
                     // field's attrs so the highlight tracks a bold value.
-                    match edit_buffer.as_ref() {
-                        Some(edit) => edit.selection_rects_with_trailing(&v, lo, hi, font_size),
+                    match edit_buffer.as_ref().and_then(|_| {
+                        ctx.text_engine
+                            .edit_selection_rects_with_trailing(&v, lo, hi, font_size)
+                    }) {
+                        Some(rects) => rects,
                         None => ctx.text_engine.selection_rects_with_trailing_attrs(
                             &v,
                             lo,

@@ -2,7 +2,10 @@
 
 use crate::attrs::{FontStyle, TextAttrs};
 use crate::span::{TextSpan, cosmic_to_shroud, shroud_to_cosmic};
-use cosmic_text::{Buffer, Cursor, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
+use cosmic_text::{
+    AttrsList, Buffer, BufferLine, Cursor, FontSystem, LineEnding, LineIter, Metrics, Scroll,
+    Shaping, SwashCache, SwashContent,
+};
 use shroud_core::{Color, Rect};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -137,12 +140,17 @@ pub struct ComposedBlock {
 /// Unlike `ComposedBlock`, the derived queries are methods rather than
 /// precomputed fields: the caret and selection move *during* paint (deferred
 /// click / arrow-move resolution), so they must be readable after the buffer
-/// is shaped. Uncached by design — each keystroke's value is unique, so
-/// caching would only churn the LRU — and transient: drop it at the end of the
-/// frame that shaped it (the vendored cosmic-text zeroizes the buffer's text
-/// on drop).
+/// is shaped.
+///
+/// The cosmic buffer itself lives on the engine (`edit_slot`), not here, so it
+/// can be **reused across frames** — that is what makes an edit re-shape only
+/// the lines it touched. This value is therefore just the frame's glyphs plus
+/// a witness that the slot is populated; the derived queries
+/// ([`edit_hit`](TextEngine::edit_hit),
+/// [`edit_selection_rects_with_trailing`](TextEngine::edit_selection_rects_with_trailing),
+/// [`edit_caret`](TextEngine::edit_caret)) read the slot and are only valid in
+/// the same frame that shaped it.
 pub struct EditBuffer {
-    buffer: Buffer,
     shaped: ShapedText,
 }
 
@@ -153,40 +161,6 @@ impl EditBuffer {
     /// inputs.
     pub fn shaped(&self) -> &ShapedText {
         &self.shaped
-    }
-
-    /// Byte offset of the insertion point nearest block-local `(x, y)`,
-    /// matching [`offset_at_point_attrs`](TextEngine::offset_at_point_attrs).
-    /// `text` must be the string this buffer was shaped from (for a rich
-    /// buffer, the concatenation of its span texts).
-    pub fn hit(&self, text: &str, x: f32, y: f32) -> usize {
-        if text.is_empty() {
-            return 0;
-        }
-        match self.buffer.hit(x.max(0.0), y.max(0.0)) {
-            Some(cursor) => line_index_to_offset(text, cursor.line, cursor.index),
-            None => text.len(),
-        }
-    }
-
-    /// Selection rects for `[start, end)` including the FW-6 trailing sliver
-    /// on rows whose selection continues past their last glyph, matching
-    /// [`selection_rects_with_trailing_attrs`](TextEngine::selection_rects_with_trailing_attrs).
-    /// `text` must be the string this buffer was shaped from.
-    pub fn selection_rects_with_trailing(
-        &self,
-        text: &str,
-        start: usize,
-        end: usize,
-        font_size: f32,
-    ) -> Vec<Rect> {
-        selection_rects_in_buffer(
-            &self.buffer,
-            text,
-            start,
-            end,
-            Some(font_size * TRAILING_SELECTION_EM),
-        )
     }
 }
 
@@ -422,6 +396,32 @@ pub struct TextEngine {
     /// app layer when perf logging is enabled.
     shape_count: u32,
     shape_ns: u64,
+    /// Lines the incremental editing path had to re-shape since the last
+    /// [`take_reshaped_lines`](Self::take_reshaped_lines) drain. This is the
+    /// number that says whether the reuse is working: one keystroke inside a
+    /// long note should report `1`, not the document's line count.
+    reshaped_lines: u32,
+    /// The cosmic buffer behind the focused editing path, kept alive **across
+    /// frames** so an edit re-shapes only the lines it changed.
+    ///
+    /// cosmic-text already caches shaping and layout per `BufferLine`, but
+    /// `Buffer::set_text` clears the whole line vector (and `set_rich_text`
+    /// resets every line unconditionally), so building a fresh buffer each
+    /// frame threw that cache away — which is why typing one character into a
+    /// long note re-shaped the entire document. Holding one buffer and
+    /// rewriting only the differing lines (`sync_edit_lines`) keeps the rest of
+    /// the document's shape and layout.
+    ///
+    /// **Lifetime contract:** the lines hold the field's plaintext, so the slot
+    /// must be dropped everywhere the shape cache is
+    /// ([`clear_shape_cache`](Self::clear_shape_cache) — screen swap / lock).
+    /// The vendored cosmic-text zeroizes `BufferLine.text` on overwrite and on
+    /// drop, so dropping the slot wipes it; the Phase 43 residue gate is what
+    /// holds this honest. One slot is enough because exactly one field is
+    /// focused at a time, and a slot left over from a *different* field is only
+    /// a missed optimization, never a wrong answer: the line sync makes the
+    /// buffer's content equal the requested text either way.
+    edit_slot: Option<Buffer>,
 }
 
 impl Default for TextEngine {
@@ -440,6 +440,8 @@ impl TextEngine {
             scale: 1.0,
             shape_count: 0,
             shape_ns: 0,
+            reshaped_lines: 0,
+            edit_slot: None,
         }
     }
 
@@ -479,8 +481,13 @@ impl TextEngine {
     /// notes app is the user's plaintext — does not outlive that screen. Also
     /// the escape hatch if a font is registered at runtime and previously-shaped
     /// text should be re-evaluated against it.
+    ///
+    /// Drops the persistent editing buffer (`edit_slot`) for the same reason:
+    /// its `BufferLine`s hold the focused field's plaintext, and dropping them
+    /// zeroizes it.
     pub fn clear_shape_cache(&mut self) {
         self.shape_cache.clear();
+        self.edit_slot = None;
     }
 
     /// Access the underlying FontSystem (for advanced usage).
@@ -528,7 +535,7 @@ impl TextEngine {
         // (e.g. a `Named` family that previously fell back). Drop the cache so
         // the next paint re-shapes against the current font set. At startup the
         // cache is empty, so this is free in the common case.
-        self.shape_cache.clear();
+        self.clear_shape_cache();
         names
     }
 
@@ -556,7 +563,7 @@ impl TextEngine {
     /// text shaped before the swap re-resolves against the new default.
     pub fn set_default_font_family(&mut self, name: &str) {
         self.font_system.db_mut().set_sans_serif_family(name);
-        self.shape_cache.clear();
+        self.clear_shape_cache();
     }
 
     /// Shape a text string with default attributes (sans-serif, normal weight,
@@ -1303,11 +1310,17 @@ impl TextEngine {
         }
     }
 
-    /// Shape a focused `Input`'s plain value **once** into an [`EditBuffer`]
-    /// and derive everything the non-composing focused paint needs from it —
-    /// glyphs, content height, caret, selection, click hit-tests. See
-    /// [`EditBuffer`] for why. Uncached by design: every keystroke's value is
-    /// unique, so caching would only churn the LRU with transient entries.
+    /// Shape a focused `Input`'s plain value into the engine's persistent edit
+    /// buffer and derive everything the non-composing focused paint needs from
+    /// it — glyphs, content height, caret, selection, click hit-tests. See
+    /// [`EditBuffer`].
+    ///
+    /// **Incremental.** The buffer survives between frames and only the lines
+    /// whose text actually changed are re-shaped, so typing inside one line of
+    /// a long note costs one line's shaping rather than the whole document's.
+    /// Still not routed through the shape cache — every keystroke's value is a
+    /// unique key, so caching would only churn the LRU; the reuse lives in the
+    /// buffer's per-line caches instead.
     pub fn shape_edit_plain(
         &mut self,
         text: &str,
@@ -1316,9 +1329,69 @@ impl TextEngine {
         max_width: Option<f32>,
         attrs: &TextAttrs,
     ) -> EditBuffer {
-        let buffer = self.build_plain_buffer(text, font_size, line_height, max_width, attrs);
+        let mut buffer = self.take_edit_buffer(font_size, line_height, max_width);
+        let t0 = std::time::Instant::now();
+        let changed = sync_edit_lines(&mut buffer, text, &attrs.as_cosmic());
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        self.record_shape(t0, changed);
         let shaped = extract_shaped_plain(&buffer, font_size, self.scale);
-        EditBuffer { buffer, shaped }
+        self.edit_slot = Some(buffer);
+        EditBuffer { shaped }
+    }
+
+    /// Take the persistent edit buffer — creating an empty one when the slot is
+    /// cold — and bring its metrics and wrap width up to date.
+    ///
+    /// A metrics or width change re-lays out the lines already in the buffer
+    /// but **keeps their shaping**: cosmic-text shapes independently of font
+    /// size, and only layout consumes the metrics (`Buffer::relayout` resets
+    /// `layout_opt` while leaving `shape_opt` alone). Unchanged metrics are a
+    /// no-op.
+    fn take_edit_buffer(
+        &mut self,
+        font_size: f32,
+        line_height: f32,
+        max_width: Option<f32>,
+    ) -> Buffer {
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = self
+            .edit_slot
+            .take()
+            .unwrap_or_else(|| Buffer::new_empty(metrics));
+        buffer.set_metrics_and_size(&mut self.font_system, metrics, max_width, None);
+        // `Buffer::set_text` resets the scroll; the incremental path replaces
+        // it, so do the same. Our buffers are unbounded in height and never
+        // scroll, making this a no-op in practice.
+        buffer.set_scroll(Scroll::default());
+        buffer
+    }
+
+    /// Fold one edit-buffer build into the perf counters.
+    ///
+    /// `changed` is how many lines actually had to be re-shaped: a frame that
+    /// re-shaped nothing is not a "shape" as far as the frame log is concerned,
+    /// which is what keeps `shapes > 0` meaning "real shaping happened" now
+    /// that the common keystroke re-shapes only part of the document.
+    fn record_shape(&mut self, started: std::time::Instant, changed: usize) {
+        if changed > 0 {
+            self.shape_count += 1;
+        }
+        self.reshaped_lines += changed as u32;
+        self.shape_ns += started.elapsed().as_nanos() as u64;
+    }
+
+    /// Drain the count of lines the incremental editing path re-shaped since
+    /// the last call.
+    ///
+    /// Unlike [`take_shape_stats`](Self::take_shape_stats), which counts whole
+    /// buffer builds, this counts the *lines* inside them that actually had to
+    /// be re-shaped — the direct read-out of whether an edit is being served
+    /// incrementally. Typing one character into a long note should report `1`;
+    /// a number near the document's line count means the reuse broke.
+    pub fn take_reshaped_lines(&mut self) -> u32 {
+        let lines = self.reshaped_lines;
+        self.reshaped_lines = 0;
+        lines
     }
 
     /// Rich twin of [`shape_edit_plain`](Self::shape_edit_plain) for a field
@@ -1335,19 +1408,23 @@ impl TextEngine {
     ) -> EditBuffer {
         let buffer = self.build_rich_buffer(spans, font_size, line_height, max_width);
         let shaped = extract_shaped_rich(&buffer, spans, font_size, self.scale);
-        EditBuffer { buffer, shaped }
+        // Parks in the same slot as the plain path so the derived queries read
+        // one place. Still a full rebuild per frame — the rich span run has to
+        // be tiled back into per-line `AttrsList`s before it can be diffed the
+        // way `sync_edit_lines` diffs plain text.
+        self.edit_slot = Some(buffer);
+        EditBuffer { shaped }
     }
 
-    /// Block-relative caret at byte `offset`, read off an already-shaped
-    /// [`EditBuffer`] — matches
-    /// [`caret_at_offset_attrs`](Self::caret_at_offset_attrs) bit-for-bit
-    /// (both run through `caret_from_buffer`). Lives on the engine rather than
-    /// `EditBuffer` because the rare zero-width-glyph fallback shapes the
-    /// caret's prefix; `text` must be the string the buffer was shaped from.
+    /// Block-relative caret at byte `offset`, read off the live edit buffer —
+    /// matches [`caret_at_offset_attrs`](Self::caret_at_offset_attrs)
+    /// bit-for-bit (both run through `caret_from_buffer`). Falls back to a
+    /// standalone shape when no edit buffer is live, so the answer is always
+    /// the same one; only the cost differs. `text` must be the string the
+    /// buffer was shaped from.
     #[allow(clippy::too_many_arguments)]
     pub fn edit_caret(
         &mut self,
-        edit: &EditBuffer,
         text: &str,
         offset: usize,
         font_size: f32,
@@ -1355,15 +1432,70 @@ impl TextEngine {
         max_width: Option<f32>,
         attrs: &TextAttrs,
     ) -> (f32, f32) {
-        self.caret_from_buffer(
-            &edit.buffer,
+        // Lend the buffer out of the slot for the call: `caret_from_buffer`
+        // needs `&mut self` for the rare zero-width-glyph prefix re-shape.
+        let Some(buffer) = self.edit_slot.take() else {
+            return self.caret_at_offset_attrs(
+                text,
+                offset,
+                font_size,
+                line_height,
+                max_width,
+                attrs,
+            );
+        };
+        let caret = self.caret_from_buffer(
+            &buffer,
             text,
             offset,
             font_size,
             line_height,
             max_width,
             attrs,
-        )
+        );
+        self.edit_slot = Some(buffer);
+        caret
+    }
+
+    /// Byte offset of the insertion point nearest block-local `(x, y)` in the
+    /// live edit buffer, matching
+    /// [`offset_at_point_attrs`](Self::offset_at_point_attrs). `None` when no
+    /// edit buffer is live (nothing focused, or the slot was dropped on a
+    /// screen swap) — the caller then goes through the standalone path.
+    /// `text` must be the string the buffer was shaped from (for a rich
+    /// buffer, the concatenation of its span texts).
+    pub fn edit_hit(&self, text: &str, x: f32, y: f32) -> Option<usize> {
+        let buffer = self.edit_slot.as_ref()?;
+        if text.is_empty() {
+            return Some(0);
+        }
+        Some(match buffer.hit(x.max(0.0), y.max(0.0)) {
+            Some(cursor) => line_index_to_offset(text, cursor.line, cursor.index),
+            None => text.len(),
+        })
+    }
+
+    /// Selection rects for `[start, end)` over the live edit buffer, including
+    /// the FW-6 trailing sliver on rows whose selection continues past their
+    /// last glyph — matching
+    /// [`selection_rects_with_trailing_attrs`](Self::selection_rects_with_trailing_attrs).
+    /// `None` when no edit buffer is live. `text` must be the string the buffer
+    /// was shaped from.
+    pub fn edit_selection_rects_with_trailing(
+        &self,
+        text: &str,
+        start: usize,
+        end: usize,
+        font_size: f32,
+    ) -> Option<Vec<Rect>> {
+        let buffer = self.edit_slot.as_ref()?;
+        Some(selection_rects_in_buffer(
+            buffer,
+            text,
+            start,
+            end,
+            Some(font_size * TRAILING_SELECTION_EM),
+        ))
     }
 
     /// Rasterize a glyph into an atlas-ready bitmap.
@@ -1429,6 +1561,73 @@ fn offset_to_line_index(text: &str, offset: usize) -> (usize, usize) {
 /// space advance, enough to read as "the break is selected" without
 /// looking like a stray glyph.
 const TRAILING_SELECTION_EM: f32 = 0.33;
+
+/// Rewrite `buffer`'s lines to spell `text`, touching only the lines that
+/// differ, and return how many were reset.
+///
+/// Mirrors `Buffer::set_text` exactly — the same `LineIter` split, the same
+/// per-line `AttrsList`, the same trailing line with no ending — except that it
+/// reuses the `BufferLine`s already in the buffer. `BufferLine::set_text`
+/// compares text + ending + attrs before touching anything, so an unchanged
+/// line keeps its cached shaping *and* layout, while `Buffer::set_text` clears
+/// the whole vector. That difference is the entire optimization: a keystroke
+/// resets one line instead of every line in the document.
+///
+/// Equivalence with `Buffer::set_text` is the contract here — the incremental
+/// buffer must be indistinguishable from a freshly built one, or the caret,
+/// hit-tests and glyphs computed from it drift apart from the standalone paths.
+fn sync_edit_lines(buffer: &mut Buffer, text: &str, attrs: &cosmic_text::Attrs<'_>) -> usize {
+    let mut count = 0usize;
+    let mut changed = 0usize;
+
+    for (range, ending) in LineIter::new(text) {
+        if set_or_push_line(buffer, count, &text[range], ending, AttrsList::new(attrs)) {
+            changed += 1;
+        }
+        count += 1;
+    }
+
+    // `Buffer::set_text` guarantees a final line that carries no ending, so a
+    // text ending in `\n` gets an empty last row — and empty text gets exactly
+    // one empty line (its `lines.last()` is `None`, whose default ending is
+    // `Lf`, so the empty line is pushed).
+    let last_ending = match count.checked_sub(1) {
+        Some(i) => buffer.lines[i].ending(),
+        None => LineEnding::default(),
+    };
+    if last_ending != LineEnding::None {
+        if set_or_push_line(buffer, count, "", LineEnding::None, AttrsList::new(attrs)) {
+            changed += 1;
+        }
+        count += 1;
+    }
+
+    // Surplus lines from a shorter text. Dropping them wipes their plaintext —
+    // the vendored cosmic-text zeroizes `BufferLine.text` on drop.
+    buffer.lines.truncate(count);
+    changed
+}
+
+/// Overwrite line `index` in place when it exists, otherwise append it.
+/// Returns whether the line's cached shaping was reset (a no-op rewrite of an
+/// identical line returns `false`, which is the case worth being fast).
+fn set_or_push_line(
+    buffer: &mut Buffer,
+    index: usize,
+    text: &str,
+    ending: LineEnding,
+    attrs_list: AttrsList,
+) -> bool {
+    match buffer.lines.get_mut(index) {
+        Some(line) => line.set_text(text, ending, attrs_list),
+        None => {
+            buffer
+                .lines
+                .push(BufferLine::new(text, ending, attrs_list, Shaping::Advanced));
+            true
+        }
+    }
+}
 
 /// Selection/underline rects for the cursor range `[start, end)` over an
 /// **already-shaped** `buffer` — the shared body of the `selection_rects*`

@@ -149,11 +149,83 @@ fn bench_shape_cache_hit(c: &mut Criterion) {
     group.finish();
 }
 
+/// A document of `paragraphs` lines, with `extra` appended to line
+/// `edited_line` — two calls differing only in `extra` give a pair of documents
+/// that differ by a single keystroke on one line.
+fn keystroke_doc(paragraphs: usize, edited_line: usize, extra: &str) -> String {
+    (0..paragraphs)
+        .map(|i| {
+            if i == edited_line {
+                format!("{i}. {PARAGRAPH}{extra}\n")
+            } else {
+                format!("{i}. {PARAGRAPH}\n")
+            }
+        })
+        .collect()
+}
+
+/// What one keystroke costs a focused `Input`.
+///
+/// The focused editing path can't use the shape cache — every keystroke's
+/// value is a unique key — so the question is what it re-shapes. Two arms,
+/// measured in the same run so they're directly comparable:
+///
+/// - `incremental`: `shape_edit_plain`, which keeps the engine's buffer between
+///   calls and rewrites only the line that changed.
+/// - `full_rebuild`: a fresh buffer over the whole value, which is what the
+///   editing path did before — and what `shapes=1` costing 10 ms in the
+///   `SHROUD_PERF` log was measuring.
+///
+/// The two arms shape the same documents, so the gap between them is the cost
+/// of re-shaping the untouched remainder of the note.
+fn bench_edit_keystroke(c: &mut Criterion) {
+    let attrs = shroud_text::TextAttrs::default();
+    let (fs, lh, wrap) = (14.0, 20.0, Some(600.0));
+
+    let mut group = c.benchmark_group("edit_keystroke");
+    for paragraphs in [16usize, 64, 256] {
+        let a = keystroke_doc(paragraphs, paragraphs / 2, "");
+        let b = keystroke_doc(paragraphs, paragraphs / 2, "!");
+
+        let mut engine = TextEngine::new();
+        // Warm the buffer, so the timed calls are the steady typing state.
+        let _ = engine.shape_edit_plain(&a, fs, lh, wrap, &attrs);
+        let mut flip = false;
+        group.bench_with_input(
+            BenchmarkId::new("incremental", paragraphs),
+            &paragraphs,
+            |bencher, _| {
+                bencher.iter(|| {
+                    flip = !flip;
+                    let text = if flip { &b } else { &a };
+                    black_box(engine.shape_edit_plain(black_box(text), fs, lh, wrap, &attrs));
+                });
+            },
+        );
+
+        let mut engine = TextEngine::new();
+        let mut flip = false;
+        group.bench_with_input(
+            BenchmarkId::new("full_rebuild", paragraphs),
+            &paragraphs,
+            |bencher, _| {
+                bencher.iter(|| {
+                    flip = !flip;
+                    let text = if flip { &b } else { &a };
+                    black_box(engine.shape_text_uncached(black_box(text), fs, lh, wrap));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_preview,
     bench_preview_short,
     bench_editor,
-    bench_shape_cache_hit
+    bench_shape_cache_hit,
+    bench_edit_keystroke
 );
 criterion_main!(benches);
