@@ -20,13 +20,23 @@ use shroud_text::CacheKey;
 /// keys, tokens).
 pub struct SecureTextureAtlas {
     inner: TextureAtlas,
+    /// Whether secret pixels have reached the GPU texture since the last
+    /// *completed* clear. Sticky and deliberately pessimistic: set the moment
+    /// an upload lands, and lowered only once the GPU has been observed to
+    /// finish zeroing (see [`mark_cleared`](Self::mark_cleared)).
+    ///
+    /// A texture that has never been uploaded to cannot hold residue — wgpu
+    /// zero-initializes textures — so a frame that leaves this `false` has
+    /// nothing to clear and nothing to wait for.
+    held_secret: bool,
 }
 
 impl SecureTextureAtlas {
-    /// Create a new secure atlas (defaults to 512x512, smaller than standard).
+    /// Create a new secure atlas (half the standard atlas dimensions).
     pub fn new(device: &wgpu::Device) -> Self {
         Self {
             inner: TextureAtlas::new(device, DEFAULT_ATLAS_SIZE / 2, DEFAULT_ATLAS_SIZE / 2),
+            held_secret: false,
         }
     }
 
@@ -34,6 +44,7 @@ impl SecureTextureAtlas {
     pub fn with_size(device: &wgpu::Device, width: u32, height: u32) -> Self {
         Self {
             inner: TextureAtlas::new(device, width, height),
+            held_secret: false,
         }
     }
 
@@ -51,14 +62,40 @@ impl SecureTextureAtlas {
         width: u32,
         height: u32,
     ) -> Option<AtlasRegion> {
-        self.inner.upload(queue, key, data, width, height)
+        let region = self.inner.upload(queue, key, data, width, height);
+        if region.is_some() {
+            // Pixels are on the texture (or were, earlier this frame — the
+            // cache is emptied by every clear, so a hit means the same frame).
+            self.held_secret = true;
+        }
+        region
     }
 
-    /// Clear the atlas. Call this after every frame's render pass.
+    /// Whether this atlas may hold secret pixels right now.
     ///
-    /// Zeros the GPU texture and resets all CPU state.
+    /// `false` means the frame that just rendered drew no secure glyphs *and*
+    /// the previous clear completed, so there is nothing to zero.
+    pub fn held_secret(&self) -> bool {
+        self.held_secret
+    }
+
+    /// Clear the atlas. Call this after a frame's render pass.
+    ///
+    /// Zeros the written region of the GPU texture and resets all CPU state.
+    /// This only *queues* the zeroing; it is not on the GPU until the next
+    /// submit. Call [`mark_cleared`](Self::mark_cleared) once that has been
+    /// observed to complete.
     pub fn clear_after_frame(&mut self, queue: &wgpu::Queue) {
         self.inner.clear(queue);
+    }
+
+    /// Record that the GPU has finished the queued zeroing.
+    ///
+    /// ⚠ Call this **only** after the submission carrying the clear is known
+    /// to have completed. Calling it early — or on a wait that timed out —
+    /// would let a later frame skip a clear that never actually ran.
+    pub fn mark_cleared(&mut self) {
+        self.held_secret = false;
     }
 
     /// Whether any glyphs were uploaded this frame.

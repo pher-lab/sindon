@@ -309,8 +309,8 @@ pub struct RenderTimings {
     pub present: Duration,
     /// `post_frame_secure_clear`: zeroing
     /// the secure atlas plus the `device.poll(Wait)` that proves the GPU
-    /// finished doing so. Runs on every frame, not only frames that drew
-    /// secure glyphs.
+    /// finished doing so. Zero on frames that drew no secure glyphs —
+    /// there is nothing to zero and nothing to wait for.
     pub sync: Duration,
 }
 
@@ -1151,21 +1151,54 @@ impl Renderer {
 
     /// Clear all secure GPU memory after frame presentation.
     ///
-    /// 1. Zeros the secure atlas texture
+    /// 1. Zeros the written region of the secure atlas texture
     /// 2. Resets secure atlas CPU cache
-    /// 3. Calls `device.poll(Wait)` to guarantee GPU has completed the clear
+    /// 3. Submits that zeroing and waits for the GPU to complete it
     ///
     /// This ensures sensitive glyph data does not persist in GPU memory
     /// between frames.
+    ///
+    /// ## Why the extra submit
+    ///
+    /// `Queue::write_texture` does not talk to the GPU: it stages into wgpu's
+    /// pending writes, which are flushed by the *next* `Queue::submit`. The
+    /// render pass above is already submitted by the time we get here, so
+    /// without a submit of our own the zeroing would sit in the staging
+    /// encoder until some later frame happened to be drawn — and shroud
+    /// paints on demand, so "later" can be never. A window left sitting on a
+    /// password field is exactly the case where residency matters most, and
+    /// it is exactly the case where a deferred clear never runs.
+    ///
+    /// For the same reason the wait names its own `submission_index`: waiting
+    /// on `None` waits for the last *successful* submission, which was the
+    /// render pass, not the clear.
+    ///
+    /// ## Why it is skipped
+    ///
+    /// A texture that has never been written to cannot hold residue, so
+    /// frames that drew no secure glyphs have nothing to zero and nothing to
+    /// wait for. That gate is what keeps this off the frame budget of every
+    /// app that does not show secrets — the cost now lands only on the frames
+    /// that actually rendered one. See [`SecureTextureAtlas::held_secret`].
     fn post_frame_secure_clear(&mut self) {
+        if !self.secure_atlas.held_secret() {
+            return;
+        }
+
         self.secure_atlas.clear_after_frame(&self.queue);
-        // Ensure the GPU has actually completed the clear operation
-        // before we return control. This prevents a window where
-        // secure data could be read from GPU memory.
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: Some(std::time::Duration::from_secs(5)),
+        let clear_submission = self.queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
+
+        let completed = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(clear_submission),
+            timeout: Some(Duration::from_secs(5)),
         });
+
+        // Only drop the flag on an observed completion. If the wait timed out
+        // or errored, the atlas is still assumed dirty and the next frame
+        // clears it again — the safe direction.
+        if completed.is_ok() {
+            self.secure_atlas.mark_cleared();
+        }
     }
 
     /// Access the secure atlas (for external clear verification).

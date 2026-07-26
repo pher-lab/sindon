@@ -46,6 +46,17 @@ impl AtlasRegion {
     }
 }
 
+/// Bottom edge of the region the shelf allocator has handed out, in pixels.
+///
+/// Shelves are stacked top-down and never overlap, so the last one ends the
+/// used region. Two callers depend on this being the *same* number:
+/// [`TextureAtlas::new_shelf`] starts the next shelf here, and
+/// [`TextureAtlas::clear`] zeroes up to here. Keeping them on one function is
+/// what guarantees the clear can never cover less than what was handed out.
+fn shelf_used_height(shelves: &[Shelf]) -> u32 {
+    shelves.last().map(|s| s.y + s.height).unwrap_or(0)
+}
+
 /// A shelf (horizontal row) in the atlas.
 struct Shelf {
     /// Y offset of this shelf.
@@ -226,7 +237,7 @@ impl TextureAtlas {
 
     /// Create a new shelf and allocate from it.
     fn new_shelf(&mut self, padded_w: u32, padded_h: u32) -> Option<AtlasRegion> {
-        let y = self.shelves.last().map(|s| s.y + s.height).unwrap_or(0);
+        let y = shelf_used_height(&self.shelves);
 
         if y + padded_h > self.height || padded_w > self.width {
             return None; // Atlas full
@@ -273,11 +284,34 @@ impl TextureAtlas {
         self.cache.len()
     }
 
+    /// Height, in pixels, of the region the shelf allocator has handed out.
+    fn used_height(&self) -> u32 {
+        shelf_used_height(&self.shelves)
+    }
+
     /// Clear the entire atlas (GPU + CPU state). Used by SecureTextureAtlas.
+    ///
+    /// Only the rows the shelf allocator has handed out are zeroed (see the
+    /// private `used_height`). Pixels below
+    /// the last shelf have never been written since the texture was created,
+    /// and wgpu zero-initializes textures, so they cannot hold residue.
+    /// Secure text is short (a password, a key), so in practice this is a
+    /// couple of glyph rows rather than the full atlas.
     pub fn clear(&mut self, queue: &wgpu::Queue) {
-        // Zero out the GPU texture
+        let used_height = self.used_height();
+
+        // Reset CPU state unconditionally, so the shelf allocator restarts at
+        // the top on the next frame and the used region stays this tight.
+        self.shelves.clear();
+        self.cache.clear();
+
+        if used_height == 0 {
+            return;
+        }
+
+        // Zero out the written region of the GPU texture
         let row_bytes = self.width * self.bytes_per_pixel;
-        let zero_data = vec![0u8; (row_bytes * self.height) as usize];
+        let zero_data = vec![0u8; (row_bytes * used_height) as usize];
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -289,18 +323,15 @@ impl TextureAtlas {
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(row_bytes),
-                rows_per_image: Some(self.height),
+                rows_per_image: Some(used_height),
             },
             wgpu::Extent3d {
                 width: self.width,
-                height: self.height,
+                height: used_height,
                 depth_or_array_layers: 1,
             },
         );
 
-        // Reset CPU state
-        self.shelves.clear();
-        self.cache.clear();
         self.dirty = true;
     }
 
@@ -420,6 +451,75 @@ mod tests {
 
         assert_eq!(shelves.len(), 3);
         // Total used: 20 + 30 + 25 = 75 out of 100
+    }
+
+    #[test]
+    fn used_height_is_zero_before_anything_is_packed() {
+        // A never-packed atlas has no written rows, so `clear` uploads
+        // nothing at all. This is the case that takes secure-atlas cost off
+        // the budget of every frame that draws no secrets.
+        assert_eq!(shelf_used_height(&[]), 0);
+    }
+
+    #[test]
+    fn used_height_covers_every_packed_row() {
+        // The clear region must never be shorter than the region the shelf
+        // allocator handed out, or a glyph's pixels survive the zeroing.
+        let shelves: Vec<Shelf> = vec![
+            Shelf {
+                y: 0,
+                height: 20,
+                cursor_x: 100,
+            },
+            Shelf {
+                y: 20,
+                height: 30,
+                cursor_x: 50,
+            },
+            Shelf {
+                y: 50,
+                height: 25,
+                cursor_x: 0,
+            },
+        ];
+
+        let used = shelf_used_height(&shelves);
+        assert_eq!(used, 75);
+
+        // Every shelf — and therefore every region ever returned from it,
+        // since a region's height never exceeds its shelf's — is inside it.
+        for shelf in &shelves {
+            assert!(
+                shelf.y + shelf.height <= used,
+                "shelf at y={} height={} escapes the cleared region {}",
+                shelf.y,
+                shelf.height,
+                used
+            );
+        }
+    }
+
+    #[test]
+    fn used_height_matches_where_the_next_shelf_would_start() {
+        // `new_shelf` and `clear` share this function precisely so the
+        // cleared region ends exactly where unwritten pixels begin. If these
+        // ever diverge, the clear silently misses a row.
+        let shelves: Vec<Shelf> = vec![
+            Shelf {
+                y: 0,
+                height: 12,
+                cursor_x: 30,
+            },
+            Shelf {
+                y: 12,
+                height: 18,
+                cursor_x: 4,
+            },
+        ];
+
+        let next_shelf_y = shelf_used_height(&shelves);
+        assert_eq!(next_shelf_y, 30);
+        assert_eq!(shelf_used_height(&shelves), next_shelf_y);
     }
 
     #[test]
