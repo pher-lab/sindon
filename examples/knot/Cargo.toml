@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-shroud = { path = "../../crates/shroud" }
+sindon = { path = "../../crates/sindon" }
 argon2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
 zeroize = { workspace = true }
@@ -17,10 +17,10 @@ bip39 = "2.0"
 hkdf = "0.12"
 sha2 = "0.10"
 # Non-secret settings (theme + font size) round-trip through the Phase 37
-# `shroud::platform::storage` JSON helpers, which are generic over
+# `sindon::platform::storage` JSON helpers, which are generic over
 # `Serialize`/`DeserializeOwned` — so the app supplies the derive.
 serde = { workspace = true }
-# Markdown preview: parse the note body into a shroud widget tree (B-2 app
+# Markdown preview: parse the note body into a sindon widget tree (B-2 app
 # piece). Same parser + version as the `markdown_demo` spike this is lifted
 # from; `default-features = false` drops the unused HTML/CLI bits.
 pulldown-cmark = { version = "0.10", default-features = false }
@@ -41,5 +41,5 @@ rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"]
 serde_json = { workspace = true }
 # Attachment tests generate a tiny in-memory PNG to exercise the
 # seal -> store -> decrypt -> decode round-trip (the app decodes via
-# `shroud::widgets::Image`, but tests need to *produce* valid image bytes).
+# `sindon::widgets::Image`, but tests need to *produce* valid image bytes).
 image = { workspace = true }

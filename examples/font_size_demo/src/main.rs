@@ -10,11 +10,11 @@
 //! body size from the theme. The static override is still useful for
 //! callouts that must stay fixed regardless of the user-chosen scale.
 
-use shroud::app::App;
-use shroud::core::Theme;
-use shroud::reactive::{Reactive, Signal};
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, TextWidget};
+use sindon::app::App;
+use sindon::core::Theme;
+use sindon::reactive::{Reactive, Signal};
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, TextWidget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FontChoice {
@@ -41,7 +41,7 @@ fn main() {
     let theme = Reactive::derive(move || Theme::dark().with_font_scale(choice.get().scale()));
 
     App::new()
-        .title("shroud \u{2014} font size demo (Phase 31)")
+        .title("sindon \u{2014} font size demo (Phase 31)")
         .size(640, 420)
         .theme(theme)
         .run(move |_scope| {

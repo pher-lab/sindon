@@ -9,13 +9,13 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use shroud::app::App;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, TextWidget};
+use sindon::app::App;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, TextWidget};
 
 fn main() {
     App::new()
-        .title("shroud — clock")
+        .title("sindon — clock")
         .size(420, 240)
         .run(|scope| {
             // Spawn the waker on a detached thread. The handle is `Clone`, so
@@ -40,7 +40,7 @@ fn main() {
                     .gap(12.0),
             );
 
-            tree.add_child(root, TextWidget::new("shroud clock").font_size(24.0));
+            tree.add_child(root, TextWidget::new("sindon clock").font_size(24.0));
 
             // Reactive label — pulled on every paint, which happens after
             // every wake. The closure runs on the UI thread; `Instant` is

@@ -13,10 +13,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use shroud::reactive::Reactive;
-use shroud::security::SecureString;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, SecureInput, TextWidget};
+use sindon::reactive::Reactive;
+use sindon::security::SecureString;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, SecureInput, TextWidget};
 
 use crate::crypto::{derive_key, unwrap_dek};
 use crate::i18n::{self, Key};

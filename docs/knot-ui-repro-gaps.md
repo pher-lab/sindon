@@ -1,7 +1,7 @@
 # Knot UI 完全再現 — gap ログ
 
 **目的**: React/Tailwind 版 Knot (`knot-notes-app-v0.7.0-2026-04-27`) を「正解画面」とし、
-shroud で見た目を写経する。写し取れない / 不格好になる箇所を gap として収集する。
+sindon で見た目を写経する。写し取れない / 不格好になる箇所を gap として収集する。
 機能 dogfood (FW-1〜14) が「動くか」を見てきたのに対し、これは **表現力 (見た目) の天井** を炙る。
 
 - 再現先: `examples/knot_clone`（UI-only。crypto/db なし、ダミーデータ）
@@ -32,7 +32,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 ### G1. Container に border がない → **解消（FW-15、2026-06-29 landed）**
 - 正解では border が遍在する: input (`border border-gray-300`)、エラー枠 (`border-red-300`)、
   カード、テーブルセル、サイドバー区切り、select。
-- ~~shroud の `Container` は `background` + `radius` のみで枠線を描けない。~~
+- ~~sindon の `Container` は `background` + `radius` のみで枠線を描けない。~~
 - 対応: `Container::border(width, color)` を追加。FW-14 の Input border と同じ
   `stroke_rect_rounded` SDF 基盤を流用。`radius` で角丸し、塗りの上に重ねて描く
   ので透明ボックスも outline だけ持てる。color は `Reactive<Color>` なので live theme
@@ -49,7 +49,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   `rounded-lg border-gray-300` に（border は既定で `input_border` 追従）。
 
 ### G3. Input / SecureInput の padding・高さが非公開 → **解消（FW-17、2026-07-02 landed）**
-- 正解の入力欄は `px-4 py-3`（≒ 高さ 48px）。~~shroud の Input/SecureInput は内部 padding 固定で
+- 正解の入力欄は `px-4 py-3`（≒ 高さ 48px）。~~sindon の Input/SecureInput は内部 padding 固定で
   寸法を合わせられない。~~ボタンも同様（`py-3` → G6 で別途）。
 - ~~実装裏付け（`input.rs:1469`）: 単一行 Input は `FlexStyle::new().padding(8.0)
   .min_height(font_size + 20.0)` を**ハードコード**。~~
@@ -59,7 +59,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   scrollbar / wrap 幅）を全部この値に置換。**デフォルト（pad 8）はビット等価**なので既存レイアウトは
   不変。widgets/secure 各 +4 テスト。↓の実害はすべて実 API で解消（下記「clone 配線」）。
 - **実害例（Main slice 1 — 検索バーが「妙に縦長」）**: React は「枠付き div（`px-3 py-2`）+
-  bare な borderless input」で ≈36px。shroud で同じ構成にすると「枠付きコンテナ padding 8 +
+  bare な borderless input」で ≈36px。sindon で同じ構成にすると「枠付きコンテナ padding 8 +
   borderless Input（自前 padding 8 + min_height 34）」= **≈50px** に膨らむ。`borderless()` は
   *枠*を消すだけで*内部 padding と min_height は残る*ため、カスタム chrome 行に Input を
   畳み込むと縦 padding が二重になる。
@@ -156,7 +156,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 
 ### G7. focus モデルの差（外側リング vs border 色変化）→ **解消（FW-26、2026-07-08 landed・実機 OK）**
 - 正解は `focus:outline-none focus:border-blue-500`＝**枠線の色が変わるだけ**。
-- ~~shroud は外側に focus ring を描く（offset 付き）ので見た目の質感が異なる。~~
+- ~~sindon は外側に focus ring を描く（offset 付き）ので見た目の質感が異なる。~~
 - 「どちらを既定にするか」は設計判断だったので、**テーマレベルで選べる**ようにして graduate（ユーザ選択）。
 - 対応: `FocusStyle` に `indicator: FocusIndicator { Ring（既定）/ Border }` を追加（dark/light とも
   `Ring` 既定 ＝ 既存挙動ビット等価・非破壊。lerp は指標 snap）。`Border` モードでは **border を持つ
@@ -190,7 +190,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 - ⚠ **方法論メモ**: この PC では**スクショの色は当てにならない**（HDR 起因）。以後スクショは
   **レイアウト/構造判定専用**にし、**色の忠実度はユーザの目を正**とする。framework の色バグを
   スクショだけで断定しない。
-- ⚠ **訂正（2026-06-29）**: 当初ここで「shroud に色空間バグは無い」と結論したのは**勇み足**だった。
+- ⚠ **訂正（2026-06-29）**: 当初ここで「sindon に色空間バグは無い」と結論したのは**勇み足**だった。
   HDR スクショが不可信で色判定を保留した隙に、**実在の二重ガンマ描画バグ（G13）を見逃していた**。
   G8（HDR キャプチャ）と G13（描画の二重ガンマ）は**別問題**。皮肉にも「色はユーザの目を正」と
   いう G8 の方法論があったから、HDR を切った実画面で G13 を炙り出せた。
@@ -206,7 +206,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 ### G10. 片側 border (`border-r` / `border-b`) が引けない → **解消（FW-16、2026-07-02 landed）**
 - 正解は仕切り線を片側 border で多用する: サイドバー右端 `border-r`、ヘッダ／検索／タグ各
   セクション下端 `border-b`、dropdown 内の区切り。
-- ~~shroud の `Container::border(width, color)`（FW-15）は**4辺一括のみ**。1辺だけの線が引けない。~~
+- ~~sindon の `Container::border(width, color)`（FW-15）は**4辺一括のみ**。1辺だけの線が引けない。~~
 - 対応: `Container::border_top/right/bottom/left(width, color)` を追加。各辺を sharp な
   `fill_rect` で描画（Tailwind `border-r`/`border-b` 直対応）、color は `Reactive<Color>` で
   live theme 追従、`width<=0` は無描画、4辺 `border()` とは独立。clone の 1px divider 兄弟は
@@ -218,9 +218,9 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 ### G11. flex 整列が `center` 系しかない（`justify-between` / `*-end` / `*-start` 不可）→ **解消（FW-16、2026-07-02 landed）**
 - 正解のヘッダ行は `flex items-center justify-between`（タイトル左・操作ボタン群右）。行・
   列の両端寄せ・端寄せが頻出（モーダルのフッタボタン、リスト行の右端メタ等）。
-- ~~shroud は `center` / `justify_center`（主軸中央）/ `align_center`（交差軸中央）のみ。~~
-- 対応: shroud ネイティブの `Justify`（Start/Center/End/SpaceBetween/SpaceAround/SpaceEvenly）
-  / `Align`（Start/Center/End/Stretch）enum を `shroud_layout` に追加 →
+- ~~sindon は `center` / `justify_center`（主軸中央）/ `align_center`（交差軸中央）のみ。~~
+- 対応: sindon ネイティブの `Justify`（Start/Center/End/SpaceBetween/SpaceAround/SpaceEvenly）
+  / `Align`（Start/Center/End/Stretch）enum を `sindon_layout` に追加 →
   `FlexStyle::justify/align` + `Container::justify/align`。taffy を widget API に漏らさず
   `From` で内部マッピング（既存 center 系は温存）。clone のヘッダ `justify-between`・ステータス
   `text-right` は `grow(1.0)` スペーサ → `justify(SpaceBetween)`/`justify(End)` に置換。
@@ -309,7 +309,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
   （消すと次 move で spurious re-enter → tip 再オープン）。
 - **テスト**: `layer_tests.rs` に2本 — interactive push で trigger が leave を受け `hover_anim` reset
   （`exited==1`/`hovered==None`）/ 非 interactive（tooltip）push は hover 維持（`hovered==Some(trigger)`/
-  `exited==0`）。shroud_widgets 全 test 緑・fmt/clippy クリーン。**実機 OK（2026-07-06 ユーザ確認 —
+  `exited==0`）。sindon_widgets 全 test 緑・fmt/clippy クリーン。**実機 OK（2026-07-06 ユーザ確認 —
   メニュー開閉で trigger のホバー灰が固定しないこと確認）。**
 - **副次の非対称（かつて acceptable と記録 → ✅ FW-31、2026-07-10 で解消）**: 「pop 側の非対称」。
   ①メニューを開いている間は layer が入力を独占するので**メニュー外の hover は出ない**（＝正・input
@@ -364,7 +364,7 @@ shroud で見た目を写経する。写し取れない / 不格好になる箇�
 ### G18. drop-shadow / elevation プリミティブが無い（+ viewport 相対サイズ無し）→ **shadow 半分は FW-18 で解消（2026-07-03, 実機 OK）／ vh/vw 半分は FW-24 で解消（2026-07-07 landed）**
 - 正解のモーダルは全て `shadow-xl`。scrim（`bg-black/50`）の上にカードを**浮かせる**のはこの影で、
   影が無いとカードが scrim に**べた張り**して立体感が消える（特にダーク背景で境界が溶ける）。
-- shroud には shadow/elevation プリミティブが**一切無い**（`DrawRect` は fill + radius + border のみ、
+- sindon には shadow/elevation プリミティブが**一切無い**（`DrawRect` は fill + radius + border のみ、
   render にも box-shadow 相当なし）だった。∴ 発見時は 4モーダルとも影なしのフラットなカードで再現。
 - **→ 解消（FW-18 shadow）**: 既存の角丸 SDF rect パイプラインに `DrawRect.blur` を1本足し、`blur>0` で
   クアッドを blur 分膨らませて `1 - smoothstep(0, blur, sdf)` でフェード（新パイプライン不要・`blur==0` は
@@ -487,7 +487,7 @@ slice 4 の語彙で組めた。**実機 OK**（2026-07-03 ユーザ確認、lig
 - **小 gap 発見（G3 系に追記）= 固定ピクセル高の multiline が無い → 解消（FW-25、2026-07-08 landed）**:
   `h-24` は**固定96px でスクロール**。当初は `min_height(96)` で近似したが、`min_height` は**下限（floor）**
   ＝正確には *cap* でない。**実測すると Input は content サイズを measure 返さないので floor 96 にちょうど
-  収まり静的には一致**する（メモの「shroud は箱が伸びる」は誤り）が、**floor ゆえ flex で stretch/grow
+  収まり静的には一致**する（メモの「sindon は箱が伸びる」は誤り）が、**floor ゆえ flex で stretch/grow
   される文脈では 96 を超えて膨らむ**（row の cross-axis stretch で実証。`min_height(96)`→300 に伸びる /
   `height(96)`→96 でキャップ）。∴ `h-24` の正しいプリミティブは *definite* な固定高。**解消**: `Input::height(px)`
   を追加（Taffy `size.height` を definite にセット・derived `min_height`/`height_full` を supersede）。

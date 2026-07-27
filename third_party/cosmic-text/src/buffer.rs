@@ -895,7 +895,7 @@ impl Buffer {
         // Discard excess lines now that we have reused as much of the existing allocations as possible.
         self.lines.truncate(line_count);
 
-        // shroud fork: mirror `set_text`'s trailing-empty-line guard. Upstream
+        // sindon fork: mirror `set_text`'s trailing-empty-line guard. Upstream
         // `set_rich_text` splits paragraphs with `BidiParagraphs`, which drops a
         // trailing empty paragraph, and — unlike `set_text` — never re-adds the
         // final empty line. That left the rich buffer one (empty) line shorter

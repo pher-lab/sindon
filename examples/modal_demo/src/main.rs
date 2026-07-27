@@ -8,16 +8,16 @@
 //!    result (cancelled / confirmed / opened / dismissed) so visual
 //!    inspection can verify each dismiss path fires correctly.
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::reactive::Signal;
-use shroud::widgets::layer::LayerOptions;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::reactive::Signal;
+use sindon::widgets::layer::LayerOptions;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, TextWidget};
 
 fn main() {
     App::new()
-        .title("shroud — modal layer demo")
+        .title("sindon — modal layer demo")
         .size(800, 600)
         .run(|_scope| {
             let last_action = Signal::new(String::from("(none yet)"));

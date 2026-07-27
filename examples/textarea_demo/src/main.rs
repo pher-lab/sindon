@@ -15,15 +15,15 @@
 //! Live readout below echoes the bound signal so you can confirm Enter
 //! and typing both round-trip through the binding.
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::reactive::Signal;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, Input, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::reactive::Signal;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, Input, TextWidget};
 
 fn main() {
     App::new()
-        .title("shroud \u{2014} textarea demo (Phase 25)")
+        .title("sindon \u{2014} textarea demo (Phase 25)")
         .size(720, 640)
         .run(|_scope| {
             let notes = Signal::new(String::from("First line\nSecond line"));

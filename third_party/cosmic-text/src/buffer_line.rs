@@ -14,7 +14,7 @@ use crate::{
 /// A line (or paragraph) of text that is shaped and laid out
 #[derive(Clone)]
 pub struct BufferLine {
-    // shroud fork: `Zeroizing<String>` so the plaintext is wiped when this
+    // sindon fork: `Zeroizing<String>` so the plaintext is wiped when this
     // line is dropped (or overwritten). This is the one owned plaintext copy
     // cosmic-text keeps — shaped glyphs store only byte offsets — so wiping it
     // is what makes the SecureText shape path residue-free.
@@ -28,7 +28,7 @@ pub struct BufferLine {
     metadata: Option<usize>,
 }
 
-// shroud fork: `Zeroizing` is not `Debug`, so we can't derive it. This mirrors
+// sindon fork: `Zeroizing` is not `Debug`, so we can't derive it. This mirrors
 // the previous derived output exactly (fields in declaration order, text shown)
 // to keep observable behavior identical to upstream.
 impl core::fmt::Debug for BufferLine {
@@ -105,7 +105,7 @@ impl BufferLine {
     ) -> bool {
         let text = text.as_ref();
         if text != self.text.as_str() || ending != self.ending || attrs_list != self.attrs_list {
-            // shroud fork: wipe the old plaintext (zeroize sets len 0 and zeroes
+            // sindon fork: wipe the old plaintext (zeroize sets len 0 and zeroes
             // the bytes, keeping capacity) before writing the new text, so a
             // shorter replacement can't leave a stale plaintext tail behind.
             self.text.zeroize();
@@ -121,7 +121,7 @@ impl BufferLine {
 
     /// Consume this line, returning only its text contents as a String.
     pub fn into_text(mut self) -> String {
-        // shroud fork: move the inner String out (leaving an empty one that the
+        // sindon fork: move the inner String out (leaving an empty one that the
         // Zeroizing wrapper wipes on drop). The caller explicitly asked to own
         // the text, so the returned String itself is intentionally not wiped.
         mem::take(&mut *self.text)
@@ -345,7 +345,7 @@ impl BufferLine {
     ///
     /// The buffer line is in an invalid state after this is called. See [`Self::reset_new`].
     pub(crate) fn reclaim_text(&mut self) -> String {
-        // shroud fork: take the inner String out (leaving an empty one behind)
+        // sindon fork: take the inner String out (leaving an empty one behind)
         // and zeroize it before handing the allocation back for reuse, so old
         // plaintext can't survive in a recycled line buffer. `zeroize` sets
         // len 0 and zeroes the bytes while keeping capacity for reuse.

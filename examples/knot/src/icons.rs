@@ -1,6 +1,6 @@
 //! Bundled icon font + a typed `Icon` → codepoint mapping (FW-12).
 //!
-//! shroud has no vector / SVG drawing primitive, but it can register a font at
+//! sindon has no vector / SVG drawing primitive, but it can register a font at
 //! startup and draw any glyph through the ordinary text path
 //! (`App::font(..)` + `TextFamily::Named(..)`). Knot bundles a tiny subset of
 //! the Material Design Icons webfont — only the glyphs it actually draws — and
@@ -14,8 +14,8 @@
 //! beyond the current [`Icon`] variants are kept in the subset so upcoming
 //! sidebar / settings wiring can add variants without re-subsetting.
 
-use shroud::text::TextFamily;
-use shroud::widgets::Button;
+use sindon::text::TextFamily;
+use sindon::widgets::Button;
 
 /// Raw bytes of the bundled icon font. Registered once at startup with
 /// `App::font(icons::FONT)` (see `main`).

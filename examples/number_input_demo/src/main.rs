@@ -14,15 +14,15 @@
 //! - Clearing the buffer entirely leaves the signal at its last valid
 //!   value; focus loss re-renders that value back into the field.
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::reactive::Signal;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, Input, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::reactive::Signal;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, Input, TextWidget};
 
 fn main() {
     App::new()
-        .title("shroud \u{2014} number input demo (Phase 28)")
+        .title("sindon \u{2014} number input demo (Phase 28)")
         .size(640, 520)
         .run(|_scope| {
             let interval_days = Signal::new(7i64);

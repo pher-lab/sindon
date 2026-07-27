@@ -14,17 +14,17 @@
 //! - "Dismiss all" fades every visible toast out at once;
 //! - buttons stay clickable while toasts are up (no input is stolen).
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, TextWidget, toast};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, TextWidget, toast};
 
 const HEADING: Color = Color::rgb(0.92, 0.94, 1.0);
 const BG: Color = Color::rgb(0.10, 0.11, 0.15);
 
 fn main() {
     App::new()
-        .title("shroud — toasts (Tier 2)")
+        .title("sindon — toasts (Tier 2)")
         .size(520, 420)
         .run(|_scope| {
             let mut tree = WidgetTree::new();

@@ -3,11 +3,11 @@
 //! Stored as plain JSON at `<config>/knot/settings.json`, right next to
 //! the vault. These are *not* secret material — they describe app chrome,
 //! so they go through the unencrypted Phase 37
-//! [`shroud::platform::storage`] helpers rather than the SQLCipher /
+//! [`sindon::platform::storage`] helpers rather than the SQLCipher /
 //! envelope layers the notes use.
 //!
 //! The live values are exposed as thread-local [`Signal`]s (mirroring
-//! [`shroud::app::system_theme_signal`]). Both the `App::theme(...)`
+//! [`sindon::app::system_theme_signal`]). Both the `App::theme(...)`
 //! reactive and the settings modal read the *same* handles via
 //! [`signals`], so a change in the UI re-themes every theme-token-driven
 //! color without a subtree rebuild and is written back to disk through
@@ -28,13 +28,13 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use shroud::app::system_theme_signal;
-use shroud::core::{Color, Theme};
-use shroud::platform::SystemTheme;
-use shroud::reactive::{Animated, Easing, Reactive, Signal};
-use shroud::widgets::layer::LayerOptions;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, TextWidget};
+use sindon::app::system_theme_signal;
+use sindon::core::{Color, Theme};
+use sindon::platform::SystemTheme;
+use sindon::reactive::{Animated, Easing, Reactive, Signal};
+use sindon::widgets::layer::LayerOptions;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, TextWidget};
 
 use crate::backup;
 use crate::change_password;
@@ -254,7 +254,7 @@ impl Default for Settings {
 }
 
 fn settings_path() -> Option<PathBuf> {
-    let dir = shroud::platform::storage::config_dir(APP_NAME).ok()?;
+    let dir = sindon::platform::storage::config_dir(APP_NAME).ok()?;
     Some(dir.join(SETTINGS_FILENAME))
 }
 
@@ -267,7 +267,7 @@ impl Settings {
         let Some(path) = settings_path() else {
             return Self::default();
         };
-        match shroud::platform::storage::read_json::<Settings>(&path) {
+        match sindon::platform::storage::read_json::<Settings>(&path) {
             Ok(Some(s)) => s,
             Ok(None) => Self::default(),
             Err(e) => {
@@ -285,7 +285,7 @@ impl Settings {
             eprintln!("knot: config dir unavailable; settings not saved");
             return;
         };
-        if let Err(e) = shroud::platform::storage::write_json_atomic(&path, self) {
+        if let Err(e) = sindon::platform::storage::write_json_atomic(&path, self) {
             eprintln!("knot: failed to save settings: {e}");
         }
     }
@@ -308,7 +308,7 @@ thread_local! {
 }
 
 /// Thread-local settings signals, lazily initialized from disk on first
-/// access. Mirrors [`shroud::app::system_theme_signal`]: both the
+/// access. Mirrors [`sindon::app::system_theme_signal`]: both the
 /// `App::theme` reactive and the settings modal call this and get the
 /// same handles, so they stay in sync without being threaded through the
 /// screen builders.
@@ -337,7 +337,7 @@ fn target_theme() -> Theme {
         ThemeChoice::Light => Theme::light(),
         ThemeChoice::Dark => Theme::dark(),
         // `None` = OS appearance not reported (Linux outside GNOME/KDE);
-        // fall back to dark, shroud's historical default.
+        // fall back to dark, sindon's historical default.
         ThemeChoice::System => match system_theme_signal().get() {
             Some(SystemTheme::Light) => Theme::light(),
             Some(SystemTheme::Dark) | None => Theme::dark(),
@@ -425,7 +425,7 @@ pub fn resolved_backup_dir() -> Option<PathBuf> {
     if let Some(dir) = Settings::load().backup_dir {
         return Some(PathBuf::from(dir));
     }
-    shroud::platform::storage::config_dir(APP_NAME)
+    sindon::platform::storage::config_dir(APP_NAME)
         .ok()
         .map(|d| d.join("backups"))
 }

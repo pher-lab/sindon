@@ -2,7 +2,7 @@
 //!
 //! The reference app (`knot-notes-app-v0.7.0`) is React + Tailwind, so its
 //! visual language *is* the Tailwind palette with class-based dark mode. We
-//! encode that palette here and assemble it into shroud [`Theme`]s (light +
+//! encode that palette here and assemble it into sindon [`Theme`]s (light +
 //! dark), exposing the active theme + a dark-mode toggle as reactive helpers.
 //!
 //! Faithfully expressing Knot's tokens through [`Theme`] is itself a gap
@@ -17,15 +17,15 @@
 
 use std::cell::OnceCell;
 
-use shroud::app::theme_color;
-use shroud::core::{Color, FocusIndicator, Theme};
-use shroud::reactive::{Reactive, Signal};
+use sindon::app::theme_color;
+use sindon::core::{Color, FocusIndicator, Theme};
+use sindon::reactive::{Reactive, Signal};
 
 // --- Tailwind palette ------------------------------------------------------
 // Standard Tailwind hex values, the literal source-of-truth for the reference
 // app's `bg-gray-100` / `text-blue-600` / … utility classes.
 
-// Tailwind hex → shroud `Color`. `from_rgba8` divides bytes by 255 and the
+// Tailwind hex → sindon `Color`. `from_rgba8` divides bytes by 255 and the
 // pipeline displays them as-is on the real screen (the earlier "washed out"
 // reading was an HDR→SDR *screenshot* artifact, not the app — see G8 note in
 // docs/knot-ui-repro-gaps.md). So no sRGB decode here.
@@ -132,7 +132,7 @@ pub fn emerald_500() -> Color {
 }
 
 // --- Theme assembly --------------------------------------------------------
-// Map Tailwind tokens onto shroud's `Colors`. Anything the `Theme` model
+// Map Tailwind tokens onto sindon's `Colors`. Anything the `Theme` model
 // can't carry (e.g. a distinct *border* token for inputs vs. panels) is a gap.
 
 fn light_theme() -> Theme {

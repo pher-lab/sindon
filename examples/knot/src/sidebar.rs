@@ -24,12 +24,12 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use shroud::core::{Color, Rect};
-use shroud::platform::FileDialog;
-use shroud::reactive::{Reactive, Signal};
-use shroud::widgets::layer::LayerOptions;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{
+use sindon::core::{Color, Rect};
+use sindon::platform::FileDialog;
+use sindon::reactive::{Reactive, Signal};
+use sindon::widgets::layer::LayerOptions;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{
     Button, Container, EventContext, HAlign, Input, LayerAnchor, MenuItem, Placement, ScrollView,
     TextWidget,
 };
@@ -999,7 +999,7 @@ fn rebase_editor_to_selected(w: &SidebarWiring) {
 fn show_note_context_menu(
     w: &SidebarWiring,
     note_id: NoteId,
-    pos: shroud::core::Point,
+    pos: sindon::core::Point,
     ctx: &mut EventContext,
 ) {
     let anchor = Rect::new(pos.x, pos.y, 0.0, 0.0);

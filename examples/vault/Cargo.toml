@@ -6,12 +6,12 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-# The framework under test. This example is shroud's *second* grounding app
+# The framework under test. This example is sindon's *second* grounding app
 # (after Knot): a credential vault exercises the "collection shape" of secret —
 # many small, high-churn secrets you copy without revealing — which Knot's
 # few-large-documents shape never forced. Its release-blocking demand is list
 # virtualization, which this example is built to drive into the framework.
-shroud = { path = "../../crates/shroud" }
+sindon = { path = "../../crates/sindon" }
 # Same secret-handling chain Knot uses. Argon2id derives the key from the
 # master password; XChaCha/ChaCha seals each entry's secret payload.
 argon2 = { workspace = true }

@@ -19,9 +19,9 @@
 //!
 //! * `body_sig: Signal<String>` — the body text (already used for note save).
 //! * `cursor_sig: Signal<usize>` — the body's caret byte offset, mirrored by
-//!   [`shroud::widgets::Input::cursor_signal`].
+//!   [`sindon::widgets::Input::cursor_signal`].
 //! * `selection_sig: Signal<Option<(usize, usize)>>` — the body's selection
-//!   range, mirrored by [`shroud::widgets::Input::selection_signal`].
+//!   range, mirrored by [`sindon::widgets::Input::selection_signal`].
 //!
 //! When a button is clicked the body input first loses focus, and `Input`
 //! mirrors its final caret *and* selection into those signals on that
@@ -35,9 +35,9 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use shroud::reactive::Signal;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, EventContext};
+use sindon::reactive::Signal;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, EventContext};
 
 use crate::i18n::{self, Key};
 use crate::icons::{self, Icon};

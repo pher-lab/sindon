@@ -1,0 +1,20 @@
+[package]
+name = "sindon_render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "GPU renderer for the sindon UI framework"
+
+[dependencies]
+sindon_core = { workspace = true }
+sindon_security = { workspace = true }
+sindon_text = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }
+image = { workspace = true }
+# Transitive dep of `image`. Pinned to 0.8.0 in workspace deps (see top-level
+# Cargo.toml) to dodge a rustc 1.93.0 const-eval ICE in 0.8.1. Declared
+# explicitly here only to honor the pin — no `use moxcms` anywhere.
+moxcms = { workspace = true }

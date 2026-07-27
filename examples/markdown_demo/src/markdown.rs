@@ -1,6 +1,6 @@
-//! Markdown → shroud widget tree renderer (B-2 lite spike).
+//! Markdown → sindon widget tree renderer (B-2 lite spike).
 //!
-//! This module is intentionally written *with shroud's current primitives
+//! This module is intentionally written *with sindon's current primitives
 //! only* — no new framework APIs. The point of the spike is to drive the
 //! port from pulldown-cmark events to widgets and surface, by failure, the
 //! framework gaps that B-2 would need to fix.
@@ -11,10 +11,10 @@
 //! highlighting, images, wikilinks, link click handling.
 
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
-use shroud::core::Color;
-use shroud::text::TextSpan;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, TextWidget};
+use sindon::core::Color;
+use sindon::text::TextSpan;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, TextWidget};
 
 const COLOR_BODY: Color = Color {
     r: 0.85,

@@ -13,14 +13,14 @@
 //! the third row's button; both button (hover_background from theme
 //! primary_hover) and row should be lit at once.
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, TextWidget};
 
 fn main() {
     App::new()
-        .title("shroud — hover state demo")
+        .title("sindon — hover state demo")
         .size(640, 520)
         .run(|_scope| {
             let mut tree = WidgetTree::new();

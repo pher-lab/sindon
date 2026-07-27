@@ -1,4 +1,4 @@
-# shroud
+# sindon
 
 Secret-aware Rust UI framework — zeroize-first, GPU-rendered, no WebView.
 
@@ -26,16 +26,16 @@ the design:
 
 | Crate | Role |
 |---|---|
-| `shroud` | Facade — re-exports the others under `app`, `widgets`, ... |
-| `shroud_app` | Winit event loop + fluent `App` builder |
-| `shroud_core` | Geometry, ids, theme, security level |
-| `shroud_security` | `SecureString`, `SecureBuffer`, `SecureArena`, constant-time ops, hardening |
-| `shroud_reactive` | Fine-grained signals (`Signal`, `Memo`, `Effect`, `batch`) |
-| `shroud_layout` | Flexbox via `taffy` |
-| `shroud_text` | Shaping + rasterization via `cosmic-text` |
-| `shroud_render` | wgpu renderer + dual atlas (one cleared per-frame for secrets) |
-| `shroud_platform` | Window, clipboard, display-capture prevention |
-| `shroud_widgets` | `Container`, `Text`, `Button`, `Input`, `SecureInput`, ... |
+| `sindon` | Facade — re-exports the others under `app`, `widgets`, ... |
+| `sindon_app` | Winit event loop + fluent `App` builder |
+| `sindon_core` | Geometry, ids, theme, security level |
+| `sindon_security` | `SecureString`, `SecureBuffer`, `SecureArena`, constant-time ops, hardening |
+| `sindon_reactive` | Fine-grained signals (`Signal`, `Memo`, `Effect`, `batch`) |
+| `sindon_layout` | Flexbox via `taffy` |
+| `sindon_text` | Shaping + rasterization via `cosmic-text` |
+| `sindon_render` | wgpu renderer + dual atlas (one cleared per-frame for secrets) |
+| `sindon_platform` | Window, clipboard, display-capture prevention |
+| `sindon_widgets` | `Container`, `Text`, `Button`, `Input`, `SecureInput`, ... |
 
 ## Examples
 
@@ -56,8 +56,8 @@ cargo run -p counter
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo bench --bench reactive    # shroud_reactive
-cargo bench --bench security    # shroud_security
+cargo bench --bench reactive    # sindon_reactive
+cargo bench --bench security    # sindon_security
 cargo doc --no-deps --workspace --open
 ```
 

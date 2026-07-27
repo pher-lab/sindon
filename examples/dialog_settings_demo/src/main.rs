@@ -6,21 +6,21 @@
 //! back via `write_json_atomic`. The two file-dialog buttons exercise
 //! `FileDialog::open_folder` and `FileDialog::save_file` against `rfd`.
 //!
-//! The settings file lives at `<OS-config-dir>/shroud_dialog_settings_demo/
+//! The settings file lives at `<OS-config-dir>/sindon_dialog_settings_demo/
 //! settings.json`. Path is shown in the UI so you can verify the round-trip
 //! by opening the file after pressing Save.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use shroud::app::App;
-use shroud::core::Theme;
-use shroud::platform::{FileDialog, config_dir, read_json, write_json_atomic};
-use shroud::reactive::{Reactive, Signal};
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, TextWidget};
+use sindon::app::App;
+use sindon::core::Theme;
+use sindon::platform::{FileDialog, config_dir, read_json, write_json_atomic};
+use sindon::reactive::{Reactive, Signal};
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, TextWidget};
 
-const APP_NAME: &str = "shroud_dialog_settings_demo";
+const APP_NAME: &str = "sindon_dialog_settings_demo";
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 struct Settings {
@@ -75,7 +75,7 @@ fn main() {
     let settings_path_for_label = settings_path;
 
     App::new()
-        .title("shroud \u{2014} dialog + settings demo (Phase 37)")
+        .title("sindon \u{2014} dialog + settings demo (Phase 37)")
         .size(720, 560)
         .theme(theme_reactive)
         .run(move |_scope| {

@@ -1,8 +1,8 @@
-//! password_manager — validation example for shroud.
+//! password_manager — validation example for sindon.
 //!
 //! Two-screen password manager wired through the Phase 18c-1 tree-mutation
 //! primitives, the Phase 18c-2 add-entry flow, and the Phase 18d reactive
-//! value / clear-trigger bindings. The demo exists to stress shroud's
+//! value / clear-trigger bindings. The demo exists to stress sindon's
 //! secret-handling story end-to-end:
 //!
 //! - `SecureInput` → master password stays inside `SecureString`; no
@@ -35,13 +35,13 @@ use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use zeroize::Zeroizing;
 
-use shroud::app::App;
-use shroud::platform::SecureClipboard;
-use shroud::reactive::Signal;
-use shroud::security::SecureString;
-use shroud::widgets::shortcut::Shortcut;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, ClearTrigger, Container, Input, SecureInput, TextWidget};
+use sindon::app::App;
+use sindon::platform::SecureClipboard;
+use sindon::reactive::Signal;
+use sindon::security::SecureString;
+use sindon::widgets::shortcut::Shortcut;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, ClearTrigger, Container, Input, SecureInput, TextWidget};
 
 const DEMO_PASSWORD: &str = "hunter2";
 
@@ -256,7 +256,7 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
 
     tree.add_child(
         root,
-        TextWidget::new("shroud \u{2014} Password Manager").font_size(24.0),
+        TextWidget::new("sindon \u{2014} Password Manager").font_size(24.0),
     );
     tree.add_child(
         root,
@@ -291,7 +291,7 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             // only ever on screen for a single frame.
             VaultState::Unlocked(_) => "Unlocked \u{2014} opening vault\u{2026}".into(),
         })
-        .color(shroud::core::Color::rgb(0.7, 0.7, 0.75)),
+        .color(sindon::core::Color::rgb(0.7, 0.7, 0.75)),
     );
 }
 
@@ -309,7 +309,7 @@ fn build_vault_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
 
     tree.add_child(
         root,
-        TextWidget::new("shroud \u{2014} Password Manager").font_size(24.0),
+        TextWidget::new("sindon \u{2014} Password Manager").font_size(24.0),
     );
 
     let lock_state = Rc::clone(&state);
@@ -354,7 +354,7 @@ fn build_vault_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
                 _ => "Locking\u{2026}".into(),
             }
         })
-        .color(shroud::core::Color::rgb(0.7, 0.7, 0.75)),
+        .color(sindon::core::Color::rgb(0.7, 0.7, 0.75)),
     );
 
     // Add-entry form. Builds once and stays put across Saves — its Inputs
@@ -377,7 +377,7 @@ fn build_add_form(tree: &mut WidgetTree, parent: usize, state: Rc<RefCell<AppSta
 
     tree.add_child(
         parent,
-        TextWidget::new("Add entry").color(shroud::core::Color::rgb(0.7, 0.7, 0.75)),
+        TextWidget::new("Add entry").color(sindon::core::Color::rgb(0.7, 0.7, 0.75)),
     );
 
     let site_idx = tree.add_child(parent, Input::new().placeholder("Site").value(site_sig));
@@ -460,7 +460,7 @@ fn build_list_rows(tree: &mut WidgetTree, parent: usize, state: Rc<RefCell<AppSt
 
 fn main() {
     App::new()
-        .title("shroud \u{2014} Password Manager")
+        .title("sindon \u{2014} Password Manager")
         .size(640, 560)
         .capture_prevention(true)
         .run(|scope| {

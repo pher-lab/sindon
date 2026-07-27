@@ -1,6 +1,6 @@
 //! Hover tooltips (FW-13) — the app-side timing + bubble over the framework's
-//! two primitives: [`shroud::widgets::Container::on_hover_enter`] /
-//! `on_hover_exit` and [`shroud::widgets::layer::LayerOptions::tooltip`] (a
+//! two primitives: [`sindon::widgets::Container::on_hover_enter`] /
+//! `on_hover_exit` and [`sindon::widgets::layer::LayerOptions::tooltip`] (a
 //! click-through overlay).
 //!
 //! The framework deliberately stops at "tell me when a container is hovered"
@@ -34,10 +34,10 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use shroud::app::FrameContext;
-use shroud::core::Rect;
-use shroud::widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement};
-use shroud::widgets::{Container, EventContext, TextWidget};
+use sindon::app::FrameContext;
+use sindon::core::Rect;
+use sindon::widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement};
+use sindon::widgets::{Container, EventContext, TextWidget};
 
 use crate::settings;
 

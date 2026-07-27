@@ -15,11 +15,11 @@
 
 use std::time::Duration;
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::reactive::Signal;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, ProgressBar, Spinner, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::reactive::Signal;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, ProgressBar, Spinner, TextWidget};
 
 const HEADING: Color = Color::rgb(0.92, 0.94, 1.0);
 const MUTED: Color = Color::rgb(0.7, 0.72, 0.8);
@@ -36,7 +36,7 @@ fn main() {
     let looping = Signal::new(0.0f32);
 
     App::new()
-        .title("shroud — progress indicators (Tier 2)")
+        .title("sindon — progress indicators (Tier 2)")
         .size(560, 760)
         .tick_interval(Duration::from_millis(16))
         .run(move |scope| {

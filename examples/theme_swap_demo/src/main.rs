@@ -17,12 +17,12 @@
 //! the outline/divider border tokens, the disabled fill/label tokens,
 //! the window clear color) flip in lockstep.
 
-use shroud::app::{App, system_theme_signal};
-use shroud::core::Theme;
-use shroud::platform::SystemTheme;
-use shroud::reactive::{Reactive, Signal};
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, TextWidget};
+use sindon::app::{App, system_theme_signal};
+use sindon::core::Theme;
+use sindon::platform::SystemTheme;
+use sindon::reactive::{Reactive, Signal};
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, TextWidget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ThemeChoice {
@@ -44,7 +44,7 @@ fn main() {
         ThemeChoice::Light => Theme::light(),
         ThemeChoice::Dark => Theme::dark(),
         // None covers Linux outside GNOME/KDE — fall back to dark, the
-        // historical shroud default. Apps that ship a different
+        // historical sindon default. Apps that ship a different
         // preferred fallback can swap it here.
         ThemeChoice::System => match os_theme.get() {
             Some(SystemTheme::Light) => Theme::light(),
@@ -56,7 +56,7 @@ fn main() {
     let theme_for_tokens = theme_reactive.clone();
 
     App::new()
-        .title("shroud \u{2014} theme swap demo (Phase 30)")
+        .title("sindon \u{2014} theme swap demo (Phase 30)")
         .size(640, 440)
         .theme(theme_reactive)
         .run(move |_scope| {

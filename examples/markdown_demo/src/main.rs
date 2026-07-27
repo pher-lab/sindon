@@ -1,4 +1,4 @@
-//! `markdown_demo` — render a markdown source as a shroud widget tree
+//! `markdown_demo` — render a markdown source as a sindon widget tree
 //! using only the current public framework primitives.
 //!
 //! This is the B-2 lite spike, lifted out of `knot_spike` so the spike's
@@ -12,10 +12,10 @@
 
 mod markdown;
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, ScrollView};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, ScrollView};
 
 /// Markdown sample that touches every feature the renderer supports plus
 /// the cases that exercise the known gaps. Keep this in sync with the
@@ -24,7 +24,7 @@ const SAMPLE: &str = "\
 # Welcome to Knot
 
 A note here looks like markdown. The B-2 spike renders this body through a
-pulldown-cmark pipeline that emits shroud widgets directly, with **no new
+pulldown-cmark pipeline that emits sindon widgets directly, with **no new
 framework primitives** \u{2014} the point is to see what breaks.
 
 ## Plain paragraphs
@@ -38,7 +38,7 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
 
 This paragraph mixes **bold**, *italic*, `inline code`, and a [link to a
 note](knot://note/abc). The renderer is forced onto the multi-run path,
-which emits a `Container::row()` of per-run TextWidgets. shroud has no
+which emits a `Container::row()` of per-run TextWidgets. sindon has no
 flex_wrap today, so this row will overflow horizontally instead of breaking
 across lines \u{2014} and TextWidget has no weight/style/family knob, so
 bold and italic visually collapse to color tweaks. Both are framework gaps
@@ -84,7 +84,7 @@ End of demo note.
 
 fn main() {
     App::new()
-        .title("shroud \u{2014} markdown_demo")
+        .title("sindon \u{2014} markdown_demo")
         .size(720, 600)
         .run(|_scope| {
             let mut tree = WidgetTree::new();

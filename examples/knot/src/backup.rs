@@ -54,11 +54,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use shroud::platform::FileDialog;
-use shroud::reactive::{Reactive, Signal};
-use shroud::widgets::layer::LayerOptions;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, EventContext, Input, TextWidget};
+use sindon::platform::FileDialog;
+use sindon::reactive::{Reactive, Signal};
+use sindon::widgets::layer::LayerOptions;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, EventContext, Input, TextWidget};
 
 use crate::crypto::SALT_SIZE;
 use crate::i18n::{self, Key};

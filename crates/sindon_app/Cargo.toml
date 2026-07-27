@@ -1,0 +1,25 @@
+[package]
+name = "sindon_app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Application framework for the sindon UI framework"
+
+[dependencies]
+sindon_core = { workspace = true }
+sindon_security = { workspace = true }
+sindon_reactive = { workspace = true }
+sindon_render = { workspace = true }
+sindon_text = { workspace = true }
+sindon_layout = { workspace = true }
+sindon_widgets = { workspace = true }
+sindon_platform = { workspace = true }
+winit = { workspace = true }
+log = { workspace = true }
+pollster = "0.4"
+# OS accessibility (screen-reader) exposure. Pinned to the winit-0.30
+# compatible line: accesskit_winit 0.33 depends on winit ^0.30.5 and
+# accesskit ^0.24. These are the only crates in the workspace that link
+# accesskit — the vocabulary (sindon_core) and widgets stay accesskit-free.
+accesskit = "0.24"
+accesskit_winit = "0.33"

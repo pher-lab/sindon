@@ -163,7 +163,7 @@ jobs:
         run: |
           for ($i = 1; $i -le 3; $i++) {
             Write-Host "residue attempt $i/3"
-            cargo test -p shroud_text --test cosmic_residue -- --test-threads=1
+            cargo test -p sindon_text --test cosmic_residue -- --test-threads=1
             if ($LASTEXITCODE -eq 0) {
               if ($i -gt 1) {
                 Write-Host "::warning title=Residue gate flaked (absorbed)::cosmic_residue passed on attempt $i/3. Retry only absorbs nondeterministic runner noise; a real leak is deterministic and fails all 3 attempts. If this warning becomes frequent, suspect a new intermittent retention path, not the runner."
@@ -176,7 +176,7 @@ jobs:
         run: |
           for ($i = 1; $i -le 3; $i++) {
             Write-Host "residue attempt $i/3"
-            cargo test -p shroud_widgets --test zeroize_verification -- --test-threads=1
+            cargo test -p sindon_widgets --test zeroize_verification -- --test-threads=1
             if ($LASTEXITCODE -eq 0) {
               if ($i -gt 1) {
                 Write-Host "::warning title=Residue gate flaked (absorbed)::zeroize_verification passed on attempt $i/3. Retry only absorbs nondeterministic runner noise; a real leak is deterministic and fails all 3 attempts. If this warning becomes frequent, suspect a new intermittent retention path, not the runner."

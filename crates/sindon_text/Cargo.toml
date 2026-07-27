@@ -1,0 +1,18 @@
+[package]
+name = "sindon_text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Text rendering for the sindon UI framework"
+
+[dependencies]
+sindon_core = { workspace = true }
+sindon_security = { workspace = true }
+cosmic-text = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.61", features = [
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+] }

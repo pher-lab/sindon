@@ -31,13 +31,13 @@
 //!   - **grid** `grid grid-cols-2 gap-3` (interval / retention) has no layout
 //!     primitive; faked with a `row` of two `grow(1.0)` columns.
 
-use shroud::core::Color;
-use shroud::layout::Justify;
-use shroud::reactive::{Reactive, Signal};
-use shroud::text::FontWeight;
-use shroud::widgets::layer::LayerOptions;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{
+use sindon::core::Color;
+use sindon::layout::Justify;
+use sindon::reactive::{Reactive, Signal};
+use sindon::text::FontWeight;
+use sindon::widgets::layer::LayerOptions;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{
     Button, Checkbox, Container, EventContext, Input, ScrollView, SecureInput, TextWidget,
 };
 

@@ -34,10 +34,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use shroud::core::Color;
-use shroud::reactive::{Reactive, Signal};
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, ReactiveChildren, TextWidget};
+use sindon::core::Color;
+use sindon::reactive::{Reactive, Signal};
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, ReactiveChildren, TextWidget};
 
 use crate::i18n::{self, Key};
 use crate::preview::{self, WikiNav};

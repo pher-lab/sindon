@@ -1,0 +1,17 @@
+[package]
+name = "sindon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A security-first Rust UI framework with secret zeroization guarantees"
+
+[dependencies]
+sindon_core = { workspace = true }
+sindon_security = { workspace = true }
+sindon_reactive = { workspace = true }
+sindon_render = { workspace = true }
+sindon_text = { workspace = true }
+sindon_layout = { workspace = true }
+sindon_widgets = { workspace = true }
+sindon_platform = { workspace = true }
+sindon_app = { workspace = true }
