@@ -1660,6 +1660,154 @@ fn incremental_rich_edits_reshape_only_the_touched_lines() {
 }
 
 #[test]
+fn mid_document_line_count_changes_reshape_only_the_edit() {
+    // `set_or_push_line` compares line `i` against line `i`, so inserting a
+    // newline halfway down a note shifted every line after it out of alignment
+    // and re-shaped all of them: 102 of 200 lines for one Enter, measured at
+    // 8.8 ms on a real note against a 6.1 ms frame budget. It stayed hidden
+    // through the first round of measurements because the caret was near the
+    // end of the document, where there is no tail to shift.
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let attrs = TextAttrs::default();
+
+    let base: String = (0..200)
+        .map(|i| format!("line {i} with some words on it"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mid = base.find("line 100").unwrap() + 4;
+    let mut split = base.clone();
+    split.insert(mid, '\n');
+
+    let mut engine = TextEngine::new();
+    let _ = engine.shape_edit_plain(&base, fs, lh, None, &attrs);
+    let _ = engine.take_reshaped_lines();
+
+    let _ = engine.shape_edit_plain(&split, fs, lh, None, &attrs);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        2,
+        "an Enter mid-document must re-shape the two halves of the split line, \
+         not the whole tail"
+    );
+
+    let _ = engine.shape_edit_plain(&base, fs, lh, None, &attrs);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        1,
+        "and joining them back must re-shape only the line that results"
+    );
+
+    // The rich path takes the same alignment — and it is the one knot's editor
+    // actually goes through, so it is the one the 8.8 ms was measured on.
+    let mut engine = TextEngine::new();
+    let _ = engine.shape_edit_rich(&highlight_tiling(&base), fs, lh, None);
+    let _ = engine.take_reshaped_lines();
+
+    let _ = engine.shape_edit_rich(&highlight_tiling(&split), fs, lh, None);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        2,
+        "an Enter mid-document must not re-shape the tail on the rich path either"
+    );
+}
+
+#[test]
+fn realigned_line_edits_match_a_cold_shape() {
+    // The realignment relocates `BufferLine`s between indices, which is exactly
+    // the kind of shortcut that can leave the reused buffer subtly different
+    // from a freshly built one — and the caret and hit-tests read that buffer.
+    // Walk splits, double-splits, joins and a multi-line deletion at several
+    // depths, re-checking the whole equivalence contract after each.
+    let (fs, lh) = (16.0, 16.0 * 1.4);
+    let attrs = TextAttrs::default();
+    let wrap = Some(140.0);
+
+    // Ends in a break, so the synthetic trailing blank line is in play too.
+    let base: String = (0..8)
+        .map(|i| format!("line {i} with enough words to wrap\n"))
+        .collect();
+
+    let mut texts = vec![base.clone()];
+    for needle in ["line 0 ", "line 4 ", "line 7 "] {
+        let at = base.find(needle).unwrap() + 4;
+        let mut one = base.clone();
+        one.insert(at, '\n');
+        let mut two = base.clone();
+        two.insert_str(at, "\n\n");
+        texts.push(one);
+        texts.push(base.clone());
+        texts.push(two);
+        texts.push(base.clone());
+    }
+    // Whole lines removed from the middle, then restored, then everything gone.
+    let (from, to) = (base.find("line 2 ").unwrap(), base.find("line 6 ").unwrap());
+    let mut cut = base.clone();
+    cut.replace_range(from..to, "");
+    texts.push(cut);
+    texts.push(base.clone());
+    texts.push(String::new());
+
+    let mut engine = TextEngine::new();
+    for text in &texts {
+        let got = engine.shape_edit_plain(text, fs, lh, wrap, &attrs);
+        let want = engine.shape_text_attrs(text, fs, lh, wrap, &attrs);
+
+        assert_eq!(
+            got.shaped().glyphs.len(),
+            want.glyphs.len(),
+            "glyph count for {text:?}"
+        );
+        for (a, b) in got.shaped().glyphs.iter().zip(&want.glyphs) {
+            assert_eq!((a.x, a.y), (b.x, b.y), "glyph position for {text:?}");
+            assert_eq!(a.cache_key, b.cache_key, "glyph identity for {text:?}");
+        }
+        assert_eq!(
+            (got.shaped().width, got.shaped().height),
+            (want.width, want.height),
+            "block extent for {text:?}"
+        );
+        for off in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+            assert_eq!(
+                engine.edit_caret(text, off, fs, lh, wrap, &attrs),
+                engine.caret_at_offset_attrs(text, off, fs, lh, wrap, &attrs),
+                "caret at offset {off} for {text:?}"
+            );
+        }
+    }
+
+    // Same walk on the rich path, whose line model differs twice over
+    // (BidiParagraphs split, synthetic endings) — the realignment has to hold
+    // for both or a highlighted editor drifts where a plain one doesn't.
+    let mut engine = TextEngine::new();
+    for text in &texts {
+        let spans = highlight_tiling(text);
+        let got = engine.shape_edit_rich(&spans, fs, lh, wrap);
+        let want = engine.shape_rich(&spans, fs, lh, wrap);
+
+        assert_eq!(
+            got.shaped().glyphs.len(),
+            want.glyphs.len(),
+            "rich glyph count for {text:?}"
+        );
+        for (a, b) in got.shaped().glyphs.iter().zip(&want.glyphs) {
+            assert_eq!((a.x, a.y), (b.x, b.y), "rich glyph position for {text:?}");
+            assert_eq!(a.color, b.color, "rich glyph color for {text:?}");
+            assert_eq!(a.cache_key, b.cache_key, "rich glyph identity for {text:?}");
+        }
+        assert_eq!(
+            got.shaped().span_boxes,
+            want.span_boxes,
+            "span boxes for {text:?}"
+        );
+        assert_eq!(
+            (got.shaped().width, got.shaped().height),
+            (want.width, want.height),
+            "rich block extent for {text:?}"
+        );
+    }
+}
+
+#[test]
 fn an_unchanged_repaint_does_no_shaping_work_at_all() {
     // Line reuse made a keystroke cheap, but every frame still walked the whole
     // document just to discover nothing had changed — and in a real editing
@@ -1749,6 +1897,154 @@ fn clearing_the_shape_cache_drops_the_edit_buffer() {
     let _ = engine.shape_edit_plain(text, fs, lh, None, &attrs);
     let (_, ns) = engine.take_shape_stats();
     assert!(ns > 0, "the first shape after a clear must rebuild");
+}
+
+#[test]
+fn cancelling_a_composition_does_not_serve_a_stale_edit_memo() {
+    // The composing and editing paths share one buffer, which means the slot
+    // does *not* always hold `value`. Cancelling a composition is the case
+    // where that bites: the preedit disappears and `value` is byte-identical to
+    // what it was before composing started, so the edit memo's key matches —
+    // while the slot still describes the composed string. Serving the memo on
+    // that basis would hand back correct glyphs paired with a buffer that
+    // answers caret and hit-test queries about different text.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 20.0);
+    let attrs = TextAttrs::default();
+    let wrap = Some(200.0);
+
+    let value = "alpha beta";
+    let _ = engine.shape_edit_plain(value, fs, lh, wrap, &attrs);
+
+    // An IME opens and splices a preedit at the caret.
+    let composed = "alpha \u{306B}\u{307B}\u{3093}beta";
+    let _ = engine.shape_composing(composed, fs, lh, wrap, &attrs, 15, (6, 15), None);
+
+    // Escape: back to the original value, which the memo has seen before.
+    let _ = engine.take_reshaped_lines();
+    let _ = engine.shape_edit_plain(value, fs, lh, wrap, &attrs);
+    assert!(
+        engine.take_reshaped_lines() > 0,
+        "the slot held the composed string, so this must re-sync rather than \
+         serve the memo"
+    );
+
+    for off in (0..=value.len()).filter(|&i| value.is_char_boundary(i)) {
+        assert_eq!(
+            engine.edit_caret(value, off, fs, lh, wrap, &attrs),
+            engine.caret_at_offset_attrs(value, off, fs, lh, wrap, &attrs),
+            "caret at offset {off} after a cancelled composition"
+        );
+    }
+}
+
+#[test]
+fn an_unchanged_composing_repaint_shapes_nothing() {
+    // Composition is the one input method that repaints without changing
+    // anything — the candidate window opening, a hover, the IME watchdog's
+    // forced redraw. Each of those rebuilt the whole document: 16.1 ms per
+    // frame on a 256-paragraph note (`ime_composing` bench).
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 20.0);
+    let attrs = TextAttrs::default();
+    let text = "second \u{306B}\u{307B}\u{3093} line";
+    let (ps, pe) = (7, 16);
+
+    let first = engine.shape_composing(text, fs, lh, None, &attrs, pe, (ps, pe), Some((ps, pe)));
+    let _ = engine.take_shape_stats();
+    let _ = engine.take_reshaped_lines();
+
+    let again = engine.shape_composing(text, fs, lh, None, &attrs, pe, (ps, pe), Some((ps, pe)));
+    assert_eq!(
+        engine.take_shape_stats(),
+        (0, 0),
+        "an unchanged composing repaint must not walk the document"
+    );
+    assert_eq!(engine.take_reshaped_lines(), 0);
+    assert!(
+        std::rc::Rc::ptr_eq(&first, &again),
+        "it must hand back the same block, not an equal copy — cloning one \
+         carries the whole document's glyphs"
+    );
+}
+
+#[test]
+fn moving_the_caret_inside_an_unchanged_preedit_still_updates() {
+    // The memo key covers the derived geometry, not just the text: ←/→ inside a
+    // preedit (and 変換 moving the target clause) changes the caret and the
+    // highlight while the composed string stays byte-identical. Keying on text
+    // alone would freeze the caret at its first position.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 20.0);
+    let attrs = TextAttrs::default();
+    let text = "\u{306B}\u{307B}\u{3093}\u{3054}"; // にほんご
+    let (ps, pe) = (0, text.len());
+
+    let head = engine.shape_composing(text, fs, lh, None, &attrs, 0, (ps, pe), Some((0, 3)));
+    let moved = engine.shape_composing(text, fs, lh, None, &attrs, 6, (ps, pe), Some((3, 9)));
+
+    assert_ne!(head.caret, moved.caret, "the caret must follow the offset");
+    assert_ne!(
+        head.target, moved.target,
+        "the target-clause highlight must follow the clause range"
+    );
+}
+
+#[test]
+fn committing_a_composition_reuses_the_composed_buffer() {
+    // The payoff of sharing one buffer between the two paths: the frame after
+    // the IME commits diffs the committed value against the composed string
+    // already in the slot, and they are usually identical — the commit *is* the
+    // last preedit. So the transition costs a line walk instead of a rebuild.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 20.0);
+    let attrs = TextAttrs::default();
+    let wrap = Some(200.0);
+    let composed = "first line\nsecond \u{65E5}\u{672C}\u{8A9E} line\nthird line";
+
+    let _ = engine.shape_composing(composed, fs, lh, wrap, &attrs, 27, (18, 27), Some((18, 27)));
+    let _ = engine.take_reshaped_lines();
+
+    // Commit: `value` now *is* the composed string and the editing path takes
+    // over.
+    let _ = engine.shape_edit_plain(composed, fs, lh, wrap, &attrs);
+    assert_eq!(
+        engine.take_reshaped_lines(),
+        0,
+        "committing the preedit must not re-shape a line"
+    );
+
+    // The shared buffer must still answer as the standalone path does.
+    for off in (0..=composed.len()).filter(|&i| composed.is_char_boundary(i)) {
+        assert_eq!(
+            engine.edit_caret(composed, off, fs, lh, wrap, &attrs),
+            engine.caret_at_offset_attrs(composed, off, fs, lh, wrap, &attrs),
+            "caret at offset {off} after commit"
+        );
+    }
+}
+
+#[test]
+fn clearing_the_shape_cache_drops_the_compose_memo() {
+    // The composed block holds glyph positions derived from the user's
+    // plaintext, so a lock / screen swap must drop it alongside the slot and
+    // the edit memo.
+    let mut engine = TextEngine::new();
+    let (fs, lh) = (16.0, 20.0);
+    let attrs = TextAttrs::default();
+    let text = "\u{65E5}\u{672C}\u{8A9E}";
+    let range = (0, text.len());
+
+    let _ = engine.shape_composing(text, fs, lh, None, &attrs, 0, range, None);
+    engine.clear_shape_cache();
+
+    let _ = engine.take_shape_stats();
+    let _ = engine.shape_composing(text, fs, lh, None, &attrs, 0, range, None);
+    let (_, ns) = engine.take_shape_stats();
+    assert!(
+        ns > 0,
+        "the first composing shape after a clear must rebuild"
+    );
 }
 
 #[test]
