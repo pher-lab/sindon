@@ -896,29 +896,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cosmic-text"
-version = "0.18.2"
-dependencies = [
- "bitflags 2.11.0",
- "fontdb",
- "harfrust",
- "linebender_resource_handle",
- "log",
- "rangemap",
- "rustc-hash 2.1.2",
- "self_cell",
- "skrifa",
- "smol_str 0.3.6",
- "swash",
- "sys-locale",
- "unicode-bidi",
- "unicode-linebreak",
- "unicode-script",
- "unicode-segmentation",
- "zeroize",
-]
-
-[[package]]
 name = "counter"
 version = "0.1.0"
 dependencies = [
@@ -3432,6 +3409,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "sindon-cosmic-text"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.11.0",
+ "fontdb",
+ "harfrust",
+ "linebender_resource_handle",
+ "log",
+ "rangemap",
+ "rustc-hash 2.1.2",
+ "self_cell",
+ "skrifa",
+ "smol_str 0.3.6",
+ "swash",
+ "sys-locale",
+ "unicode-bidi",
+ "unicode-linebreak",
+ "unicode-script",
+ "unicode-segmentation",
+ "zeroize",
+]
+
+[[package]]
 name = "sindon_app"
 version = "0.1.0"
 dependencies = [
@@ -3530,7 +3530,7 @@ dependencies = [
 name = "sindon_text"
 version = "0.1.0"
 dependencies = [
- "cosmic-text",
+ "sindon-cosmic-text",
  "sindon_core",
  "sindon_security",
  "windows 0.61.3",

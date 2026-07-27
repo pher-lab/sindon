@@ -115,6 +115,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps --workspace
 
+  fork-propagation:
+    name: Fork reaches downstream
+    runs-on: ubuntu-latest
+    # The sibling of the residue gate below, and deliberately a separate job so
+    # its name says which half of the guarantee it covers:
+    #
+    #   residue (below)  — "is the fork correct?"   scans for plaintext residue
+    #   this job         — "does the fork arrive?"  inspects the resolved graph
+    #
+    # The second question cannot be answered from inside the workspace. Cargo
+    # reads `[patch]` only from the root workspace being built, so while the
+    # cosmic-text fork was applied that way, every in-workspace build resolved
+    # through it and stayed green — including the residue gate — while any
+    # downstream consumer silently got upstream cosmic-text and lost the
+    # zeroize guarantee. `ci/downstream-gate` is an independent workspace root
+    # so it sees what downstream sees.
+    #
+    # No system deps and no rust-cache: `cargo metadata` resolves the graph
+    # without compiling anything, which is what keeps this job under a minute.
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      # Invoked via `bash` rather than as ./script so the job does not depend on
+      # the executable bit surviving a checkout from a Windows working copy,
+      # where core.filemode is typically off.
+      - name: cosmic-text fork reaches a downstream consumer
+        run: bash ci/check-fork-propagation.sh
+
   residue:
     name: Secret residue (Windows)
     runs-on: windows-latest

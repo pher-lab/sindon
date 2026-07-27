@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// Modified from cosmic-text 0.18.2 for the sindon fork: `BufferLine`'s plaintext
+// buffer is zeroized on drop and on overwrite. See the `// sindon fork:` comments
+// at the change sites and the fork notice in this directory's README.
+
 #![allow(clippy::too_many_arguments)]
 
 #[cfg(not(feature = "std"))]

@@ -2,6 +2,13 @@
 /target
 **/*.rs.bk
 
+# ci/downstream-gate is its own workspace root, so it builds its own target/.
+# Its Cargo.lock is deliberately not committed either: the gate's job is to
+# resolve the way a fresh downstream consumer would, and a pinned lock would
+# hide a drift the gate exists to catch.
+/ci/downstream-gate/target
+/ci/downstream-gate/Cargo.lock
+
 # OS
 Thumbs.db
 .DS_Store
