@@ -1,13 +1,13 @@
 # Measuring frame performance
 
-shroud ships two ways to see what a frame costs: an on-screen HUD for
+sindon ships two ways to see what a frame costs: an on-screen HUD for
 watching while you use the app, and a per-frame log for numbers you can go
 back to. Both read the same recorder, so they never disagree.
 
 ## The HUD
 
 ```bash
-SHROUD_HUD=1 cargo run --release -p knot
+SINDON_HUD=1 cargo run --release -p knot
 ```
 
 or, from the app itself:
@@ -41,8 +41,8 @@ separately, excluded from every other figure, and reported as `hud`.
 ## The log
 
 ```bash
-SHROUD_PERF=1 cargo run --release -p vault          # stderr
-SHROUD_PERF=perf.log cargo run --release -p vault   # file
+SINDON_PERF=1 cargo run --release -p vault          # stderr
+SINDON_PERF=perf.log cargo run --release -p vault   # file
 ```
 
 One line per painted frame, a `SECOND` line whenever a second of wall clock
@@ -60,7 +60,7 @@ leaky one.
 
 ## Reading the numbers
 
-**`fps` is frames *painted*, and shroud paints on demand.** An idle window
+**`fps` is frames *painted*, and sindon paints on demand.** An idle window
 paints zero frames per second, and that is correct, not a stall. Nudge the
 mouse and you will see `2 fps`; that means two frames were needed, not that
 the UI managed only two. The number is meaningful while something is

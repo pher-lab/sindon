@@ -1,0 +1,22 @@
+[package]
+name = "sindon_reactive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Reactive signal system for the sindon UI framework"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sindon_core = { workspace = true }
+sindon_security = { workspace = true }
+slotmap = { workspace = true }
+zeroize = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "reactive"
+harness = false

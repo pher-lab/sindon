@@ -1,18 +1,18 @@
-# shroud security model — guarantees and limits
+# sindon security model — guarantees and limits
 
-shroud is a "secret-aware" UI framework: it takes the position that
+sindon is a "secret-aware" UI framework: it takes the position that
 some values (passwords, keys, tokens, decrypted payloads) deserve
 specific handling, and provides types and runtime hardening to support
 that handling. It is **not** a sandbox, and it cannot stop application
 code from sidestepping its protections. This document spells out where
 the line is.
 
-Audience: developers building on shroud, and reviewers asking "what
+Audience: developers building on sindon, and reviewers asking "what
 exactly does this framework promise?"
 
 ---
 
-## What shroud guarantees
+## What sindon guarantees
 
 These properties are enforced by code or by the type system. If they
 break, that is a bug.
@@ -83,12 +83,12 @@ IME — see below.
 
 **Not offered** — Code Integrity Guard (`ProcessSignaturePolicy` with
 `MicrosoftSignedOnly`): rejects every non-Microsoft-signed DLL mapped after
-it is applied. shroud deliberately exposes no `App` switch for this. It was
+it is applied. sindon deliberately exposes no `App` switch for this. It was
 measured on Windows 11 rather than reasoned about, and the result is that
 its cost lands in the wrong place:
 
 - It works, and it defends something real — under enforcement a running
-  shroud app kept rendering (GPU driver DLLs are WHQL-signed and pass) while
+  sindon app kept rendering (GPU driver DLLs are WHQL-signed and pass) while
   a third-party overlay DLL that had been injecting itself was rejected.
 - But it silently breaks third-party IMEs. Microsoft's own IME survives;
   Google Japanese Input loses conversion entirely, leaving the user able to
@@ -96,9 +96,9 @@ its cost lands in the wrong place:
   the text service simply fails to activate — so an app author who enabled
   it would have no way to connect the bug report to the cause.
 
-`shroud_security::hardening` keeps `enable_signature_audit()` and
+`sindon_security::hardening` keeps `enable_signature_audit()` and
 `enable_signature_enforcement()` so the measurement is reproducible, and
-`SHROUD_CIG_AUDIT=1` / `=enforce` applies them to any shroud app for a run.
+`SINDON_CIG_AUDIT=1` / `=enforce` applies them to any sindon app for a run.
 These are diagnostics, not a supported configuration. Note that audit mode
 under-reports: it stayed silent about a DLL that enforcement then blocked,
 so audit findings alone cannot clear this policy for an app.
@@ -118,7 +118,7 @@ so audit findings alone cannot clear this policy for an app.
 
 ---
 
-## What shroud does **not** enforce
+## What sindon does **not** enforce
 
 These are real limits. None of them is a bug — they are the cost of
 being a library rather than a runtime, and of running on commodity
@@ -133,7 +133,7 @@ can write:
 let pw: Signal<String> = Signal::new("hunter2".into());
 ```
 
-…and shroud will not stop them. `Signal<String>` stores its value in
+…and sindon will not stop them. `Signal<String>` stores its value in
 the regular reactive arena, not the mlock'd one. `Signal::get_clone()`
 returns a `String` that is not zeroized on drop. `Reactive::derive`
 closures can capture and return plaintext.
@@ -183,12 +183,12 @@ The current type design rules this out by construction:
   keystrokes that would overflow.
 
 The cost is that callers must pick a sensible upper bound up front.
-For shroud's target use cases — passwords, API keys, master secrets —
+For sindon's target use cases — passwords, API keys, master secrets —
 this matches how the data is sized in practice anyway.
 
 ### Clipboard plaintext lives outside the framework
 
-- `arboard` returns `String` from `get_text`. shroud wraps that
+- `arboard` returns `String` from `get_text`. sindon wraps that
   intermediate in `Zeroizing<String>` to wipe its current capacity on
   drop, but any internal allocations made by `arboard` while it was
   receiving the OS clipboard data are out of reach.
@@ -209,19 +209,19 @@ call `write_secure` / `read_secure`.
   to `WDA_EXCLUDEFROMCAPTURE`; the right answer is compositor-level
   policy, which is outside the application's control.
 
-A Linux/macOS build of shroud will render secrets as usual but will
+A Linux/macOS build of sindon will render secrets as usual but will
 **not** hide them from screen-capture APIs.
 
 ### `SecureArena` is thread-local and single-process
 
 - The arena is per-thread (`thread_local!`). Sending a `SecureSignal`
-  to another thread is not supported. This is consistent with shroud's
+  to another thread is not supported. This is consistent with sindon's
   single-threaded reactive model.
 - Process isolation is not provided. A malicious thread inside the
-  same process can read the arena's pages directly. shroud is not a
+  same process can read the arena's pages directly. sindon is not a
   defense against attacker-controlled code running in-process.
 
-### What's outside shroud's threat model entirely
+### What's outside sindon's threat model entirely
 
 - **Kernel / hypervisor compromise.** mlock keeps pages out of swap;
   it does not protect against a malicious kernel.
@@ -234,7 +234,7 @@ A Linux/macOS build of shroud will render secrets as usual but will
 - **Operating-system-level surveillance.** Accessibility APIs,
   screen readers, OS-level keyloggers (legitimate or otherwise).
 
-shroud raises the cost of casual leakage (memory dumps, swap files,
+sindon raises the cost of casual leakage (memory dumps, swap files,
 core dumps, accidental clones, debug prints, screen capture). It does
 not promise confidentiality against an attacker with code execution
 in the same process or privileged access to the machine.

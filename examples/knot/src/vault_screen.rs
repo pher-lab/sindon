@@ -14,9 +14,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use shroud::reactive::{Reactive, Signal};
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, TextWidget};
+use sindon::reactive::{Reactive, Signal};
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, TextWidget};
 
 use crate::editor;
 use crate::notice;
@@ -148,7 +148,7 @@ fn build_error_banner(tree: &mut WidgetTree, parent: usize) {
         banner,
         Button::new("\u{2715}")
             .radius(4.0)
-            .background(shroud::core::Color::TRANSPARENT)
+            .background(sindon::core::Color::TRANSPARENT)
             .text_color(Reactive::derive(|| {
                 settings::current_theme().colors.on_primary
             }))

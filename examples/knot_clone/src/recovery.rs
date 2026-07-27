@@ -37,10 +37,10 @@
 //! (mirroring the real `recover → unlocked`); "Back" returns to the unlock
 //! screen. Reached via the dev-nav shortcut in `main.rs` (Ctrl+4).
 
-use shroud::core::Color;
-use shroud::text::FontWeight;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, Input, SecureInput, TextWidget};
+use sindon::core::Color;
+use sindon::text::FontWeight;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, Input, SecureInput, TextWidget};
 
 use crate::tokens;
 

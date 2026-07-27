@@ -46,10 +46,10 @@ mod vault_screen;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use shroud::app::App;
-use shroud::reactive::Reactive;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Key, Modifiers, Shortcut};
+use sindon::app::App;
+use sindon::reactive::Reactive;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Key, Modifiers, Shortcut};
 
 use crate::state::{AppState, Phase};
 use crate::storage::VaultPaths;
@@ -61,7 +61,7 @@ fn main() {
     // taken in `resumed()` lands on the same handle `current_theme()`
     // reads (rather than a second one created lazily after startup).
     settings::signals();
-    shroud::app::system_theme_signal();
+    sindon::app::system_theme_signal();
 
     // UI text family for the Latin+CJK unification fix (dogfood 元#31: unstyled
     // text mixed a Latin substitute with a separate Japanese fallback, giving a

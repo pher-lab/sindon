@@ -11,7 +11,7 @@ WebView frameworks (Tauri) are fundamentally incompatible due to GC making deter
 
 This framework fills that gap: **the first UI framework where secret zeroization is a design-level guarantee**.
 
-**Framework name: `shroud`** — 覆い隠すもの。秘密を包み守る。
+**Framework name: `sindon`** — 覆い隠すもの。秘密を包み守る。
 
 ---
 
@@ -29,21 +29,21 @@ This framework fills that gap: **the first UI framework where secret zeroization
 
 ```
 ┌─────────────────────────────────────────┐
-│            Application (shroud_app)       │
+│            Application (sindon_app)       │
 ├─────────────────────────────────────────┤
-│            Widgets (shroud_widgets)       │
+│            Widgets (sindon_widgets)       │
 ├─────────────────────────────────────────┤
-│        Reactive System (shroud_reactive) │
+│        Reactive System (sindon_reactive) │
 ├──────────────────┬──────────────────────┤
-│ Text (shroud_text)│ Layout (shroud_layout)│
+│ Text (sindon_text)│ Layout (sindon_layout)│
 ├──────────────────┴──────────────────────┤
-│        Renderer (shroud_render)          │
+│        Renderer (sindon_render)          │
 ├─────────────────────────────────────────┤
-│      Platform (shroud_platform)          │
+│      Platform (sindon_platform)          │
 ├─────────────────────────────────────────┤
-│     Security Core (shroud_security)      │
+│     Security Core (sindon_security)      │
 ├─────────────────────────────────────────┤
-│       Core Types (shroud_core)           │
+│       Core Types (sindon_core)           │
 └─────────────────────────────────────────┘
 ```
 
@@ -54,19 +54,19 @@ Security Core sits at the base — every layer uses its types and guarantees.
 ## Crate Structure
 
 ```
-shroud/
+sindon/
 ├── Cargo.toml                    # Workspace root
 ├── crates/
-│   ├── shroud/                    # Facade crate (users depend on this)
-│   ├── shroud_core/               # Geometry, IDs, SecurityLevel, error types
-│   ├── shroud_security/           # SecureString, SecureArena, hardening, clipboard
-│   ├── shroud_reactive/           # Signal, SecureSignal, Memo, Effect, Scope
-│   ├── shroud_layout/             # Taffy integration, style builder
-│   ├── shroud_render/             # wgpu renderer, dual atlas, GPU cleanup
-│   ├── shroud_text/               # cosmic-text integration, SecureTextBuffer
-│   ├── shroud_widgets/            # Widget trait, core widgets, SecureInput
-│   ├── shroud_platform/           # winit, OS security APIs, clipboard, IME
-│   └── shroud_app/                # App trait, event loop, lifecycle, auto-lock
+│   ├── sindon/                    # Facade crate (users depend on this)
+│   ├── sindon_core/               # Geometry, IDs, SecurityLevel, error types
+│   ├── sindon_security/           # SecureString, SecureArena, hardening, clipboard
+│   ├── sindon_reactive/           # Signal, SecureSignal, Memo, Effect, Scope
+│   ├── sindon_layout/             # Taffy integration, style builder
+│   ├── sindon_render/             # wgpu renderer, dual atlas, GPU cleanup
+│   ├── sindon_text/               # cosmic-text integration, SecureTextBuffer
+│   ├── sindon_widgets/            # Widget trait, core widgets, SecureInput
+│   ├── sindon_platform/           # winit, OS security APIs, clipboard, IME
+│   └── sindon_app/                # App trait, event loop, lifecycle, auto-lock
 ├── examples/
 │   ├── hello_world/
 │   ├── secure_password_form/
@@ -78,15 +78,15 @@ shroud/
 ### Dependency Graph
 
 ```
-shroud (facade) ─→ shroud_app ─→ shroud_platform ─→ winit
-                             ─→ shroud_widgets ──→ shroud_render ──→ wgpu
-                                                ─→ shroud_text ───→ cosmic-text
-                                                ─→ shroud_layout ─→ taffy
-                                                ─→ shroud_reactive
-                             ─→ shroud_reactive ─→ shroud_security
-                                                ─→ shroud_core
-                             ─→ shroud_security ─→ zeroize, secrecy, memsec
-                             ─→ shroud_core     (no external deps)
+sindon (facade) ─→ sindon_app ─→ sindon_platform ─→ winit
+                             ─→ sindon_widgets ──→ sindon_render ──→ wgpu
+                                                ─→ sindon_text ───→ cosmic-text
+                                                ─→ sindon_layout ─→ taffy
+                                                ─→ sindon_reactive
+                             ─→ sindon_reactive ─→ sindon_security
+                                                ─→ sindon_core
+                             ─→ sindon_security ─→ zeroize, secrecy, memsec
+                             ─→ sindon_core     (no external deps)
 ```
 
 ### Feature Flags (workspace-level)
@@ -383,61 +383,61 @@ Hard crash (SIGSEGV): mlocked pages released by OS, OS zeroes physical pages bef
 ### Phase 1: Foundation (Weeks 1-4)
 **Milestone: Window with colored rectangle + SecureString zeroizes on drop**
 - [ ] Workspace setup, CI, all crate stubs
-- [ ] `shroud_core`: SecurityLevel, geometry, IDs
-- [ ] `shroud_security`: SecureString, SecureBuffer (SecretBox-based)
-- [ ] `shroud_security`: Core dump prevention
-- [ ] `shroud_platform`: winit window creation
-- [ ] `shroud_render`: wgpu init, clear screen, draw rect
-- [ ] `shroud_app`: Basic event loop
+- [ ] `sindon_core`: SecurityLevel, geometry, IDs
+- [ ] `sindon_security`: SecureString, SecureBuffer (SecretBox-based)
+- [ ] `sindon_security`: Core dump prevention
+- [ ] `sindon_platform`: winit window creation
+- [ ] `sindon_render`: wgpu init, clear screen, draw rect
+- [ ] `sindon_app`: Basic event loop
 - [ ] **Test**: SecureString zeroization (unsafe raw memory check after drop)
 
 ### Phase 2: Reactive Core (Weeks 5-7)
 **Milestone: Signal/Memo/Effect work, counter increments on click**
-- [ ] `shroud_reactive`: Signal<T>, Effect, auto-dependency tracking
-- [ ] `shroud_reactive`: Memo<T>, lazy evaluation
-- [ ] `shroud_reactive`: Scope, cleanup, batch updates
+- [ ] `sindon_reactive`: Signal<T>, Effect, auto-dependency tracking
+- [ ] `sindon_reactive`: Memo<T>, lazy evaluation
+- [ ] `sindon_reactive`: Scope, cleanup, batch updates
 - [ ] **Test**: diamond dependencies, conditional deps, scope cleanup
 
 ### Phase 3: Secure Reactive (Weeks 8-10)
 **Milestone: SecureSignal in mlocked arena, zeroization verified**
-- [ ] `shroud_security`: LockedRegion, SecureArena (bump + free list + size classes)
-- [ ] `shroud_reactive`: SecureSignal<T> backed by arena
-- [ ] `shroud_reactive`: SecureMemo<T>, security taint propagation
+- [ ] `sindon_security`: LockedRegion, SecureArena (bump + free list + size classes)
+- [ ] `sindon_reactive`: SecureSignal<T> backed by arena
+- [ ] `sindon_reactive`: SecureMemo<T>, security taint propagation
 - [ ] **Test**: arena alloc/dealloc, zeroize on set/drop, arena-full behavior
 
 ### Phase 4: Text Rendering (Weeks 11-14)
 **Milestone: "Hello World" renders, secure text renders and is zeroized**
-- [ ] `shroud_text`: FontSystem + SwashCache init
-- [ ] `shroud_text`: Text shaping pipeline, SecureTextBuffer
-- [ ] `shroud_render`: TextureAtlas (shelf packer, glyph upload)
-- [ ] `shroud_render`: SecureTextureAtlas (cleared per frame)
-- [ ] `shroud_render`: Text rendering pipeline (textured quads)
+- [ ] `sindon_text`: FontSystem + SwashCache init
+- [ ] `sindon_text`: Text shaping pipeline, SecureTextBuffer
+- [ ] `sindon_render`: TextureAtlas (shelf packer, glyph upload)
+- [ ] `sindon_render`: SecureTextureAtlas (cleared per frame)
+- [ ] `sindon_render`: Text rendering pipeline (textured quads)
 - [ ] **Test**: secure atlas empty after frame
 
 ### Phase 5: Layout + Widget Foundation (Weeks 15-18)
 **Milestone: Flexbox layout, Container/Text/Button widgets**
-- [ ] `shroud_layout`: TaffyTree integration, style builder
-- [ ] `shroud_widgets`: Widget trait, WidgetTree, contexts
-- [ ] `shroud_widgets`: Container, Text, Button
-- [ ] `shroud_widgets`: Event dispatch, hit testing, focus management
-- [ ] `shroud_app`: Wire layout + widgets into event loop
+- [ ] `sindon_layout`: TaffyTree integration, style builder
+- [ ] `sindon_widgets`: Widget trait, WidgetTree, contexts
+- [ ] `sindon_widgets`: Container, Text, Button
+- [ ] `sindon_widgets`: Event dispatch, hit testing, focus management
+- [ ] `sindon_app`: Wire layout + widgets into event loop
 - [ ] **Test**: layout correctness, event dispatch
 
 ### Phase 6: Secure Widgets (Weeks 19-22)
 **Milestone: Type a password in SecureInput, memory is secure**
-- [ ] `shroud_widgets`: SecureText, SecureInput
-- [ ] `shroud_platform`: Clipboard integration (read/write/auto-clear)
-- [ ] `shroud_platform`: IME bypass for secure input
-- [ ] `shroud_widgets`: SecurityLevel propagation
-- [ ] `shroud_app`: Auto-lock timer
+- [ ] `sindon_widgets`: SecureText, SecureInput
+- [ ] `sindon_platform`: Clipboard integration (read/write/auto-clear)
+- [ ] `sindon_platform`: IME bypass for secure input
+- [ ] `sindon_widgets`: SecurityLevel propagation
+- [ ] `sindon_app`: Auto-lock timer
 - [ ] **Test**: type into SecureInput, verify arena value, verify zeroization
 
 ### Phase 7: Display Protection (Weeks 23-25)
 **Milestone: Window invisible to screen capture**
-- [ ] `shroud_platform`: Windows `SetWindowDisplayAffinity`
-- [ ] `shroud_platform`: macOS `setSharingType`
-- [ ] `shroud_platform`: Linux (document limitations — no universal API)
-- [ ] `shroud_render`: GPU memory clear verification
+- [ ] `sindon_platform`: Windows `SetWindowDisplayAffinity`
+- [ ] `sindon_platform`: macOS `setSharingType`
+- [ ] `sindon_platform`: Linux (document limitations — no universal API)
+- [ ] `sindon_render`: GPU memory clear verification
 - [ ] **Test**: automated screenshot test (verify black/empty)
 
 ### Phase 8: Polish + Examples (Weeks 26-30)
@@ -461,7 +461,7 @@ Hard crash (SIGSEGV): mlocked pages released by OS, OS zeroes physical pages bef
 | **SecureArena fragmentation** | Medium | Size classes (64B/256B/1KB/4KB), >4KB falls back to individual memsec::malloc |
 | **winit event queue keystrokes** | Medium | Process events immediately. Maximum security: raw platform input APIs bypassing winit |
 | **Optimizer eliminates zeroize** | Low | `zeroize` uses write_volatile + fences. SecureArena also uses `memsec::memzero` as second layer. Integration tests verify post-drop memory |
-| **Cross-platform API gaps** | High | `shroud_platform` abstracts differences. `is_supported()` checks. Linux display protection is weakest — document clearly |
+| **Cross-platform API gaps** | High | `sindon_platform` abstracts differences. `is_supported()` checks. Linux display protection is weakest — document clearly |
 | **mlock limits** | Medium | Linux default 64KB. Document that `ulimit -l` must be raised. Arena uses single mlock for efficiency |
 
 ---
@@ -484,7 +484,7 @@ Hard crash (SIGSEGV): mlocked pages released by OS, OS zeroes physical pages bef
 
 ## Decisions Made
 
-1. **Framework name** — `shroud` (覆い隠すもの)
+1. **Framework name** — `sindon` (覆い隠すもの)
 2. **License** — 未定。開発を始めてから決定する
 3. **cosmic-text** — 最初からフォークして `set_text_secure()` を追加する
 4. **MSRV** — Stable最新のみ（nightly不要）。wgpu v29要求のRust 1.87+

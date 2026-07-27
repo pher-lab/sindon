@@ -20,11 +20,11 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use shroud::platform::FileDialog;
-use shroud::reactive::Reactive;
-use shroud::security::SecureString;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, ClearTrigger, Container, SecureInput, TextWidget};
+use sindon::platform::FileDialog;
+use sindon::reactive::Reactive;
+use sindon::security::SecureString;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, ClearTrigger, Container, SecureInput, TextWidget};
 use zeroize::Zeroizing;
 
 use crate::crypto::{derive_key, generate_dek, random_salt, recovery, wrap_dek};

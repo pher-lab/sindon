@@ -1,7 +1,7 @@
 //! form_controls_demo — Phase 44 Tier 1 form controls.
 //!
 //! A settings-shaped screen exercising the non-text form widgets that grew out
-//! of shroud's `Checkbox`-only inventory: `Switch` (and, as later commits land,
+//! of sindon's `Checkbox`-only inventory: `Switch` (and, as later commits land,
 //! `Slider`, `Segmented`, `RadioGroup`). Each is shown bound to a `Signal` so
 //! the two-way binding and the disabled variants can be eyeballed live.
 //!
@@ -10,15 +10,15 @@
 //! "Linked" switches share one signal, so toggling either slides both; the
 //! disabled pair stays dim and inert.
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::reactive::Signal;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, RadioGroup, Segmented, Slider, Switch, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::reactive::Signal;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, RadioGroup, Segmented, Slider, Switch, TextWidget};
 
 fn main() {
     App::new()
-        .title("shroud — form controls (Phase 44)")
+        .title("sindon — form controls (Phase 44)")
         .size(600, 980)
         .run(|_scope| {
             let mut tree = WidgetTree::new();

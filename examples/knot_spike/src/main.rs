@@ -1,6 +1,6 @@
-//! knot_spike — minimum viable port of the Knot notes app onto shroud.
+//! knot_spike — minimum viable port of the Knot notes app onto sindon.
 //!
-//! Goal: verify shroud can host the smallest end-to-end Knot flow:
+//! Goal: verify sindon can host the smallest end-to-end Knot flow:
 //! lock screen → derive key → decrypt → display 1 read-only note.
 //! Storage (SQLCipher) and editing are intentionally out of scope; a single
 //! plaintext note is encrypted in memory at startup so the spike exercises
@@ -24,12 +24,12 @@ use chacha20poly1305::{
 };
 use zeroize::Zeroizing;
 
-use shroud::app::App;
-use shroud::core::Rect;
-use shroud::reactive::{Reactive, Signal};
-use shroud::security::SecureString;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{
+use sindon::app::App;
+use sindon::core::Rect;
+use sindon::reactive::{Reactive, Signal};
+use sindon::security::SecureString;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{
     Button, Container, Dropdown, HAlign, LayerAnchor, LayerOptions, MenuItem, Placement,
     ScrollView, SecureInput, TextWidget,
 };
@@ -204,10 +204,10 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     // re-tint on every option click without rebuilding the screen.
     let tint = Signal::new(0_usize);
     let card_bg = Reactive::derive(move || match tint.get() {
-        1 => shroud::core::Color::rgb(0.10, 0.16, 0.20), // teal
-        2 => shroud::core::Color::rgb(0.18, 0.12, 0.20), // plum
-        3 => shroud::core::Color::rgb(0.10, 0.18, 0.12), // forest
-        _ => shroud::core::Color::rgb(0.12, 0.12, 0.18), // default
+        1 => sindon::core::Color::rgb(0.10, 0.16, 0.20), // teal
+        2 => sindon::core::Color::rgb(0.18, 0.12, 0.20), // plum
+        3 => sindon::core::Color::rgb(0.10, 0.18, 0.12), // forest
+        _ => sindon::core::Color::rgb(0.12, 0.12, 0.18), // default
     });
 
     // Right-click on the card → context menu with tint shortcuts. Phase 24
@@ -228,7 +228,7 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
                 let anchor = Rect::new(pos.x, pos.y, 0.0, 0.0);
                 let menu_root = Container::column()
                     .padding(4.0)
-                    .background(shroud::core::Color::rgb(0.15, 0.15, 0.18))
+                    .background(sindon::core::Color::rgb(0.15, 0.15, 0.18))
                     .radius(6.0);
                 ctx.push_layer(
                     LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
@@ -314,7 +314,7 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
             // single frame before the screen swap drains.
             AppPhase::Unlocked { .. } => "Unlocked \u{2014} opening note\u{2026}".into(),
         })
-        .color(shroud::core::Color::rgb(0.7, 0.7, 0.75)),
+        .color(sindon::core::Color::rgb(0.7, 0.7, 0.75)),
     );
 }
 
@@ -374,7 +374,7 @@ fn build_note_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
 
 fn main() {
     App::new()
-        .title("Knot \u{2014} shroud spike")
+        .title("Knot \u{2014} sindon spike")
         .size(720, 600)
         .capture_prevention(true)
         .run(|_scope| {

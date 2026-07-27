@@ -1,4 +1,4 @@
-//! vault — shroud's second grounding app, and a forcing function for list
+//! vault — sindon's second grounding app, and a forcing function for list
 //! virtualization.
 //!
 //! Knot (the first grounding) handles *few large* secret documents you edit in
@@ -9,8 +9,8 @@
 //! so a vault of hundreds of entries lays out every row every frame. The list
 //! here is a [`VirtualList`], which materializes
 //! only the visible window; `VAULT_PLAIN=1` switches back to the plain
-//! `ScrollView` as an A/B baseline (run either with `SHROUD_HUD=1` for the
-//! on-screen frame-timing readout, or `SHROUD_PERF=1` for the per-frame log —
+//! `ScrollView` as an A/B baseline (run either with `SINDON_HUD=1` for the
+//! on-screen frame-timing readout, or `SINDON_PERF=1` for the per-frame log —
 //! see `docs/perf.md`).
 //!
 //! Secret handling mirrors Knot: the master password never leaves a
@@ -33,13 +33,13 @@ use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use zeroize::Zeroizing;
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::platform::SecureClipboard;
-use shroud::security::SecureString;
-use shroud::widgets::shortcut::Shortcut;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, ScrollView, TextWidget, VirtualList};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::platform::SecureClipboard;
+use sindon::security::SecureString;
+use sindon::widgets::shortcut::Shortcut;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, ScrollView, TextWidget, VirtualList};
 
 use storage::{StoredEntry, VaultPaths, VaultStorage};
 
@@ -213,7 +213,7 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
 
     tree.add_child(
         root,
-        TextWidget::new("shroud \u{2014} Vault")
+        TextWidget::new("sindon \u{2014} Vault")
             .font_size(24.0)
             .color(HEADING),
     );
@@ -225,7 +225,7 @@ fn build_lock_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let unlock_state = Rc::clone(&state);
     tree.add_child(
         root,
-        shroud::widgets::SecureInput::new()
+        sindon::widgets::SecureInput::new()
             .placeholder("Enter master password, press Enter to unlock")
             .on_submit(move |master, ctx| {
                 try_unlock(&unlock_state, master);
@@ -263,7 +263,7 @@ fn build_vault_screen(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     let header = tree.add_child(root, Container::row().width_full().gap(12.0));
     tree.add_child(
         header,
-        TextWidget::new("shroud \u{2014} Vault")
+        TextWidget::new("sindon \u{2014} Vault")
             .font_size(22.0)
             .color(HEADING),
     );
@@ -390,7 +390,7 @@ fn main() {
     let salt = ensure_vault(&paths);
 
     App::new()
-        .title("shroud \u{2014} Vault")
+        .title("sindon \u{2014} Vault")
         .size(680, 620)
         // Kept off during the build so layout can be screenshotted; flip to
         // `true` for the shipping-secret posture (blacks out OS screen capture).

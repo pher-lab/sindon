@@ -214,7 +214,7 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 name = "animation_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -813,7 +813,7 @@ dependencies = [
 name = "clock"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -922,7 +922,7 @@ dependencies = [
 name = "counter"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -1043,7 +1043,7 @@ name = "dialog_settings_demo"
 version = "0.1.0"
 dependencies = [
  "serde",
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -1301,7 +1301,7 @@ dependencies = [
 name = "font_size_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -1358,7 +1358,7 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 name = "form_controls_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -1618,7 +1618,7 @@ dependencies = [
 name = "hello_world"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -1670,7 +1670,7 @@ dependencies = [
 name = "hover_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -1797,7 +1797,7 @@ name = "image_demo"
 version = "0.1.0"
 dependencies = [
  "image",
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -1957,7 +1957,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "shroud",
+ "sindon",
  "zeroize",
 ]
 
@@ -1965,7 +1965,7 @@ dependencies = [
 name = "knot_clone"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -1974,7 +1974,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
- "shroud",
+ "sindon",
  "zeroize",
 ]
 
@@ -2084,7 +2084,7 @@ name = "markdown_demo"
 version = "0.1.0"
 dependencies = [
  "pulldown-cmark",
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -2136,7 +2136,7 @@ dependencies = [
 name = "modal_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -2250,7 +2250,7 @@ dependencies = [
 name = "number_input_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -2691,7 +2691,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
- "shroud",
+ "sindon",
  "zeroize",
 ]
 
@@ -2932,7 +2932,7 @@ checksum = "3eb8486b569e12e2c32ad3e204dbaba5e4b5b216e9367044f25f1dba42341773"
 name = "progress_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -3298,7 +3298,7 @@ dependencies = [
 name = "secure_password_form"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -3385,142 +3385,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
-name = "shroud"
-version = "0.1.0"
-dependencies = [
- "shroud_app",
- "shroud_core",
- "shroud_layout",
- "shroud_platform",
- "shroud_reactive",
- "shroud_render",
- "shroud_security",
- "shroud_text",
- "shroud_widgets",
-]
-
-[[package]]
-name = "shroud_app"
-version = "0.1.0"
-dependencies = [
- "accesskit",
- "accesskit_winit",
- "log",
- "pollster",
- "shroud_core",
- "shroud_layout",
- "shroud_platform",
- "shroud_reactive",
- "shroud_render",
- "shroud_security",
- "shroud_text",
- "shroud_widgets",
- "winit",
-]
-
-[[package]]
-name = "shroud_core"
-version = "0.1.0"
-dependencies = [
- "slotmap",
-]
-
-[[package]]
-name = "shroud_layout"
-version = "0.1.0"
-dependencies = [
- "shroud_core",
- "taffy",
-]
-
-[[package]]
-name = "shroud_platform"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "dirs",
- "log",
- "raw-window-handle",
- "rfd",
- "serde",
- "serde_json",
- "shroud_core",
- "shroud_security",
- "sys-locale",
- "windows 0.61.3",
- "winit",
- "zeroize",
-]
-
-[[package]]
-name = "shroud_reactive"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "log",
- "shroud_core",
- "shroud_security",
- "slotmap",
- "zeroize",
-]
-
-[[package]]
-name = "shroud_render"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "image",
- "log",
- "moxcms",
- "shroud_core",
- "shroud_security",
- "shroud_text",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "shroud_security"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "libc",
- "log",
- "memsec",
- "secrecy",
- "shroud_core",
- "subtle",
- "windows 0.61.3",
- "zeroize",
-]
-
-[[package]]
-name = "shroud_text"
-version = "0.1.0"
-dependencies = [
- "cosmic-text",
- "shroud_core",
- "shroud_security",
- "windows 0.61.3",
-]
-
-[[package]]
-name = "shroud_widgets"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "image",
- "shroud_core",
- "shroud_layout",
- "shroud_reactive",
- "shroud_render",
- "shroud_security",
- "shroud_text",
- "windows 0.61.3",
- "zeroize",
-]
-
-[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3551,6 +3415,142 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "sindon"
+version = "0.1.0"
+dependencies = [
+ "sindon_app",
+ "sindon_core",
+ "sindon_layout",
+ "sindon_platform",
+ "sindon_reactive",
+ "sindon_render",
+ "sindon_security",
+ "sindon_text",
+ "sindon_widgets",
+]
+
+[[package]]
+name = "sindon_app"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "accesskit_winit",
+ "log",
+ "pollster",
+ "sindon_core",
+ "sindon_layout",
+ "sindon_platform",
+ "sindon_reactive",
+ "sindon_render",
+ "sindon_security",
+ "sindon_text",
+ "sindon_widgets",
+ "winit",
+]
+
+[[package]]
+name = "sindon_core"
+version = "0.1.0"
+dependencies = [
+ "slotmap",
+]
+
+[[package]]
+name = "sindon_layout"
+version = "0.1.0"
+dependencies = [
+ "sindon_core",
+ "taffy",
+]
+
+[[package]]
+name = "sindon_platform"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "dirs",
+ "log",
+ "raw-window-handle",
+ "rfd",
+ "serde",
+ "serde_json",
+ "sindon_core",
+ "sindon_security",
+ "sys-locale",
+ "windows 0.61.3",
+ "winit",
+ "zeroize",
+]
+
+[[package]]
+name = "sindon_reactive"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "log",
+ "sindon_core",
+ "sindon_security",
+ "slotmap",
+ "zeroize",
+]
+
+[[package]]
+name = "sindon_render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "image",
+ "log",
+ "moxcms",
+ "sindon_core",
+ "sindon_security",
+ "sindon_text",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "sindon_security"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "libc",
+ "log",
+ "memsec",
+ "secrecy",
+ "sindon_core",
+ "subtle",
+ "windows 0.61.3",
+ "zeroize",
+]
+
+[[package]]
+name = "sindon_text"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "sindon_core",
+ "sindon_security",
+ "windows 0.61.3",
+]
+
+[[package]]
+name = "sindon_widgets"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "image",
+ "sindon_core",
+ "sindon_layout",
+ "sindon_reactive",
+ "sindon_render",
+ "sindon_security",
+ "sindon_text",
+ "windows 0.61.3",
+ "zeroize",
+]
 
 [[package]]
 name = "siphasher"
@@ -3642,7 +3642,7 @@ dependencies = [
 name = "split_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -3715,7 +3715,7 @@ dependencies = [
 name = "system_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -3756,14 +3756,14 @@ dependencies = [
 name = "textarea_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
 name = "theme_swap_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -3884,7 +3884,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 name = "toast_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -3952,7 +3952,7 @@ dependencies = [
 name = "tree_demo"
 version = "0.1.0"
 dependencies = [
- "shroud",
+ "sindon",
 ]
 
 [[package]]
@@ -4085,7 +4085,7 @@ dependencies = [
  "argon2",
  "chacha20poly1305",
  "rusqlite",
- "shroud",
+ "sindon",
  "zeroize",
 ]
 

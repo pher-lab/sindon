@@ -27,18 +27,18 @@
 
 use std::time::Duration;
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::reactive::{Animated, Easing, Signal};
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::reactive::{Animated, Easing, Signal};
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, TextWidget};
 
 /// Transition length for every animation in the demo.
 const DURATION: Duration = Duration::from_millis(450);
 
 fn main() {
     App::new()
-        .title("shroud — animation / transition demo")
+        .title("sindon — animation / transition demo")
         .size(680, 720)
         .run(|_scope| {
             // The two endpoints every swatch tweens between.

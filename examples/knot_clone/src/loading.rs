@@ -16,9 +16,9 @@
 //! UI-only clone: purely static (no vault check to run). Reached via the
 //! dev-nav shortcut in `main.rs` (Ctrl+1).
 
-use shroud::text::FontWeight;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, TextWidget};
+use sindon::text::FontWeight;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, TextWidget};
 
 use crate::tokens;
 

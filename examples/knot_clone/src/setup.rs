@@ -28,11 +28,11 @@
 //! (mirroring the real `setup → unlocked`). The screen is reached via the
 //! dev-nav shortcut wired in `main.rs` (Ctrl+2).
 
-use shroud::core::Color;
-use shroud::reactive::Reactive;
-use shroud::text::FontWeight;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Checkbox, Container, SecureInput, TextWidget};
+use sindon::core::Color;
+use sindon::reactive::Reactive;
+use sindon::text::FontWeight;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Checkbox, Container, SecureInput, TextWidget};
 
 use crate::tokens;
 
@@ -137,7 +137,7 @@ pub fn build(tree: &mut WidgetTree) {
             .min_height(48.0),
     );
 
-    // Recovery-key checkbox (`flex items-center gap-3`). The shroud Checkbox
+    // Recovery-key checkbox (`flex items-center gap-3`). The sindon Checkbox
     // bundles its own box + label; the check fill takes a static Color (G12),
     // so we leave it on the theme default (primary blue when checked).
     tree.add_child(

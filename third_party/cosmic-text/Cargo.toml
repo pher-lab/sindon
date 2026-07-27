@@ -189,7 +189,7 @@ version = "0.5.8"
 [dependencies.unicode-segmentation]
 version = "1.12.0"
 
-# shroud fork: zeroize BufferLine's plaintext buffer on drop/overwrite so the
+# sindon fork: zeroize BufferLine's plaintext buffer on drop/overwrite so the
 # SecureText shape path leaves no un-zeroed plaintext residue. `alloc` feature
 # provides `Zeroize for String`. Kept no_std-compatible (no forced `std`).
 [dependencies.zeroize]

@@ -35,7 +35,7 @@
 //! **Slice 3: the overlays.** The settings dropdown (gear), the actions
 //! dropdown (⋮), the note-row right-click context menu, and the error banner.
 //! These are all `absolute`/`fixed` in React, so the slice is the deliberate
-//! **G5 verification** — can shroud's `Layer` + anchor reproduce them?
+//! **G5 verification** — can sindon's `Layer` + anchor reproduce them?
 //!
 //! Findings (logged in `docs/knot-ui-repro-gaps.md` under G5). Slice 3 surfaced
 //! three shortfalls; **all three are now resolved by FW-21** and the clone uses
@@ -74,13 +74,13 @@
 //! and "`Container` has no `min_width`" notes are resolved — see
 //! [`MenuItem::disabled`] and [`Container::min_width`].)
 
-use shroud::core::{Color, Point, Rect};
-use shroud::layout::Justify;
-use shroud::reactive::{Reactive, Signal};
-use shroud::text::FontWeight;
-use shroud::widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement, VAlign};
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{
+use sindon::core::{Color, Point, Rect};
+use sindon::layout::Justify;
+use sindon::reactive::{Reactive, Signal};
+use sindon::text::FontWeight;
+use sindon::widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement, VAlign};
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{
     Button, Container, Dropdown, EventContext, Input, MenuItem, ScrollView, TextWidget,
 };
 
@@ -564,7 +564,7 @@ fn editor_status_bar(tree: &mut WidgetTree, parent: usize) {
 
 /// Editor-pane background: `bg-gray-50 dark:bg-gray-900` (lighter than the
 /// sidebar's `panel()` and distinct from the window `background()`).
-fn editor_bg() -> shroud::reactive::Reactive<Color> {
+fn editor_bg() -> sindon::reactive::Reactive<Color> {
     tokens::pick(tokens::gray_50(), tokens::gray_900())
 }
 
@@ -576,7 +576,7 @@ fn flat_icon_button(
     parent: usize,
     glyph: &str,
     radius: f32,
-    text_color: shroud::reactive::Reactive<Color>,
+    text_color: sindon::reactive::Reactive<Color>,
 ) {
     tree.add_child(
         parent,
@@ -608,25 +608,25 @@ fn toolbar_rule(tree: &mut WidgetTree, parent: usize) {
 // --- shared chrome helpers ------------------------------------------------
 
 /// Sidebar panel background: `bg-gray-200 dark:bg-gray-800`.
-fn panel() -> shroud::reactive::Reactive<Color> {
+fn panel() -> sindon::reactive::Reactive<Color> {
     tokens::pick(tokens::gray_200(), tokens::gray_800())
 }
 
 /// Divider / border color: `border-gray-300 dark:border-gray-700`.
-fn border() -> shroud::reactive::Reactive<Color> {
+fn border() -> sindon::reactive::Reactive<Color> {
     tokens::pick(tokens::gray_300(), tokens::gray_700())
 }
 
 /// Icon-button foreground: `text-gray-600 dark:text-gray-400`. Distinct from
 /// `tokens::muted()` (gray-500) — the muted shade reads too faint for glyphs.
-fn icon_fg() -> shroud::reactive::Reactive<Color> {
+fn icon_fg() -> sindon::reactive::Reactive<Color> {
     tokens::pick(tokens::gray_600(), tokens::gray_400())
 }
 
 // --- Overlays (slice 3) ------------------------------------------------------
 //
 // All four overlays are `absolute`/`fixed` in React; this slice reproduces them
-// with `Layer`s to verify how far shroud's anchors stretch (gap G5). See the
+// with `Layer`s to verify how far sindon's anchors stretch (gap G5). See the
 // module doc for the findings. Shared chrome: popovers are `bg-white
 // dark:bg-gray-700` panels with a `rounded-lg` `border-gray-200/600`; menus use
 // `bg-white dark:bg-gray-800`.

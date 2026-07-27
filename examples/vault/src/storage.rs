@@ -7,10 +7,10 @@
 //! secret, and keeping them plain lets the list render without unsealing every
 //! row.
 //!
-//! On-disk layout (under [`shroud::platform::storage::config_dir`]):
+//! On-disk layout (under [`sindon::platform::storage::config_dir`]):
 //!
 //! ```text
-//! config/shroud-vault/
+//! config/sindon-vault/
 //!   vault.db    — SQLCipher 4 database, page-encrypted under the master key
 //!   vault.salt  — 32 raw bytes, the Argon2 salt (needed to derive the key
 //!                 *before* the DB can be opened, so it lives beside it)
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, params};
 use zeroize::Zeroize;
 
-const APP_NAME: &str = "shroud-vault";
+const APP_NAME: &str = "sindon-vault";
 const DB_FILENAME: &str = "vault.db";
 const SALT_FILENAME: &str = "vault.salt";
 
@@ -53,10 +53,10 @@ pub struct VaultPaths {
 }
 
 impl VaultPaths {
-    /// Resolve to `<config>/shroud-vault/`. `None` if the platform can't report
+    /// Resolve to `<config>/sindon-vault/`. `None` if the platform can't report
     /// a config dir (at which point the caller can't persist).
     pub fn default_for_app() -> Option<Self> {
-        let dir = shroud::platform::storage::config_dir(APP_NAME).ok()?;
+        let dir = sindon::platform::storage::config_dir(APP_NAME).ok()?;
         Some(Self {
             db: dir.join(DB_FILENAME),
             salt: dir.join(SALT_FILENAME),
@@ -251,7 +251,7 @@ mod tests {
     fn tmp_db() -> PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!(
-            "shroud-vault-test-{}-{}.db",
+            "sindon-vault-test-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -7,22 +7,22 @@
 //!
 //! The chosen language is a non-secret setting, so it lives next to theme /
 //! font-size in [`crate::settings`] (the persisted [`Language`] field +
-//! its live [`shroud::reactive::Signal`]). This module owns only the
+//! its live [`sindon::reactive::Signal`]). This module owns only the
 //! translation *tables* and the lookup ([`tr`]); the signal it reads is
 //! [`crate::settings::signals`]`().language`.
 //!
 //! Switching language is **live**, exactly like a theme swap: every visible
 //! string is rendered through a reactive constructor
-//! ([`shroud::widgets::TextWidget::reactive`] /
-//! [`shroud::widgets::Button::reactive_label`] /
-//! [`shroud::widgets::Input::reactive_placeholder`]) whose closure calls
+//! ([`sindon::widgets::TextWidget::reactive`] /
+//! [`sindon::widgets::Button::reactive_label`] /
+//! [`sindon::widgets::Input::reactive_placeholder`]) whose closure calls
 //! [`tr`] on each paint, so flipping the setting re-renders the UI without a
 //! tree rebuild.
 //!
 //! Screens that can only be reached *after* a language change — lock, setup,
 //! recovery, change-password — build fresh anyway (the setting lives in the
 //! main screen's settings modal), so their placeholders stay on the one-shot
-//! [`shroud::widgets::SecureInput::placeholder`]. Fields that share the
+//! [`sindon::widgets::SecureInput::placeholder`]. Fields that share the
 //! screen with the modal use the reactive form.
 //!
 //! ## Usage
@@ -66,7 +66,7 @@ fn resolved() -> Lang {
     match crate::settings::signals().language.get() {
         Language::Ja => Lang::Ja,
         Language::En => Lang::En,
-        Language::System => match shroud::platform::system_locale() {
+        Language::System => match sindon::platform::system_locale() {
             Some(tag) if tag.to_ascii_lowercase().starts_with("ja") => Lang::Ja,
             _ => Lang::En,
         },

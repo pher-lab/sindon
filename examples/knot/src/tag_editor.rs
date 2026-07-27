@@ -21,10 +21,10 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use shroud::core::Color;
-use shroud::reactive::{Reactive, Signal};
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, EventContext, Input, TextWidget};
+use sindon::core::Color;
+use sindon::reactive::{Reactive, Signal};
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, EventContext, Input, TextWidget};
 
 use crate::i18n::{self, Key};
 use crate::settings;

@@ -14,11 +14,11 @@
 //! This is a UI-only clone: the submit just navigates to a placeholder main
 //! screen. Friction encountered while building this is logged as it surfaces.
 
-use shroud::core::Color;
-use shroud::reactive::Signal;
-use shroud::text::FontWeight;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, SecureInput, TextWidget};
+use sindon::core::Color;
+use sindon::reactive::Signal;
+use sindon::text::FontWeight;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, SecureInput, TextWidget};
 
 use crate::tokens;
 

@@ -1,5 +1,5 @@
 //! Knot UI clone — a UI-only reproduction of the React/Tailwind Knot app,
-//! built to surface where shroud's visual vocabulary falls short.
+//! built to surface where sindon's visual vocabulary falls short.
 //!
 //! See `docs/knot-ui-repro-gaps.md` for the running gap log. No crypto / DB:
 //! screens use dummy data and navigate by `replace_screen`. Ctrl+D toggles
@@ -13,10 +13,10 @@ mod setup;
 mod tokens;
 mod unlock;
 
-use shroud::app::App;
-use shroud::reactive::Reactive;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Key, Modifiers, Shortcut};
+use sindon::app::App;
+use sindon::reactive::Reactive;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Key, Modifiers, Shortcut};
 
 fn main() {
     App::new()

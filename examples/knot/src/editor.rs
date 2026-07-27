@@ -12,11 +12,11 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::rc::Rc;
 
-use shroud::core::Color;
-use shroud::platform::FileDialog;
-use shroud::reactive::{Reactive, Signal};
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, Image, Input, ReactiveChildren, ScrollView, TextWidget};
+use sindon::core::Color;
+use sindon::platform::FileDialog;
+use sindon::reactive::{Reactive, Signal};
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, Image, Input, ReactiveChildren, ScrollView, TextWidget};
 
 use crate::backlinks;
 use crate::find_replace;

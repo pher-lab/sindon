@@ -12,7 +12,7 @@
 //! the same at-rest protection as the note text, while the body stays small
 //! and editable in plain text.
 //!
-//! Layout on disk (under [`shroud::platform::storage::config_dir`]):
+//! Layout on disk (under [`sindon::platform::storage::config_dir`]):
 //!
 //! ```text
 //! config/knot/
@@ -70,7 +70,7 @@ impl VaultPaths {
     /// dir — at which point persistence is unavailable and the caller
     /// falls back to in-memory mode.
     pub fn default_for_app() -> Option<Self> {
-        let dir = shroud::platform::storage::config_dir(APP_NAME).ok()?;
+        let dir = sindon::platform::storage::config_dir(APP_NAME).ok()?;
         Some(Self {
             db: dir.join(DB_FILENAME),
             salt: dir.join(SALT_FILENAME),
@@ -165,7 +165,7 @@ impl VaultPaths {
 
     /// Write `bytes` to `path` atomically via a `.tmp` sibling + `rename`, so a
     /// reader (or a crash) never sees a partially written file. Mirrors
-    /// [`shroud::platform::storage::write_json_atomic`]; on all three OSes
+    /// [`sindon::platform::storage::write_json_atomic`]; on all three OSes
     /// `rename` over an existing file on the same volume is atomic.
     fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
         if let Some(parent) = path.parent() {

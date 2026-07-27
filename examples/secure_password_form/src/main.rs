@@ -1,4 +1,4 @@
-//! Secure Password Form — flagship shroud example.
+//! Secure Password Form — flagship sindon example.
 //!
 //! Demonstrates the full security pipeline:
 //! - SecureInput: characters go directly into SecureString (no String intermediary)
@@ -13,14 +13,14 @@
 //! 3. Click "Login" or press Enter
 //! 4. Take a screenshot — the window should appear black (Windows)
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, SecureInput, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, SecureInput, TextWidget};
 
 fn main() {
     App::new()
-        .title("shroud \u{2014} Secure Password Form")
+        .title("sindon \u{2014} Secure Password Form")
         .size(600, 500)
         .capture_prevention(true)
         .run(|_scope| {
@@ -38,7 +38,7 @@ fn main() {
             // Title — uses primary accent color
             tree.add_child(
                 form,
-                TextWidget::new("shroud")
+                TextWidget::new("sindon")
                     .font_size(28.0)
                     .color(Color::rgb(0.4, 0.5, 0.9)),
             );
@@ -71,7 +71,7 @@ fn main() {
             // Security notice
             tree.add_child(
                 form,
-                TextWidget::new("Protected by shroud \u{2014} zeroize on drop"),
+                TextWidget::new("Protected by sindon \u{2014} zeroize on drop"),
             );
 
             tree

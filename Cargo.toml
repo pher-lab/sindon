@@ -1,16 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/shroud",
-    "crates/shroud_core",
-    "crates/shroud_security",
-    "crates/shroud_reactive",
-    "crates/shroud_layout",
-    "crates/shroud_render",
-    "crates/shroud_text",
-    "crates/shroud_widgets",
-    "crates/shroud_platform",
-    "crates/shroud_app",
+    "crates/sindon",
+    "crates/sindon_core",
+    "crates/sindon_security",
+    "crates/sindon_reactive",
+    "crates/sindon_layout",
+    "crates/sindon_render",
+    "crates/sindon_text",
+    "crates/sindon_widgets",
+    "crates/sindon_platform",
+    "crates/sindon_app",
     "examples/animation_demo",
     "examples/clock",
     "examples/counter",
@@ -42,6 +42,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pher-lab/sindon"
 
 [workspace.dependencies]
 # External
@@ -74,21 +76,21 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Internal
-shroud_core = { path = "crates/shroud_core" }
-shroud_security = { path = "crates/shroud_security" }
-shroud_reactive = { path = "crates/shroud_reactive" }
-shroud_layout = { path = "crates/shroud_layout" }
-shroud_render = { path = "crates/shroud_render" }
-shroud_text = { path = "crates/shroud_text" }
-shroud_widgets = { path = "crates/shroud_widgets" }
-shroud_platform = { path = "crates/shroud_platform" }
-shroud_app = { path = "crates/shroud_app" }
+sindon_core = { path = "crates/sindon_core" }
+sindon_security = { path = "crates/sindon_security" }
+sindon_reactive = { path = "crates/sindon_reactive" }
+sindon_layout = { path = "crates/sindon_layout" }
+sindon_render = { path = "crates/sindon_render" }
+sindon_text = { path = "crates/sindon_text" }
+sindon_widgets = { path = "crates/sindon_widgets" }
+sindon_platform = { path = "crates/sindon_platform" }
+sindon_app = { path = "crates/sindon_app" }
 
 # Fork of cosmic-text 0.18.2 vendored under third_party/. Two changes, each
-# marked `// shroud fork:` in the source:
+# marked `// sindon fork:` in the source:
 #   1. A drop-zeroize on BufferLine's plaintext buffer so SecureText's transient
 #      shape path leaves no un-zeroed plaintext residue on the heap (the
-#      framework's zeroize-first promise; see crates/shroud_text/src/lib.rs).
+#      framework's zeroize-first promise; see crates/sindon_text/src/lib.rs).
 #   2. `set_rich_text` re-adds the trailing empty line that `set_text` keeps,
 #      which upstream drops via `BidiParagraphs` — so the plain and rich shape
 #      paths agree on line count / height / caret for text ending in a newline.

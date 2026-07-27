@@ -11,10 +11,10 @@
 //! - each region clips its content to its box (nothing bleeds across a divider);
 //! - releasing the mouse off the thin handle still ends the drag cleanly.
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, SplitPane, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, SplitPane, TextWidget};
 
 const BG: Color = Color::rgb(0.10, 0.11, 0.15);
 const SIDEBAR: Color = Color::rgb(0.13, 0.14, 0.19);
@@ -40,7 +40,7 @@ fn panel(tree: &mut WidgetTree, pane: usize, bg: Color, title: &str, body: &str)
 
 fn main() {
     App::new()
-        .title("shroud — split panes (Tier 2)")
+        .title("sindon — split panes (Tier 2)")
         .size(760, 520)
         .run(|_scope| {
             let mut tree = WidgetTree::new();

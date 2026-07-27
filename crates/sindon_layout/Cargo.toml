@@ -1,0 +1,12 @@
+[package]
+name = "sindon_layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Layout engine for the sindon UI framework"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sindon_core = { workspace = true }
+taffy = { workspace = true }

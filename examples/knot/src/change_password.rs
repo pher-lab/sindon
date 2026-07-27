@@ -37,10 +37,10 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use shroud::reactive::{Reactive, Signal};
-use shroud::security::SecureString;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, ClearTrigger, Container, SecureInput, TextWidget};
+use sindon::reactive::{Reactive, Signal};
+use sindon::security::SecureString;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, ClearTrigger, Container, SecureInput, TextWidget};
 
 use crate::crypto::{derive_key, unwrap_dek, wrap_dek};
 use crate::i18n::{self, Key};

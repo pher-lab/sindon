@@ -12,18 +12,18 @@
 //!   updates because no platform reports locale changes mid-process.
 //!
 //! Resolving these into the actual visual theme / shipped language is
-//! up to the app — shroud's `App::theme(...)` is still set at build
+//! up to the app — sindon's `App::theme(...)` is still set at build
 //! time. The detection signal is what makes "system" mode possible.
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::platform::SystemTheme;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::platform::SystemTheme;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, TextWidget};
 
 fn main() {
     App::new()
-        .title("shroud \u{2014} system theme/locale demo (Phase 29)")
+        .title("sindon \u{2014} system theme/locale demo (Phase 29)")
         .size(600, 320)
         .run(|scope| {
             let os_theme = scope.system_theme();

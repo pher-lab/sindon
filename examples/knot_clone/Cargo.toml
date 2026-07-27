@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish = false
 
 # UI-only reproduction of the React/Tailwind Knot app. No crypto / DB — the
-# point is to写経 the *screens* and surface where shroud's visual vocabulary
-# falls short (see docs/knot-ui-repro-gaps.md). Depends on nothing but shroud.
+# point is to写経 the *screens* and surface where sindon's visual vocabulary
+# falls short (see docs/knot-ui-repro-gaps.md). Depends on nothing but sindon.
 [dependencies]
-shroud = { path = "../../crates/shroud" }
+sindon = { path = "../../crates/sindon" }

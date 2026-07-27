@@ -36,11 +36,11 @@
 //! - Narrator's own item commands (scan mode, or "expand"/"collapse") operate the
 //!   tree without the keyboard cursor and selection drifting apart.
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::reactive::Signal;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, ScrollView, TextWidget, TreeItem, TreeView};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::reactive::Signal;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, ScrollView, TextWidget, TreeItem, TreeView};
 
 const BG: Color = Color::rgb(0.10, 0.11, 0.15);
 const PANEL: Color = Color::rgb(0.13, 0.14, 0.19);
@@ -120,7 +120,7 @@ fn main() {
     let selected = Signal::new(None::<u64>);
 
     App::new()
-        .title("shroud — tree view (Tier 2)")
+        .title("sindon — tree view (Tier 2)")
         .size(420, 560)
         .run(move |_scope| {
             let mut tree = WidgetTree::new();

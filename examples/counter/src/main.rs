@@ -15,15 +15,15 @@
 //!   on odd counts and disappears (with its child TextWidget via cascade) on
 //!   even counts.
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::reactive::{Reactive, Signal};
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Button, Container, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::reactive::{Reactive, Signal};
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Button, Container, TextWidget};
 
 fn main() {
     App::new()
-        .title("shroud — counter")
+        .title("sindon — counter")
         .size(400, 300)
         .run(|_scope| {
             // A reactive signal. `Signal<T>` is `Copy`, so moving it into

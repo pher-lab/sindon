@@ -9,7 +9,7 @@
 //! [`show`]) clears it.
 //!
 //! Backed by a thread-local [`Signal`], mirroring `settings::signals` and
-//! `shroud::app::system_theme_signal` — the UI runs single-threaded on the
+//! `sindon::app::system_theme_signal` — the UI runs single-threaded on the
 //! event-loop thread, so a thread-local is the natural shared slot and lets
 //! any module raise a notice without threading a handle through every builder.
 //! Messages are non-secret (error summaries, never note contents), so a plain
@@ -17,7 +17,7 @@
 
 use std::cell::OnceCell;
 
-use shroud::reactive::Signal;
+use sindon::reactive::Signal;
 
 thread_local! {
     /// The current banner message, or `None` when nothing is showing. Lazily

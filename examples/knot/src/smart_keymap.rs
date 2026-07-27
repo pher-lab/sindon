@@ -16,7 +16,7 @@
 //!     typed on the line yet) deletes the whole marker in one stroke, keeping
 //!     any indentation.
 
-use shroud::widgets::KeyEdit;
+use sindon::widgets::KeyEdit;
 
 /// Byte range `[start, end)` of the hard (`\n`-separated) line containing
 /// `cursor`. `start` is just after the preceding newline (or 0); `end` is the

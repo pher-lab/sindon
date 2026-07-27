@@ -1,4 +1,4 @@
-//! Markdown preview — render a note body into a shroud widget tree.
+//! Markdown preview — render a note body into a sindon widget tree.
 //!
 //! This is the B-2 "app piece": the framework grew everything the spike
 //! needed (rich inline text + `flex_wrap` + `flex_basis` + ScrollView auto
@@ -64,12 +64,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use shroud::core::Color;
-use shroud::reactive::{Reactive, Signal};
-use shroud::render::DecodedImage;
-use shroud::text::TextSpan;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, EventContext, Image, TextWidget};
+use sindon::core::Color;
+use sindon::reactive::{Reactive, Signal};
+use sindon::render::DecodedImage;
+use sindon::text::TextSpan;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, EventContext, Image, TextWidget};
 
 use crate::highlight::{self, TokenClass};
 use crate::i18n::{self, Key};
@@ -1133,9 +1133,9 @@ fn is_external_web_link(target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shroud::core::Theme;
-    use shroud::text::TextEngine;
-    use shroud::widgets::Container;
+    use sindon::core::Theme;
+    use sindon::text::TextEngine;
+    use sindon::widgets::Container;
 
     /// Build `source` into a content column and lay it out, returning the tree
     /// plus the content-column index. Exercises the full parse → widget →

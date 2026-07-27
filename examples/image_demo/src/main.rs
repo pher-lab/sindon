@@ -13,10 +13,10 @@
 //! - **None**: image at intrinsic size, centered (clipped if too big).
 //! - **Tinted**: 50% alpha tint fades the image.
 
-use shroud::app::App;
-use shroud::core::Color;
-use shroud::widgets::tree::WidgetTree;
-use shroud::widgets::{Container, Image, ImageFit, TextWidget};
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, Image, ImageFit, TextWidget};
 
 fn make_gradient_png(width: u32, height: u32) -> Vec<u8> {
     // Cyan → magenta linear gradient with a diagonal red bar to make
@@ -69,7 +69,7 @@ fn label(text: &str) -> TextWidget {
 
 fn main() {
     App::new()
-        .title("shroud — image rendering demo")
+        .title("sindon — image rendering demo")
         .size(900, 640)
         .run(|_scope| {
             // 64 wide x 96 tall PNG, JPEG checker 64x64.
