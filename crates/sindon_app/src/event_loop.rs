@@ -1942,7 +1942,13 @@ impl ApplicationHandler<AppEvent> for SindonEventLoop {
                 // that opens a tooltip layer), so lay out once more before
                 // painting; this costs a second pass only on the rare frame
                 // where a pop actually changed what is hovered.
-                if tree.resync_hover(&mut self.event_ctx) {
+                // A pending hover tooltip whose delay has elapsed pushes its
+                // bubble here. Folded into the same condition as the hover
+                // resync: either can add a layer that has no geometry yet, and
+                // one extra layout pass covers both.
+                let hover_changed = tree.resync_hover(&mut self.event_ctx);
+                let tip_shown = tree.sync_tooltips();
+                if hover_changed || tip_shown {
                     tree.compute_layout_with_measure(
                         size.0,
                         size.1,

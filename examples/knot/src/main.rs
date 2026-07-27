@@ -40,7 +40,6 @@ mod state;
 mod storage;
 mod tag_editor;
 mod toolbar;
-mod tooltip;
 mod vault_screen;
 
 use std::cell::RefCell;
@@ -100,10 +99,6 @@ fn main() {
             //      button, driven by inactivity instead of a click.
             let state_for_tick = Rc::clone(&state);
             scope.on_frame(move |ctx| {
-                // Hover-tooltip poll (FW-13): shows a tip once the cursor has
-                // rested on a trigger past its delay. Cheap when idle.
-                tooltip::tick(ctx);
-
                 if let Err(e) = state_for_tick.borrow_mut().flush_dirty() {
                     // Surface to the banner (it also logs) so the user knows
                     // their last edits haven't reached disk — not just stderr.

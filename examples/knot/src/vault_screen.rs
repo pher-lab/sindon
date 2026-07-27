@@ -25,7 +25,6 @@ use crate::sidebar;
 use crate::sidebar::SidebarRefresh;
 use crate::state::{AppState, Phase};
 use crate::tag_editor::TagRefresh;
-use crate::tooltip;
 
 pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     // Seed the editor signals from the initially-selected note (which
@@ -52,13 +51,6 @@ pub fn build(tree: &mut WidgetTree, state: Rc<RefCell<AppState>>) {
     // Clear any banner left over from a previous unlocked session so a stale
     // error doesn't greet the user on re-entry.
     notice::dismiss();
-
-    // Drop any stale tooltip state. The only way a tip outlives its trigger is
-    // a non-click `replace_screen` while it was up — i.e. an auto-lock — which
-    // tears down its layer but leaves the controller's `shown` flag set; reset
-    // here so tips work again after the next unlock. (User-driven teardowns are
-    // preceded by the cursor move that already dismissed the tip.)
-    tooltip::reset();
 
     // Root is a column: a dismissable error banner across the top (collapsed to
     // zero height when there's nothing to show), then the main content row

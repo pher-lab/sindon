@@ -1,5 +1,6 @@
 //! Text widget — renders a text string.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 
 use crate::event::{EventContext, EventResult, MouseButton, WidgetEvent};
@@ -59,7 +60,9 @@ enum TextContent {
 /// Call [`TextWidget::truncate`] with `true` to force a single line and
 /// append `…` (U+2026) when the text overflows the laid-out width. Use this
 /// for sidebar items, file paths, or any row where height stability matters
-/// more than showing the full string.
+/// more than showing the full string. Works in both plain and
+/// [`rich`](TextWidget::rich) mode; see that constructor for what the
+/// ellipsis inherits when it lands mid-span.
 pub struct TextWidget {
     content: TextContent,
     font_size: Option<f32>,
@@ -141,9 +144,15 @@ impl TextWidget {
     /// Widget-level `.bold()` / `.italic()` / `.family()` / `.weight()` /
     /// `.style()` / `.monospace()` builders are ignored in rich mode (each
     /// span owns its own attrs). `.color(...)` still applies as the fallback
-    /// color for spans whose own `.color(...)` is unset. `.truncate(true)`
-    /// is **not supported** in rich mode (markdown_demo does not use it; if
-    /// you need a truncated rich line, file a follow-up).
+    /// color for spans whose own `.color(...)` is unset.
+    ///
+    /// `.truncate(true)` works here as it does in plain mode: one line, with
+    /// `…` appended when the spans overflow. The cut can land inside a span,
+    /// in which case the ellipsis takes that span's attrs and color (so it
+    /// reads as part of the text it elides) but **not** its link or
+    /// decoration — an underlined, clickable `…` would promise a target the
+    /// glyph does not stand for. Spans past the cut are dropped, so their
+    /// links disappear with them.
     pub fn rich(spans: Vec<TextSpan>) -> Self {
         Self {
             content: TextContent::Rich(spans),
@@ -382,6 +391,19 @@ impl Widget for TextWidget {
                 let natural = ctx
                     .text_engine
                     .measure_rich(spans, font_size, line_height, None);
+
+                if self.truncate {
+                    // Same contract as the plain path above: one line high
+                    // regardless of the natural size, width capped at the
+                    // smaller of natural / available so the row never claims
+                    // space it won't fill.
+                    let w = match available_width {
+                        Some(aw) => natural.0.min(aw),
+                        None => natural.0,
+                    };
+                    return Some(Size::new(w.ceil(), line_height.ceil()));
+                }
+
                 let shaped = if let Some(aw) = available_width {
                     if natural.0 > aw {
                         ctx.text_engine
@@ -437,9 +459,45 @@ impl Widget for TextWidget {
         if spans.iter().all(|s| s.text.is_empty()) {
             return;
         }
-        let shaped =
-            ctx.text_engine
-                .shape_rich(spans, font_size, line_height, Some(layout.size.width));
+
+        // Truncate mode: one line, ellipsized when the spans overflow. The
+        // rebuilt list is what gets shaped *and* what the link hit-test below
+        // indexes — the ellipsis shifts span indices, so mapping a hit back
+        // through the original list would hand it the wrong link.
+        let render_spans: Cow<'_, [TextSpan]> = if self.truncate {
+            // Clip so any sub-pixel slop on the right edge can't bleed past
+            // the row (mirrors the plain path).
+            ctx.push_clip(layout);
+            let natural = ctx
+                .text_engine
+                .measure_rich(spans, font_size, line_height, None);
+            if natural.0 <= layout.size.width {
+                Cow::Borrowed(spans.as_slice())
+            } else {
+                let display = ellipsize_spans_to_fit(
+                    spans,
+                    &mut ctx.text_engine,
+                    font_size,
+                    line_height,
+                    layout.size.width,
+                );
+                if display.is_empty() {
+                    // Not even `…` fits — draw nothing rather than overflow.
+                    ctx.pop_clip();
+                    return;
+                }
+                Cow::Owned(display)
+            }
+        } else {
+            Cow::Borrowed(spans.as_slice())
+        };
+        // Truncated text is single-line by contract, so it shapes unwrapped
+        // (it already fits) — passing the layout width back in could wrap the
+        // ellipsized line at its last space.
+        let wrap_width = (!self.truncate).then_some(layout.size.width);
+        let shaped = ctx
+            .text_engine
+            .shape_rich(&render_spans, font_size, line_height, wrap_width);
 
         // Underlines / strike-throughs first: they go to the rect batch, which
         // the renderer draws beneath the glyph batch. Since each line takes its
@@ -477,13 +535,17 @@ impl Widget for TextWidget {
             let mut hits = self.link_hits.borrow_mut();
             hits.clear();
             for b in &shaped.span_boxes {
-                if let Some(link) = spans.get(b.span).and_then(|s| s.link.as_ref()) {
+                if let Some(link) = render_spans.get(b.span).and_then(|s| s.link.as_ref()) {
                     hits.push(LinkHit {
                         rect: b.rect,
                         link: link.clone(),
                     });
                 }
             }
+        }
+
+        if self.truncate {
+            ctx.pop_clip();
         }
     }
 
@@ -702,4 +764,93 @@ fn ellipsize_to_fit(
     // Even prefix-of-zero + ellipsis was the only thing left. Return just
     // the ellipsis (we already verified it fits at the top).
     ELLIPSIS.to_string()
+}
+
+/// Span-list counterpart to [`ellipsize_to_fit`]: walk cut points from the
+/// longest prefix backwards and return the first rebuilt span list whose
+/// shaped width fits in `max_width`, with `…` appended.
+///
+/// Returns an empty vec when even `…` alone doesn't fit (the caller paints
+/// nothing — better than overflow).
+///
+/// A cut is a (span index, byte offset) pair: spans before it survive whole,
+/// the span it lands in is trimmed to that offset, and everything after is
+/// dropped. The ellipsis is appended as its own span carrying the cut span's
+/// attrs and color — so it looks like the text it elides — minus the link and
+/// decoration (see [`TextWidget::rich`]).
+///
+/// Fit is tested with `measure_rich`, not `shape_rich`: this runs inside
+/// `paint`, and only the final list is worth shaping into glyphs. Linear in
+/// the number of chars, like the plain path — fine for the title-length rows
+/// truncation is for.
+fn ellipsize_spans_to_fit(
+    spans: &[TextSpan],
+    engine: &mut TextEngine,
+    font_size: f32,
+    line_height: f32,
+    max_width: f32,
+) -> Vec<TextSpan> {
+    if max_width <= 0.0 {
+        return Vec::new();
+    }
+
+    // Cheapest possible line: the ellipsis alone, in the first span's style.
+    // If that overflows, nothing fits.
+    let bare = vec![ellipsis_like(&spans[0])];
+    if engine.measure_rich(&bare, font_size, line_height, None).0 > max_width {
+        return Vec::new();
+    }
+
+    let last = spans.len() - 1;
+    for (si, span) in spans.iter().enumerate().rev() {
+        // Cut offsets within this span, ascending, then popped longest-first.
+        // Offset 0 is skipped: "keep nothing of this span" is the same text as
+        // the previous span's keep-it-all cut, which the next iteration tries
+        // (with the ellipsis inheriting that span's style instead).
+        let mut cuts: Vec<usize> = span.text.char_indices().map(|(i, _)| i).skip(1).collect();
+        // Keeping this span whole is only a new candidate when there are later
+        // spans to drop; for the last span it is the full text, which the
+        // caller already found too wide.
+        if si < last && !span.text.is_empty() {
+            cuts.push(span.text.len());
+        }
+
+        while let Some(byte) = cuts.pop() {
+            let candidate = cut_spans(spans, si, byte);
+            if engine
+                .measure_rich(&candidate, font_size, line_height, None)
+                .0
+                <= max_width
+            {
+                return candidate;
+            }
+        }
+    }
+
+    // Every cut overflowed; fall back to the bare ellipsis verified above.
+    bare
+}
+
+/// Build the span list for one cut: `spans[..si]` whole, `spans[si]` trimmed
+/// to `byte`, then the ellipsis. `byte` must be a char boundary.
+fn cut_spans(spans: &[TextSpan], si: usize, byte: usize) -> Vec<TextSpan> {
+    let mut out: Vec<TextSpan> = spans[..si].to_vec();
+    let cut = &spans[si];
+    if byte > 0 {
+        let mut head = cut.clone();
+        head.text.truncate(byte);
+        out.push(head);
+    }
+    out.push(ellipsis_like(cut));
+    out
+}
+
+/// An ellipsis span styled like `span`: same attrs and color, no link, no
+/// decoration.
+fn ellipsis_like(span: &TextSpan) -> TextSpan {
+    let mut e = span.clone();
+    e.text = ELLIPSIS.to_string();
+    e.decoration = Default::default();
+    e.link = None;
+    e
 }
