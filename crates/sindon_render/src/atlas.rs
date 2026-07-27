@@ -14,7 +14,7 @@ use std::collections::HashMap;
 /// resolution) fits without churn. If it ever does fill, the renderer evicts
 /// and re-uploads (see the upload path in `renderer.rs`) rather than blanking
 /// new glyphs — the size just makes that self-heal rare.
-pub const DEFAULT_ATLAS_SIZE: u32 = 2048;
+pub(crate) const DEFAULT_ATLAS_SIZE: u32 = 2048;
 
 /// Padding between glyphs to prevent bleeding.
 const GLYPH_PADDING: u32 = 1;

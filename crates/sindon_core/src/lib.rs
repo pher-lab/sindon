@@ -20,5 +20,5 @@ pub use id::{NodeId, ScopeId, WidgetId};
 pub use lerp::Lerp;
 pub use security_level::SecurityLevel;
 pub use theme::{
-    Colors, FocusIndicator, FocusStyle, HoverStyle, Spacing, TextStyle, Theme, Typography,
+    Colors, FocusIndicator, FocusStyle, HoverStyle, Shape, Spacing, TextStyle, Theme, Typography,
 };

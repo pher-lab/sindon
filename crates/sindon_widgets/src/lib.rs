@@ -48,7 +48,9 @@ pub use checkbox::Checkbox;
 pub use clear_trigger::ClearTrigger;
 pub use container::Container;
 pub use dropdown::Dropdown;
-pub use event::{EventContext, EventResult, Key, Modifiers, MouseButton, NamedKey, WidgetEvent};
+pub use event::{
+    EventContext, EventResult, ImeNav, Key, Modifiers, MouseButton, NamedKey, WidgetEvent,
+};
 pub use focus::{FocusDirection, FocusManager, FocusReason};
 pub use image::{Image, ImageFit};
 pub use input::{Input, KeyEdit};
@@ -59,7 +61,7 @@ pub use progress::{ProgressBar, Spinner};
 pub use radio_group::RadioGroup;
 pub use reactive_children::ReactiveChildren;
 pub use scroll_view::ScrollView;
-pub use secure_input::SecureInput;
+pub use secure_input::{DEFAULT_SECURE_INPUT_MAX_BYTES, SecureInput};
 pub use secure_text::SecureText;
 pub use segmented::Segmented;
 pub use shortcut::{Shortcut, ShortcutContext, ShortcutId, ShortcutRouter, ShortcutScope};

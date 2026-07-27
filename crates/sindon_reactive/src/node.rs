@@ -8,7 +8,7 @@ new_key_type! {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeState {
+pub(crate) enum NodeState {
     /// Value is up to date.
     Clean,
     /// A source may have changed — needs verification before use.
