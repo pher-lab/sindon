@@ -659,11 +659,10 @@ impl WidgetTree {
         // and hover is only otherwise recomputed from a live `MouseMove`, so
         // the replacement would sit un-hovered until the user moved the mouse.
         // No `MouseLeave` here — the widget is being dropped, not left.
-        if let Some(h) = self.hovered {
-            if to_remove.contains(&h) {
-                self.hovered = None;
-                self.hover_dirty = true;
-            }
+        let hover_dropped = self.hovered.is_some_and(|h| to_remove.contains(&h));
+        if hover_dropped {
+            self.hovered = None;
+            self.hover_dirty = true;
         }
 
         // Clear focus if it landed on something we're about to remove —
@@ -705,6 +704,19 @@ impl WidgetTree {
         // a tombstoned root. Preserves the relative order of surviving
         // layers, which determines paint / event priority.
         self.layers.retain(|l| !to_remove.contains(&l.root));
+
+        // A teardown that swallows the hovered node produces no `MouseLeave`
+        // (see above), so a tooltip armed or shown for it would be stranded:
+        // its trigger is gone and nothing will ever dismiss it. Cancel here,
+        // where we already know the hovered node went away — that covers both
+        // a rebuilt list and a whole-screen swap, and is why apps have no
+        // tooltip state to reset. Runs after the drop loop so the pop below
+        // sees a settled tree.
+        if hover_dropped {
+            if let Some(tip) = crate::tooltip::cancel() {
+                self.pop_layer(tip);
+            }
+        }
     }
 
     fn collect_subtree_postorder(&self, idx: usize, out: &mut Vec<usize>) {
@@ -2871,6 +2883,28 @@ impl WidgetTree {
         // (a hoverable row that opens a tooltip layer, say).
         self.drain_commands(event_ctx);
         self.hovered != before
+    }
+
+    /// Show the pending hover tooltip once its trigger has been rested on for
+    /// the configured delay. Returns `true` when a bubble was pushed, so the
+    /// caller can lay out again before painting — the fresh layer has no
+    /// geometry until it does.
+    ///
+    /// Call once per frame, after layout. Cheap on an idle frame: one
+    /// thread-local borrow that finds nothing armed. While a tip is armed but
+    /// not yet due this votes for a frame at the deadline, so the delay does
+    /// not depend on the app running its own periodic tick.
+    ///
+    /// Dismissal is not here — that rides on the trigger's `MouseLeave`, and
+    /// on [`Self::remove`] for the teardown paths that produce none.
+    pub fn sync_tooltips(&mut self) -> bool {
+        let Some(pending) = crate::tooltip::due_now() else {
+            return false;
+        };
+        let (options, bubble) = crate::tooltip::bubble_for(&pending);
+        let root = self.push_layer(options, bubble);
+        crate::tooltip::mark_shown(root);
+        true
     }
 
     /// Collect `idx` and all its ancestors, leaf first. Returns an

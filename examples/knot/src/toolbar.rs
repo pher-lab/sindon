@@ -37,12 +37,11 @@ use std::rc::Rc;
 
 use sindon::reactive::Signal;
 use sindon::widgets::tree::WidgetTree;
-use sindon::widgets::{Container, EventContext};
+use sindon::widgets::{Container, EventContext, Tooltip};
 
 use crate::i18n::{self, Key};
 use crate::icons::{self, Icon};
 use crate::state::AppState;
-use crate::tooltip;
 
 /// Build the toolbar row into `parent` (the editor's column). `body_sig` and
 /// `cursor_sig` are the body input's bound text/caret signals; `body_idx` is a
@@ -73,10 +72,10 @@ pub fn build(
     ] {
         let state = Rc::clone(&state);
         let body_idx = Rc::clone(&body_idx);
-        // Wrap each icon button in a tooltip trigger (FW-13): the icon glyphs
-        // (FW-12) carry no text label, so a hover tip names the action. The
-        // trigger container hugs the button and anchors the tip beneath it.
-        let cell = tree.add_child(row, tooltip::trigger(i18n::tr(tip)));
+        // Wrap each icon button in a tooltip (FW-13): the icon glyphs (FW-12)
+        // carry no text label, so a hover tip names the action. The wrapper
+        // hugs the button and anchors the tip beneath it.
+        let cell = tree.add_child(row, Tooltip::new(i18n::tr(tip)));
         tree.add_child(
             cell,
             // Icon glyphs from the bundled font (FW-12) — language-independent,
