@@ -308,3 +308,142 @@ fn trigger_border_is_a_single_rounded_stroke() {
         strokes[0].radius
     );
 }
+
+// ── Reactive labels: relabel without a tree rebuild ────────────────────────
+//
+// `Input`/`SecureInput` already took a `reactive_placeholder`; the dropdown's
+// labels stayed `impl Into<String>`, so a language switch only reached it when
+// the screen was rebuilt. These cover both halves of the fix — the trigger and
+// the popover it builds — plus the re-measure, which is the part `Input` never
+// needed (the dropdown sizes itself to its widest option).
+
+/// Number of glyphs the whole tree paints, as a proxy for "which label was
+/// drawn". The trigger always adds one chevron glyph, so only *differences*
+/// between two paints are meaningful.
+fn painted_glyph_count(tree: &mut WidgetTree) -> usize {
+    let mut ctx = sindon_widgets::paint::PaintContext::default();
+    tree.paint(&mut ctx);
+    ctx.glyphs.len()
+}
+
+#[test]
+fn reactive_options_relabel_and_remeasure_without_rebuild() {
+    let long = Signal::new(false);
+    let selected = Signal::new(0_usize);
+    let mut tree = WidgetTree::new();
+    // A row root so the trigger hugs its measured width (a column stretches
+    // its children to full width, which would hide the re-measure).
+    let root = tree.set_root(Container::row().width(400.0).height(300.0));
+    // Start from an empty static list to prove the closure is the only source.
+    let dd = tree.add_child(
+        root,
+        Dropdown::new(Vec::new(), selected).reactive_options(move || {
+            if long.get() {
+                vec!["Considerably wider label".into()]
+            } else {
+                vec!["Short".into()]
+            }
+        }),
+    );
+
+    measured_layout(&mut tree, 400.0, 300.0);
+    let narrow = tree.layout_rect(dd).size.width;
+    let few_glyphs = painted_glyph_count(&mut tree);
+
+    // Flip the signal. No rebuild, no `add_child` — just the next frame.
+    long.set(true);
+    measured_layout(&mut tree, 400.0, 300.0);
+    let wide = tree.layout_rect(dd).size.width;
+    let many_glyphs = painted_glyph_count(&mut tree);
+
+    assert!(
+        wide > narrow,
+        "trigger re-measures against the new labels ({narrow} → {wide})"
+    );
+    assert!(
+        many_glyphs > few_glyphs,
+        "trigger paints the new label ({few_glyphs} → {many_glyphs} glyphs)"
+    );
+}
+
+#[test]
+fn reactive_placeholder_relabels_without_rebuild() {
+    let long = Signal::new(false);
+    // Out-of-range selection, so the placeholder is what the trigger shows.
+    let selected = Signal::new(99_usize);
+    let mut tree = WidgetTree::new();
+    // Row root — see `reactive_options_relabel_and_remeasure_without_rebuild`.
+    let root = tree.set_root(Container::row().width(400.0).height(300.0));
+    let dd = tree.add_child(
+        root,
+        Dropdown::new(vec!["A".into()], selected).reactive_placeholder(move || {
+            if long.get() {
+                "Pick a theme, any theme".into()
+            } else {
+                "Pick".into()
+            }
+        }),
+    );
+
+    measured_layout(&mut tree, 400.0, 300.0);
+    let narrow = tree.layout_rect(dd).size.width;
+    let few_glyphs = painted_glyph_count(&mut tree);
+
+    long.set(true);
+    measured_layout(&mut tree, 400.0, 300.0);
+    let wide = tree.layout_rect(dd).size.width;
+    let many_glyphs = painted_glyph_count(&mut tree);
+
+    assert!(
+        wide > narrow,
+        "placeholder still participates in measure ({narrow} → {wide})"
+    );
+    assert!(
+        many_glyphs > few_glyphs,
+        "trigger paints the new placeholder ({few_glyphs} → {many_glyphs} glyphs)"
+    );
+}
+
+#[test]
+fn popover_is_built_from_the_latest_reactive_options() {
+    let expanded = Signal::new(false);
+    let selected = Signal::new(0_usize);
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(400.0).height(300.0));
+    let dd = tree.add_child(
+        root,
+        Dropdown::new(Vec::new(), selected).reactive_options(move || {
+            if expanded.get() {
+                vec!["A".into(), "B".into(), "C".into()]
+            } else {
+                vec!["A".into()]
+            }
+        }),
+    );
+
+    // Grow the list *after* construction, then open the popover.
+    expanded.set(true);
+    measured_layout(&mut tree, 400.0, 300.0);
+    let trigger = tree.layout_rect(dd);
+    click(&mut tree, trigger.origin.x + 5.0, trigger.origin.y + 5.0);
+    measured_layout(&mut tree, 400.0, 300.0);
+
+    let popover_root = tree.top_layer_root().expect("layer up");
+    let options = tree.children(popover_root);
+    assert_eq!(
+        options.len(),
+        3,
+        "popover snapshots the closure's current list, not the constructor's"
+    );
+
+    // Selecting the third row is only possible if the new list reached the
+    // layer: the constructor's list had a single option.
+    let opt_rect = tree.layout_rect(options[2]);
+    let layer_off = tree.top_layer_offset().expect("layer offset");
+    click(
+        &mut tree,
+        layer_off.0 + opt_rect.origin.x + 10.0,
+        layer_off.1 + opt_rect.origin.y + 5.0,
+    );
+    assert_eq!(selected.get(), 2, "third option writes the bound signal");
+}

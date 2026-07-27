@@ -63,6 +63,22 @@ impl<T> Reactive<T> {
     pub fn derive(f: impl Fn() -> T + 'static) -> Self {
         Reactive::Dynamic(Rc::new(f))
     }
+
+    /// Read the current value by reference, without cloning it.
+    ///
+    /// The borrowing counterpart to [`get`](Self::get), mirroring
+    /// [`Signal::with`]. `Static` hands out a borrow of the held value;
+    /// `Dynamic` still has to invoke the closure (which produces an owned
+    /// value), so this only saves a clone on the static side — but that is
+    /// exactly the side a per-frame `measure` / `paint` walks. Prefer it for
+    /// container payloads such as `Reactive<Vec<String>>`, where `get()` would
+    /// deep-clone the whole list on every read.
+    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        match self {
+            Reactive::Static(v) => f(v),
+            Reactive::Dynamic(g) => f(&g()),
+        }
+    }
 }
 
 impl<T: Clone> Reactive<T> {

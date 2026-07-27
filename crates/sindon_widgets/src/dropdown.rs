@@ -34,6 +34,12 @@ use sindon_reactive::{Reactive, Signal};
 /// The trigger displays the option at the bound signal's current index.
 /// When the index is out of range, the placeholder (if set) is shown.
 ///
+/// Both label sources have a reactive form —
+/// [`reactive_options`](Self::reactive_options) and
+/// [`reactive_placeholder`](Self::reactive_placeholder) — for apps whose
+/// labels change in place (a language switch) rather than only when the
+/// screen is rebuilt.
+///
 /// # Example (conceptual)
 ///
 /// ```ignore
@@ -45,9 +51,15 @@ use sindon_reactive::{Reactive, Signal};
 /// .placeholder("Theme");
 /// ```
 pub struct Dropdown {
-    options: Vec<String>,
+    // Option labels. Reactive so a language switch (or any other signal-driven
+    // relabel) reaches the trigger and the next-opened popover on the following
+    // frame, rather than waiting for the screen to be rebuilt — the same
+    // reasoning as `Input`'s reactive placeholder. Read through `with` in the
+    // per-frame paths: `get()` would deep-clone the whole list every measure.
+    options: Reactive<Vec<String>>,
     selected: Signal<usize>,
-    placeholder: Option<String>,
+    // Label shown when the bound index is out of range. Empty means unset.
+    placeholder: Reactive<String>,
 
     /// Pointer / keyboard interaction flags — see [`InteractionState`].
     state: InteractionState,
@@ -82,9 +94,9 @@ impl Dropdown {
     /// each option click.
     pub fn new(options: Vec<String>, selected: Signal<usize>) -> Self {
         Self {
-            options,
+            options: Reactive::Static(options),
             selected,
-            placeholder: None,
+            placeholder: Reactive::Static(String::new()),
             state: InteractionState::default(),
             open: Rc::new(Cell::new(false)),
             radius: None,
@@ -102,8 +114,41 @@ impl Dropdown {
 
     /// Set placeholder text shown when the bound signal points at an
     /// out-of-range index.
+    ///
+    /// Callers whose prompt can change while the dropdown is on screen — a
+    /// language switch, most commonly — should use
+    /// [`reactive_placeholder`](Self::reactive_placeholder) instead.
     pub fn placeholder(mut self, text: impl Into<String>) -> Self {
-        self.placeholder = Some(text.into());
+        self.placeholder = Reactive::Static(text.into());
+        self
+    }
+
+    /// Set a placeholder produced by a closure on every frame.
+    ///
+    /// Parallel to [`Input::reactive_placeholder`](crate::Input::reactive_placeholder):
+    /// the closure is re-read each frame, so a signal write (`language.set(Ja)`)
+    /// reaches the trigger on the next one — no tree rebuild required.
+    pub fn reactive_placeholder(mut self, f: impl Fn() -> String + 'static) -> Self {
+        self.placeholder = Reactive::derive(f);
+        self
+    }
+
+    /// Set option labels produced by a closure on every frame.
+    ///
+    /// The reactive counterpart to the list passed to [`new`](Self::new), for
+    /// the same relabel-without-rebuild reason as
+    /// [`reactive_placeholder`](Self::reactive_placeholder). The bound
+    /// `Signal<usize>` indexes into whatever the closure last returned, so a
+    /// relabel that keeps the option *order* (a translation) keeps the
+    /// selection; a closure that reorders or resizes the list should write the
+    /// signal to match.
+    ///
+    /// The trigger re-measures against the new labels on the next frame (it
+    /// sizes to the widest option). An already-open popover keeps the labels it
+    /// was built with until it is dismissed and re-opened — a relabel mid-open
+    /// would mean rebuilding the layer's children under the cursor.
+    pub fn reactive_options(mut self, f: impl Fn() -> Vec<String> + 'static) -> Self {
+        self.options = Reactive::derive(f);
         self
     }
 
@@ -187,9 +232,8 @@ impl Dropdown {
     fn current_label(&self) -> String {
         let idx = self.selected.get();
         self.options
-            .get(idx)
-            .cloned()
-            .unwrap_or_else(|| self.placeholder.clone().unwrap_or_default())
+            .with(|opts| opts.get(idx).cloned())
+            .unwrap_or_else(|| self.placeholder.get())
     }
 
     fn toggle(&self, layout: Rect, ctx: &mut EventContext) {
@@ -202,7 +246,10 @@ impl Dropdown {
     }
 
     fn open_popover(&self, trigger_rect: Rect, ctx: &mut EventContext) {
-        let options = self.options.clone();
+        // Snapshot the labels for the layer's children. A reactive relabel
+        // while the popover is up is not reflected until it re-opens (see
+        // `reactive_options`).
+        let options = self.options.get();
         let selected = self.selected;
         let open_guard = Rc::clone(&self.open);
 
@@ -270,16 +317,26 @@ impl Widget for Dropdown {
         // Size to the widest option (plus chevron + padding gutter) so the
         // trigger does not jump as the selection changes. Placeholder is
         // measured too so a never-selected trigger has room for its text.
-        let max_label_width = self
-            .options
-            .iter()
-            .chain(self.placeholder.iter())
-            .map(|label| {
-                ctx.text_engine
-                    .measure_text(label, font_size, line_height, None)
-                    .0
-            })
-            .fold(0.0_f32, f32::max);
+        // Reactive labels are read once per measure and walked by reference —
+        // `get()` on the option list would deep-clone every label here, and
+        // Taffy calls `measure` several times a frame.
+        let mut max_label_width = self.options.with(|opts| {
+            opts.iter()
+                .map(|label| {
+                    ctx.text_engine
+                        .measure_text(label, font_size, line_height, None)
+                        .0
+                })
+                .fold(0.0_f32, f32::max)
+        });
+        let placeholder = self.placeholder.get();
+        if !placeholder.is_empty() {
+            let w = ctx
+                .text_engine
+                .measure_text(&placeholder, font_size, line_height, None)
+                .0;
+            max_label_width = max_label_width.max(w);
+        }
         // Content width = widest label + gap + chevron (~font_size wide). Taffy
         // adds the horizontal padding (`2 * padding_x`) on top to form the box.
         let needed_width = max_label_width + font_size + 8.0;
