@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "Widget library for the sindon UI framework"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords = ["widgets", "gui", "ui", "desktop", "sindon"]
+categories = ["gui"]
 
 [dependencies]
 sindon_core = { workspace = true }

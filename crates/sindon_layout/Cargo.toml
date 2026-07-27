@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "Layout engine for the sindon UI framework"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords = ["layout", "flexbox", "taffy", "gui", "sindon"]
+categories = ["gui"]
 
 [dependencies]
 sindon_core = { workspace = true }

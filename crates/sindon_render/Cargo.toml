@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "GPU renderer for the sindon UI framework"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords = ["wgpu", "renderer", "gpu", "gui", "sindon"]
+categories = ["rendering", "graphics"]
 
 [dependencies]
 sindon_core = { workspace = true }
