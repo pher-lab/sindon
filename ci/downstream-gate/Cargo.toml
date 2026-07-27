@@ -1,0 +1,27 @@
+# A stand-in for a downstream application, used by ci/check-fork-propagation.sh.
+#
+# Its only job is to resolve sindon's dependency graph the way a real consumer
+# would. That is why it carries its own (empty) `[workspace]` table: it is an
+# independent workspace root, so nothing in the parent workspace's manifest —
+# `[patch.crates-io]` in particular — applies to it. That is precisely the
+# difference the fork-propagation hole lived in, and the reason no in-workspace
+# test could ever have been its sensor.
+#
+# It depends on the `sindon` facade rather than on `sindon_text` directly
+# because that is what a downstream crate actually writes; the fork has to
+# survive the whole path from the facade down.
+#
+# Never add this to the parent workspace's `members`. Doing so would put it back
+# under the parent manifest and quietly disarm the gate.
+
+[package]
+name = "downstream-fork-gate"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sindon = { path = "../../crates/sindon" }
+
+# Deliberately empty: makes this directory its own workspace root.
+[workspace]

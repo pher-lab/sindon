@@ -1,0 +1,7 @@
+# This repository is developed on Windows with core.autocrlf=true, which
+# rewrites LF to CRLF in the working copy on checkout. For shell scripts that is
+# not cosmetic: bash reads the trailing \r as part of the command, so a checked
+# out `.sh` breaks in Git Bash locally (CI is unaffected, since Linux checkouts
+# get LF either way — which is exactly what makes this the kind of breakage that
+# only ever bites the person who wrote it).
+*.sh text eol=lf
