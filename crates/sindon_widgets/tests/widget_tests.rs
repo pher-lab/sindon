@@ -7729,6 +7729,233 @@ fn truncate_true_with_zero_width_paints_nothing() {
     );
 }
 
+// ── Truncate in rich mode ─────────────────────────────────────────
+//
+// `truncate` used to be plain-only — the orthogonality hole `rich()`'s own
+// doc admitted to. These mirror the plain cases above, plus the two things
+// only spans can get wrong: which style the ellipsis inherits, and whether a
+// dropped span's link follows it.
+
+use sindon_text::TextSpan;
+
+/// Spans whose concatenation is `LONG_LATIN`, split so the cut lands inside
+/// the first one at any sane narrow width.
+fn long_spans() -> Vec<TextSpan> {
+    vec![
+        TextSpan::new("This is a deliberately overlong sentence "),
+        TextSpan::new("that should not fit inside a narrow box.").bold(),
+    ]
+}
+
+#[test]
+fn rich_truncate_short_spans_paint_the_natural_stream() {
+    use sindon_core::Rect as CoreRect;
+
+    let theme = Theme::default();
+    // No spaces: a blank glyph rasterizes to nothing and never reaches the
+    // paint stream, which would make the count comparison below lie.
+    let spans = vec![TextSpan::new("Hi"), TextSpan::new("there").bold()];
+    let widget = TextWidget::rich(spans.clone())
+        .font_size(16.0)
+        .truncate(true);
+    let mut ctx = PaintContext::new(theme);
+
+    // Wide enough that nothing is elided.
+    let layout = CoreRect::new(0.0, 0.0, 400.0, 22.0);
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+
+    let natural = ctx.text_engine.shape_rich(&spans, 16.0, 22.0, None);
+    assert_eq!(
+        ctx.glyphs.len(),
+        natural.glyphs.len(),
+        "rich truncate with text that fits must paint the natural glyph stream"
+    );
+}
+
+#[test]
+fn rich_truncate_long_spans_append_ellipsis() {
+    use sindon_core::Rect as CoreRect;
+
+    let theme = Theme::default();
+    let spans = long_spans();
+    let widget = TextWidget::rich(spans.clone())
+        .font_size(16.0)
+        .truncate(true);
+    let mut ctx = PaintContext::new(theme);
+
+    let layout = CoreRect::new(0.0, 0.0, 120.0, 22.0);
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+
+    // Match on glyph_id, not cache_key: the key carries subpixel x_bin state
+    // (same reasoning as the plain-mode test above).
+    let ellipsis_gid = ctx
+        .text_engine
+        .shape_text("\u{2026}", 16.0, 22.0, None)
+        .glyphs
+        .first()
+        .map(|g| g.cache_key.glyph_id)
+        .expect("ellipsis must produce a glyph in the system font");
+
+    assert_eq!(
+        ctx.glyphs.last().map(|g| g.cache_key.glyph_id),
+        Some(ellipsis_gid),
+        "the ellipsis must be the trailing glyph of a truncated rich line"
+    );
+
+    let natural = ctx.text_engine.shape_rich(&spans, 16.0, 22.0, None);
+    assert!(
+        ctx.glyphs.len() < natural.glyphs.len(),
+        "truncated rich paint must drop glyphs (got {} of {} natural)",
+        ctx.glyphs.len(),
+        natural.glyphs.len(),
+    );
+
+    // One line, not a wrapped block: every glyph shares a baseline.
+    let rows: std::collections::BTreeSet<i32> =
+        ctx.glyphs.iter().map(|g| g.y.round() as i32).collect();
+    assert_eq!(rows.len(), 1, "truncate forces a single line, got {rows:?}");
+}
+
+#[test]
+fn rich_truncate_measure_returns_single_line_height() {
+    use sindon_text::TextEngine;
+
+    let mut engine = TextEngine::new();
+    let theme = Theme::default();
+    let widget = TextWidget::rich(long_spans())
+        .font_size(16.0)
+        .truncate(true);
+
+    let mut ctx = MeasureContext::new(&mut engine, &theme);
+    let size = <TextWidget as Widget>::measure(&widget, Some(120.0), &mut ctx)
+        .expect("measure should report Some");
+
+    let line_height = theme.typography.body.line_height.ceil();
+    assert_eq!(
+        size.height, line_height,
+        "truncated rich text must report exactly one line of height \
+         (got {}, expected {line_height})",
+        size.height,
+    );
+    assert!(
+        size.width <= 120.0,
+        "truncated width must not exceed available_width; got {}",
+        size.width,
+    );
+}
+
+#[test]
+fn rich_truncate_stays_inside_layout_and_carries_the_clip() {
+    use sindon_core::Rect as CoreRect;
+
+    let theme = Theme::default();
+    let widget = TextWidget::rich(long_spans())
+        .font_size(16.0)
+        .truncate(true);
+    let mut ctx = PaintContext::new(theme);
+
+    let layout = CoreRect::new(10.0, 5.0, 120.0, 22.0);
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+
+    let right_edge = layout.origin.x + layout.size.width + 1.0;
+    let max_right = ctx
+        .glyphs
+        .iter()
+        .map(|g| g.x + g.image.width as f32 + g.image.left as f32)
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_right <= right_edge,
+        "truncated rich glyphs must not paint past the layout right edge \
+         (max_right={max_right}, allowed={right_edge})",
+    );
+    for g in &ctx.glyphs {
+        assert_eq!(
+            g.clip_rect,
+            Some(layout),
+            "every truncated rich glyph must record the layout rect as its clip"
+        );
+    }
+}
+
+#[test]
+fn rich_truncate_ellipsis_inherits_the_cut_spans_color() {
+    use sindon_core::Rect as CoreRect;
+
+    let red = Color::rgb(1.0, 0.0, 0.0);
+    let blue = Color::rgb(0.0, 0.0, 1.0);
+    let theme = Theme::default();
+    // Narrow layout cuts inside the first (red) span, so the blue span is
+    // dropped entirely — the ellipsis must read as red, not blue and not the
+    // widget-level fallback.
+    let widget = TextWidget::rich(vec![
+        TextSpan::new("aaaa bbbb cccc dddd eeee ffff").color(red),
+        TextSpan::new(" tail").color(blue),
+    ])
+    .font_size(16.0)
+    .truncate(true);
+    let mut ctx = PaintContext::new(theme);
+
+    let layout = CoreRect::new(0.0, 0.0, 100.0, 22.0);
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+
+    let last = ctx.glyphs.last().expect("some glyphs were painted");
+    assert_eq!(
+        last.color, red,
+        "the ellipsis takes the style of the span it cut into"
+    );
+    assert!(
+        ctx.glyphs.iter().all(|g| g.color == red),
+        "no glyph from the dropped span should survive"
+    );
+}
+
+#[test]
+fn rich_truncate_with_zero_width_paints_nothing() {
+    use sindon_core::Rect as CoreRect;
+
+    let theme = Theme::default();
+    let widget = TextWidget::rich(long_spans())
+        .font_size(16.0)
+        .truncate(true);
+    let mut ctx = PaintContext::new(theme);
+
+    let layout = CoreRect::new(0.0, 0.0, 0.0, 22.0);
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+    assert!(
+        ctx.glyphs.is_empty(),
+        "rich truncate at zero width must paint nothing, got {} glyphs",
+        ctx.glyphs.len(),
+    );
+}
+
+#[test]
+fn rich_truncate_with_cjk_spans_walks_char_boundaries() {
+    use sindon_core::Rect as CoreRect;
+
+    let theme = Theme::default();
+    // Multi-byte chars in both spans: a byte-indexed cut would panic inside
+    // the slice, the same trap the plain path hit.
+    let spans = vec![
+        TextSpan::new("日本語日本語日本語日本語日本語"),
+        TextSpan::new("追加のテキスト").bold(),
+    ];
+    let widget = TextWidget::rich(spans.clone())
+        .font_size(16.0)
+        .truncate(true);
+    let mut ctx = PaintContext::new(theme);
+
+    let layout = CoreRect::new(0.0, 0.0, 80.0, 22.0);
+    <TextWidget as Widget>::paint(&widget, layout, &mut ctx);
+
+    let natural = ctx.text_engine.shape_rich(&spans, 16.0, 22.0, None);
+    assert!(
+        ctx.glyphs.len() < natural.glyphs.len(),
+        "CJK rich truncate must drop glyphs; got {} of {} natural",
+        ctx.glyphs.len(),
+        natural.glyphs.len(),
+    );
+}
+
 // ── accepts_text predicate (Phase 27 / A-11) ──────────────────────
 
 #[test]

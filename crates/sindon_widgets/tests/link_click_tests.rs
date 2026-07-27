@@ -151,3 +151,83 @@ fn text_without_link_handler_ignores_clicks() {
     mouse_down(&mut tree, r.origin.x + 4.0, r.origin.y + 8.0);
     mouse_up(&mut tree, r.origin.x + 4.0, r.origin.y + 8.0);
 }
+
+#[test]
+fn truncated_away_link_is_not_reachable_through_the_ellipsis() {
+    // Truncation rebuilds the span list — surviving spans, then `…` — so a
+    // dropped span's index can be re-used by the ellipsis. Mapping a shaped
+    // span box back through the *original* list would hand the ellipsis the
+    // link that was elided, making a click on "…" navigate somewhere the user
+    // can no longer see.
+    let fired: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&fired);
+
+    let mut tree = WidgetTree::new();
+    // Narrow root so the widget's laid-out width forces a cut inside span 0,
+    // dropping the link span entirely.
+    let root = tree.set_root(Container::column().width(120.0).height(200.0));
+    let text = tree.add_child(
+        root,
+        TextWidget::rich(vec![
+            TextSpan::new("aaaa bbbb cccc dddd eeee ffff gggg"),
+            TextSpan::new("LINKWORD").link("note://elided"),
+        ])
+        .truncate(true)
+        .on_link_click(move |target, _ctx| sink.borrow_mut().push(target.to_string())),
+    );
+
+    layout(&mut tree, 120.0, 200.0);
+    paint(&tree);
+
+    // Sweep the whole row rather than guessing where the ellipsis landed.
+    let r = tree.layout_rect(text);
+    let y = r.origin.y + 8.0;
+    let mut x = r.origin.x + 2.0;
+    while x < r.origin.x + r.size.width {
+        mouse_down(&mut tree, x, y);
+        mouse_up(&mut tree, x, y);
+        x += 4.0;
+    }
+
+    assert!(
+        fired.borrow().is_empty(),
+        "no click on a truncated line may fire the elided span's link; fired {:?}",
+        fired.borrow()
+    );
+}
+
+#[test]
+fn a_surviving_link_span_still_fires_when_the_line_is_truncated() {
+    // The mirror of the test above: truncation must not make links inert, so
+    // a link that is still on screen keeps its hit region. Guards against
+    // "fix the false positive by dropping all hits".
+    let fired: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&fired);
+
+    let mut tree = WidgetTree::new();
+    let root = tree.set_root(Container::column().width(120.0).height(200.0));
+    let text = tree.add_child(
+        root,
+        TextWidget::rich(vec![
+            TextSpan::new("LINK").link("note://kept"),
+            TextSpan::new(" aaaa bbbb cccc dddd eeee ffff gggg"),
+        ])
+        .truncate(true)
+        .on_link_click(move |target, _ctx| sink.borrow_mut().push(target.to_string())),
+    );
+
+    layout(&mut tree, 120.0, 200.0);
+    paint(&tree);
+
+    let r = tree.layout_rect(text);
+    let x = r.origin.x + 4.0; // inside the leading link span
+    let y = r.origin.y + 8.0;
+    mouse_down(&mut tree, x, y);
+    mouse_up(&mut tree, x, y);
+
+    assert_eq!(
+        fired.borrow().as_slice(),
+        ["note://kept"],
+        "a link that survives the cut keeps its hit region"
+    );
+}
