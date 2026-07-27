@@ -1,3 +1,49 @@
+# sindon-cosmic-text — a fork of COSMIC Text
+
+> **This is not the official COSMIC Text crate.** It is a fork of
+> [cosmic-text](https://github.com/pop-os/cosmic-text) **0.18.2**, maintained by
+> the [sindon](https://github.com/pher-lab/sindon) project and **not affiliated
+> with or endorsed by System76**. If you are not using sindon, you almost
+> certainly want the upstream [`cosmic-text`](https://crates.io/crates/cosmic-text)
+> crate instead.
+>
+> ## What is changed
+>
+> Two changes against upstream 0.18.2, both marked `// sindon fork:` in the
+> source:
+>
+> 1. **`src/buffer_line.rs`** — `BufferLine`'s owned plaintext buffer is a
+>    `Zeroizing<String>`, and the paths that overwrite, reclaim or consume it
+>    zeroize first. This is the one owned plaintext copy cosmic-text keeps
+>    (shaped glyphs store only byte offsets), so wiping it is what lets sindon
+>    shape secret text without leaving plaintext residue on the heap. `Debug` is
+>    hand-written to reproduce the derived output exactly.
+> 2. **`src/buffer.rs`** — `set_rich_text` re-adds the trailing empty line that
+>    `set_text` keeps. Upstream splits paragraphs with `BidiParagraphs`, which
+>    drops a trailing empty paragraph, so for any string ending in a line break
+>    the rich buffer was one line shorter than the plain buffer and the two shape
+>    paths disagreed on content height and caret placement. This one is a plain
+>    bug fix and is intended to go upstream.
+>
+> ## Why it is published separately
+>
+> sindon originally applied these as a `[patch.crates-io]` override. Cargo only
+> reads `[patch]` from the root workspace being built, so the override never
+> reached anyone depending on sindon from crates.io — the zeroize guarantee
+> would have silently disappeared downstream. Publishing the fork under its own
+> name is what makes it propagate.
+>
+> Versioned independently of upstream; the upstream release this tracks is named
+> above and in the crate description.
+>
+> Licensed MIT OR Apache-2.0, same as upstream. Upstream's `LICENSE-MIT` and
+> `LICENSE-APACHE` are retained unmodified in this directory.
+
+---
+
+The remainder of this README is upstream's, and describes the underlying
+library. Badges and links below point at the upstream project.
+
 # COSMIC Text
 
 [![crates.io](https://img.shields.io/crates/v/cosmic-text.svg)](https://crates.io/crates/cosmic-text)

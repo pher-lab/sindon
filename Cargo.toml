@@ -37,6 +37,11 @@ members = [
     "examples/tree_demo",
     "examples/vault",
 ]
+# The vendored cosmic-text fork is a path dependency of sindon_text, which would
+# otherwise make it an automatic workspace member — and then `cargo fmt --all`,
+# `clippy --workspace` and `test --workspace` would all reach into vendored
+# third-party code. Keep it out.
+exclude = ["third_party/cosmic-text"]
 
 [workspace.package]
 version = "0.1.0"
@@ -49,7 +54,28 @@ repository = "https://github.com/pher-lab/sindon"
 # External
 wgpu = "29"
 winit = "0.30"
-cosmic-text = "0.18"
+# Fork of cosmic-text 0.18.2, vendored under third_party/ and published under
+# its own name. Two changes, each marked `// sindon fork:` in the source:
+#   1. A drop-zeroize on BufferLine's plaintext buffer so SecureText's transient
+#      shape path leaves no un-zeroed plaintext residue on the heap (the
+#      framework's zeroize-first promise; see crates/sindon_text/src/lib.rs).
+#   2. `set_rich_text` re-adds the trailing empty line that `set_text` keeps,
+#      which upstream drops via `BidiParagraphs` — so the plain and rich shape
+#      paths agree on line count / height / caret for text ending in a newline.
+#
+# ⚠ This is a *direct* dependency on purpose. It used to be a `[patch.crates-io]`
+# override of the upstream crate, but `[patch]` is only read from the root
+# workspace being built: it never reaches a downstream crate that depends on
+# sindon from crates.io, so publishing would have silently dropped change 1 —
+# the zeroize guarantee — with no in-workspace test able to notice. The `path`
+# is used locally; `cargo publish` rewrites it to the registry version.
+#
+# The dependency key stays `cosmic-text`, so the extern name is `cosmic_text`
+# and `use cosmic_text::...` keeps working unchanged across the workspace.
+#
+# To update: re-vendor the new upstream release into third_party/ and re-apply
+# both patches, then bump this crate's own version.
+cosmic-text = { package = "sindon-cosmic-text", version = "0.1", path = "third_party/cosmic-text" }
 taffy = "0.9"
 zeroize = { version = "1.8", features = ["derive"] }
 secrecy = "0.10"
@@ -85,17 +111,3 @@ sindon_text = { path = "crates/sindon_text" }
 sindon_widgets = { path = "crates/sindon_widgets" }
 sindon_platform = { path = "crates/sindon_platform" }
 sindon_app = { path = "crates/sindon_app" }
-
-# Fork of cosmic-text 0.18.2 vendored under third_party/. Two changes, each
-# marked `// sindon fork:` in the source:
-#   1. A drop-zeroize on BufferLine's plaintext buffer so SecureText's transient
-#      shape path leaves no un-zeroed plaintext residue on the heap (the
-#      framework's zeroize-first promise; see crates/sindon_text/src/lib.rs).
-#   2. `set_rich_text` re-adds the trailing empty line that `set_text` keeps,
-#      which upstream drops via `BidiParagraphs` — so the plain and rich shape
-#      paths agree on line count / height / caret for text ending in a newline.
-# Same version as upstream 0.18.2 so it satisfies the `cosmic-text = "0.18"`
-# requirement above. To update: re-vendor the new release into third_party/ and
-# re-apply both patches.
-[patch.crates-io]
-cosmic-text = { path = "third_party/cosmic-text" }

@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// Modified from cosmic-text 0.18.2 for the sindon fork: `set_rich_text` re-adds
+// the trailing empty line that upstream drops. See the `// sindon fork:` comment
+// at the change site and the fork notice in this directory's README.
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
