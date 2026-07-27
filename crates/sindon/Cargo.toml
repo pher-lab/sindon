@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "A security-first Rust UI framework with secret zeroization guarantees"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 sindon_core = { workspace = true }
