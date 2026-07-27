@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "Security primitives for the sindon UI framework"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords = ["zeroize", "secrets", "mlock", "security", "sindon"]
+categories = ["cryptography", "memory-management"]
 
 [dependencies]
 sindon_core = { workspace = true }

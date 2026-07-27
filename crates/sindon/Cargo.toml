@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "A security-first Rust UI framework with secret zeroization guarantees"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords = ["gui", "ui", "security", "zeroize", "desktop"]
+categories = ["gui", "cryptography"]
 
 [dependencies]
 sindon_core = { workspace = true }

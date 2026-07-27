@@ -49,6 +49,9 @@ edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/pher-lab/sindon"
+# Inherited paths resolve from the workspace root, so all ten crates ship the
+# same front page on crates.io. LICENSE-MIT and LICENSE-APACHE sit next to it.
+readme = "README.md"
 
 [workspace.dependencies]
 # External
@@ -102,12 +105,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Internal
-sindon_core = { path = "crates/sindon_core" }
-sindon_security = { path = "crates/sindon_security" }
-sindon_reactive = { path = "crates/sindon_reactive" }
-sindon_layout = { path = "crates/sindon_layout" }
-sindon_render = { path = "crates/sindon_render" }
-sindon_text = { path = "crates/sindon_text" }
-sindon_widgets = { path = "crates/sindon_widgets" }
-sindon_platform = { path = "crates/sindon_platform" }
-sindon_app = { path = "crates/sindon_app" }
+#
+# Each carries both `version` and `path`: cargo builds against the path locally
+# and rewrites it to the registry version when packaging. Without `version`,
+# `cargo publish` refuses the crate outright ("all dependencies must have a
+# version specified"), so the whole workspace is unpublishable — keep them in
+# lockstep with [workspace.package] version above.
+sindon_core = { version = "0.1.0", path = "crates/sindon_core" }
+sindon_security = { version = "0.1.0", path = "crates/sindon_security" }
+sindon_reactive = { version = "0.1.0", path = "crates/sindon_reactive" }
+sindon_layout = { version = "0.1.0", path = "crates/sindon_layout" }
+sindon_render = { version = "0.1.0", path = "crates/sindon_render" }
+sindon_text = { version = "0.1.0", path = "crates/sindon_text" }
+sindon_widgets = { version = "0.1.0", path = "crates/sindon_widgets" }
+sindon_platform = { version = "0.1.0", path = "crates/sindon_platform" }
+sindon_app = { version = "0.1.0", path = "crates/sindon_app" }

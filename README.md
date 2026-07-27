@@ -2,9 +2,8 @@
 
 Secret-aware Rust UI framework — zeroize-first, GPU-rendered, no WebView.
 
-> **Status: pre-release, private development.** APIs are unstable and the
-> crate is not on crates.io. Opening the repo public and picking a license
-> is a Phase 17 release-readiness decision.
+> **Status: pre-release.** APIs are unstable and nothing is on crates.io yet;
+> the names are reserved. Licensing is settled (MIT OR Apache-2.0, see below).
 
 ## What it is
 
@@ -45,6 +44,8 @@ See `examples/`:
 - `counter` — reactive signal + button
 - `clock` — `AppHandle::wake()` driven by a timer thread
 - `secure_password_form` — `SecureInput` + display protection
+- `knot` — encrypted notes app: the framework's main proving ground
+- `vault` — credential manager: many small secrets, virtualized list
 
 ```sh
 cargo run -p counter
@@ -81,4 +82,17 @@ because neither half can answer the other's question:
 
 ## License
 
-TBD.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+
+`third_party/cosmic-text` is a fork of [cosmic-text](https://github.com/pop-os/cosmic-text)
+(© System76), redistributed under its own upstream MIT OR Apache-2.0 terms with
+the modified files marked; see the license files and README in that directory.

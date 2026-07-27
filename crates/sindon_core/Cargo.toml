@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "Core types for the sindon UI framework"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords = ["gui", "ui", "geometry", "theme", "sindon"]
+categories = ["gui", "data-structures"]
 
 [dependencies]
 slotmap = { workspace = true }

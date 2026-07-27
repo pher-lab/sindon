@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "Reactive signal system for the sindon UI framework"
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords = ["reactive", "signals", "state", "gui", "sindon"]
+categories = ["gui", "rust-patterns"]
 
 [dependencies]
 sindon_core = { workspace = true }
