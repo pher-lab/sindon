@@ -103,10 +103,13 @@ These are diagnostics, not a supported configuration. Note that audit mode
 under-reports: it stayed silent about a DLL that enforcement then blocked,
 so audit findings alone cannot clear this policy for an app.
 
-### Display-capture prevention (Windows)
+### Display-capture prevention (Windows, and partly macOS)
 
 - `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` is applied when
   any widget on the tree declares a non-`None` security level.
+- macOS applies `NSWindow.setSharingType(.none)` at the same point. Read
+  the limits below before relying on it: it is weaker than the Windows
+  call, and no one has yet observed it working.
 - A second GPU texture atlas is cleared to zero per frame for any
   glyph drawn from a `SecureString`, preventing residue across frames.
 
@@ -203,18 +206,30 @@ call `write_secure` / `read_secure`.
 
 ### Display-capture prevention is platform-dependent
 
-- Windows: implemented.
-- macOS: not implemented. Not blocked on an API — winit's
-  `set_content_protected` reaches `NSWindow.setSharingType(.none)` — but
-  blocked on verification: capture prevention is a claim about what another
-  process sees, and a hosted macOS runner grants no screen recording, so
-  nothing here could observe whether it worked. Waiting on real hardware.
+- Windows: implemented, both levels. `WDA_EXCLUDEFROMCAPTURE`, or
+  `WDA_MONITOR` for `ContentProtection`.
+- macOS: implemented up to `ExcludeFromCapture`, **and never observed
+  working**. Two separate caveats, and neither shows up in the
+  `DisplayProtectionResult` an app gets back:
+  - *It protects less.* `NSWindowSharingNone` sits in the
+    `WDA_EXCLUDEFROMCAPTURE` class and is weaker even there — QuickTime is
+    documented as still able to read a window that has it. Nothing on macOS
+    corresponds to `WDA_MONITOR`, so `ContentProtection` reports
+    `Unsupported` rather than silently returning the weaker level.
+  - *It is unverified.* Capture prevention is a claim about what another
+    process sees, so the only honest test is a screenshot taken from
+    outside that comes back blank, and a hosted macOS runner grants no
+    screen recording. AppKit's setter also returns no status, so `Applied`
+    there means the request was made — not that the OS agreed. Treat macOS
+    capture prevention as unproven until someone runs that test on real
+    hardware.
 - Linux: `Unsupported`. Wayland and X11 do not provide an equivalent
   to `WDA_EXCLUDEFROMCAPTURE`; the right answer is compositor-level
   policy, which is outside the application's control.
 
-A Linux/macOS build of sindon will render secrets as usual but will
-**not** hide them from screen-capture APIs.
+A Linux build of sindon will render secrets as usual but will **not** hide
+them from screen-capture APIs. A macOS build asks the OS to, with the
+reservations above.
 
 ### `SecureArena` is thread-local and single-process
 

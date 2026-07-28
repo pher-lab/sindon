@@ -2,8 +2,9 @@
 //!
 //! - [`window`]: `PlatformWindow` wraps winit + renderer + display protection
 //! - [`clipboard`]: `SecureClipboard` with owner-scoped secret strings
-//! - [`display_protection`]: `SetWindowDisplayAffinity` (Windows) —
-//!   macOS/Linux are no-ops (no equivalent API)
+//! - [`display_protection`]: `SetWindowDisplayAffinity` (Windows) and
+//!   `NSWindow.setSharingType` (macOS, weaker and never yet observed);
+//!   Linux is a no-op, there being no equivalent API
 //! - [`dialog`]: native file/folder dialogs (`rfd` wrapper)
 //! - [`storage`]: per-user JSON config helpers (atomic write via rename)
 //! - [`system_locale()`]: best-effort OS locale tag (BCP-47)

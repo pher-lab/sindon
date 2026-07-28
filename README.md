@@ -132,15 +132,20 @@ Darwin, links the examples against the system frameworks, runs the full suite
 (including the hardening smoke test, which calls `ptrace(PT_DENY_ATTACH)` and
 `setrlimit(RLIMIT_CORE, 0)` for real), and then starts `hello_world` there,
 where it survives with nothing on stderr — after a Metal control has shown the
-runner can present a window at all.
+runner can present a window at all. A second job builds the two SQLCipher
+example apps, whose vendored OpenSSL compiles from source needing nothing
+beyond the system Perl and clang, and starts `knot` under the same criterion.
 
 Treat that as a floor rather than a verification: nobody has looked at a frame
 sindon drew on macOS, and the runner's GPU is paravirtual. Untested there:
 input and IME, clipboard, file dialogs, Retina scaling, and the screen-reader
-integration. Two things are known to degrade:
+integration. Two things differ from Windows:
 
-- display-capture prevention is a no-op — `DisplayProtection` reports
-  `Unsupported`, unlike Linux not for want of an OS API
+- display-capture prevention is applied, via `NSWindow.setSharingType(.none)`,
+  but it is a weaker guarantee: QuickTime is documented as still able to read
+  such a window, the DRM-level `ContentProtection` tier has no macOS
+  counterpart and reports `Unsupported`, and nobody has yet taken the
+  screenshot from outside that would confirm even the weaker claim
 - the signature-policy diagnostics are Windows-only
 
 OS light/dark detection is implemented by the platform backend, unlike on
