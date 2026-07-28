@@ -215,6 +215,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --exclude knot --exclude vault
 
+      # And does it run? Both steps below are non-gating on purpose: whether a
+      # hosted macOS runner can host a GPU window is a fact about the runner,
+      # not about sindon, and this job's green has to keep meaning "compiles
+      # and tests on macOS" until that fact is established. Promote them to
+      # gating once they have proven stable — or delete them, if it turns out
+      # hosted runners cannot present at all and only real hardware can answer.
+      #
+      # The control runs first because it decides how to read the smoke. See
+      # ci/macos-window-control.swift for why it draws instead of just opening
+      # a window, and ci/macos-run-smoke.sh for what "survives" means.
+      - name: Can this runner host a GPU window? (control)
+        continue-on-error: true
+        run: swift ci/macos-window-control.swift
+
+      # Invoked via `bash` rather than as ./script for the same reason as the
+      # fork-propagation job: the executable bit does not survive a checkout
+      # from a Windows working copy, where core.filemode is typically off.
+      - name: hello_world survives a run
+        continue-on-error: true
+        run: |
+          cargo build -p hello_world
+          bash ci/macos-run-smoke.sh target/debug/hello_world
+
   residue:
     name: Secret residue (Windows)
     runs-on: windows-latest
