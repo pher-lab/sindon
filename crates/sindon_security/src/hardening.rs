@@ -80,11 +80,22 @@ pub fn enable_image_load_hardening() -> Result<(), HardeningError> {
 ///   set here). Findings land in the
 ///   `Microsoft-Windows-CodeIntegrity/Operational` event log. The policy
 ///   is read back afterwards, so an `Ok` means the bit actually stuck
-///   rather than merely that the call returned success — an empty event
-///   log after an `Ok` is therefore real evidence, not a silent no-op.
+///   rather than merely that the call returned success.
 /// - Linux / macOS: no-op. There is no equivalent loader signing check
 ///   to audit; kept in the public surface so callers can invoke it
 ///   unconditionally.
+///
+/// # Audit under-reports — silence is not a clearance
+///
+/// Measured on Windows 11: an audit run logged nothing at all, and
+/// enforcement of the same workload then blocked a DLL (an NVIDIA overlay)
+/// that had been mapped during the audit run. The read-back above rules out
+/// a failed call, so the silence is the audit channel itself missing loads,
+/// not the policy failing to apply.
+///
+/// So "audit found nothing, therefore enforcing is safe here" does not
+/// follow. Feasibility can only be established by an enforcing control run
+/// — which is why [`enable_signature_enforcement`] exists at all.
 pub fn enable_signature_audit() -> Result<(), HardeningError> {
     platform::enable_signature_audit()
 }
@@ -102,10 +113,16 @@ pub fn enable_signature_audit() -> Result<(), HardeningError> {
 ///   most worth rejecting are exactly the ones out of reach.
 /// - Anything legitimately non-Microsoft that the process needs later —
 ///   third-party IME text services being the case that matters here — is
-///   rejected with it.
+///   rejected with it, **and that rejection is silent**. When a third-party
+///   IME's text service was blocked in testing, no CodeIntegrity event was
+///   written at all: TSF gives up on the COM activation without a trace.
+///   Typing degrades to "letters appear, conversion does nothing", and an
+///   app that turned this on has no way to connect that bug report to the
+///   cause.
 ///
 /// Run [`enable_signature_audit`] first on the workload in question and
-/// read the CodeIntegrity log before considering this.
+/// read the CodeIntegrity log before considering this — while remembering
+/// that an empty log does not clear the policy (see that function's docs).
 pub fn enable_signature_enforcement() -> Result<(), HardeningError> {
     platform::enable_signature_enforcement()
 }

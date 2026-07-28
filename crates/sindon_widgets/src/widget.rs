@@ -6,11 +6,6 @@ use sindon_core::{AccessAction, AccessChild, AccessNode, Rect, SecurityLevel, Si
 use sindon_layout::FlexStyle;
 use sindon_text::TextEngine;
 
-/// The core trait that all widgets implement.
-///
-/// Widgets produce layout styles, paint themselves, and handle events.
-/// They do not own their children — the `WidgetTree` manages parent-child
-/// relationships separately.
 /// Context passed to `Widget::measure` during layout.
 ///
 /// Provides access to the shared `TextEngine` (for shaping text-bearing
@@ -27,6 +22,31 @@ impl<'a> MeasureContext<'a> {
     }
 }
 
+/// The core trait that all widgets implement.
+///
+/// Widgets produce layout styles, paint themselves, and handle events. They
+/// do not own their children — the [`WidgetTree`](crate::tree::WidgetTree)
+/// manages parent-child relationships separately.
+///
+/// Only [`style`](Self::style) and [`paint`](Self::paint) are required.
+/// Everything else has a default that opts the widget out of the
+/// corresponding subsystem, so a new widget starts inert — not focusable,
+/// carrying no a11y semantics, consuming no events — and opts in one
+/// override at a time.
+///
+/// # Stability
+///
+/// This is the least externally exercised part of sindon's surface. Every
+/// widget in this crate is built on it, so the trait is heavily used — but
+/// nothing *outside* this workspace implements it yet, which means its
+/// ergonomics have never been tested by a second author.
+///
+/// Expect it to move during 0.x. Added methods with defaults are not
+/// breaking and are the likely shape of most changes, but the contexts
+/// (`MeasureContext`, [`PaintContext`](crate::paint::PaintContext),
+/// [`EventContext`](crate::event::EventContext)) are not settled, and a
+/// change there does break implementors. If you are writing widgets against
+/// sindon, pin an exact version.
 pub trait Widget: std::any::Any {
     /// The security level of this widget. Propagates to children.
     fn security_level(&self) -> SecurityLevel {
