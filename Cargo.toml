@@ -81,7 +81,6 @@ winit = "0.30"
 cosmic-text = { package = "sindon-cosmic-text", version = "0.1", path = "third_party/cosmic-text" }
 taffy = "0.9"
 zeroize = { version = "1.8", features = ["derive"] }
-secrecy = "0.10"
 memsec = "0.7"
 slotmap = "1.0"
 arboard = { version = "3", default-features = false }

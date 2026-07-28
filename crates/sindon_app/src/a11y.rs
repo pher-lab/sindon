@@ -66,6 +66,12 @@ fn to_role(role: AccessRole) -> Role {
 /// Always carries a full node set plus the `Tree` root and current focus —
 /// accesskit diffs it internally, so re-sending the full tree each active
 /// frame is correct and simplest.
+///
+/// Translation layer, not app API — it is the one place accesskit types reach
+/// a signature, and it stays public only so `tests/accessibility_translation.rs`
+/// can exercise the translation independently of the widgets. Apps opt in with
+/// [`App::accessibility`](crate::App::accessibility).
+#[doc(hidden)]
 pub fn snapshot_to_tree_update(snapshot: &AccessSnapshot, scale: f32) -> TreeUpdate {
     let mut nodes = Vec::with_capacity(snapshot.entries.len());
 
@@ -200,6 +206,9 @@ pub fn snapshot_to_tree_update(snapshot: &AccessSnapshot, scale: f32) -> TreeUpd
 ///   `ActionData::NumericValue` maps through, for range controls.
 /// - **`Blur`**: focus goes somewhere, it doesn't evaporate. An AT that wants
 ///   focus elsewhere sends `Focus` to that node.
+///
+/// Translation layer, not app API — see [`snapshot_to_tree_update`].
+#[doc(hidden)]
 pub fn action_from_request(request: &ActionRequest) -> Option<(u64, AccessAction)> {
     let action = match (request.action, &request.data) {
         (Action::Click, _) => AccessAction::Click,

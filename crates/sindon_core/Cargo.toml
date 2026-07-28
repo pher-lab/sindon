@@ -10,5 +10,7 @@ readme.workspace = true
 keywords = ["gui", "ui", "geometry", "theme", "sindon"]
 categories = ["gui", "data-structures"]
 
+# No dependencies on purpose: this crate is the shared vocabulary every other
+# sindon crate builds on, so nothing it names can drag a third-party type into
+# their public APIs.
 [dependencies]
-slotmap = { workspace = true }

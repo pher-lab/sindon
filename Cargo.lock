@@ -3263,15 +3263,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "secrecy"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
 name = "secure_password_form"
 version = "0.1.0"
 dependencies = [
@@ -3453,9 +3444,6 @@ dependencies = [
 [[package]]
 name = "sindon_core"
 version = "0.1.0"
-dependencies = [
- "slotmap",
-]
 
 [[package]]
 name = "sindon_layout"
@@ -3519,7 +3507,6 @@ dependencies = [
  "libc",
  "log",
  "memsec",
- "secrecy",
  "sindon_core",
  "subtle",
  "windows 0.61.3",

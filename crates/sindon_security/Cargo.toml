@@ -13,7 +13,6 @@ categories = ["cryptography", "memory-management"]
 [dependencies]
 sindon_core = { workspace = true }
 zeroize = { workspace = true }
-secrecy = { workspace = true }
 memsec = { workspace = true }
 subtle = { workspace = true }
 log = { workspace = true }

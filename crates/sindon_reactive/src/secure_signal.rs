@@ -13,6 +13,11 @@ thread_local! {
 }
 
 /// Access the thread-local secure arena.
+///
+/// Framework wiring, not app API: `SecureSignal` / `SecureMemo` are how an
+/// app reaches the arena. Public only so the crate's own residue tests can
+/// inspect slot occupancy from outside the crate.
+#[doc(hidden)]
 pub fn with_arena<R>(f: impl FnOnce(&SecureArena) -> R) -> R {
     SECURE_ARENA.with(|cell| {
         let arena = cell.get_or_init(|| {

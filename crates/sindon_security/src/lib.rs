@@ -19,3 +19,19 @@ pub mod secure_string;
 pub use arena::{ArenaError, ArenaSlot, DEFAULT_ARENA_CAPACITY, SecureArena};
 pub use secure_buffer::SecureBuffer;
 pub use secure_string::SecureString;
+
+/// The `zeroize` crate this build links against, re-exported so downstream
+/// code cannot version-skew against it.
+///
+/// `zeroize` is part of sindon's public surface, not an implementation detail:
+/// `SecureString` and `SecureBuffer` implement `Zeroize` / `ZeroizeOnDrop`, and
+/// `SecureSignal<T>` / `SecureMemo<T>` bound `T` on `Zeroize`. So storing a
+/// secret type of your own in a secure signal means implementing a trait that
+/// belongs to *this* copy of `zeroize`.
+///
+/// Reach it through here — `sindon::security::zeroize::Zeroize`, with the
+/// `derive` feature already enabled — rather than adding a separate `zeroize`
+/// dependency. A version that resolves to a second copy of the crate compiles
+/// its own distinct `Zeroize` trait, and the bound then fails to be satisfied
+/// by a type that visibly implements it.
+pub use zeroize;

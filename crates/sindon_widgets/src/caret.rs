@@ -79,6 +79,7 @@ pub fn set_caret_blink(blink: CaretBlink) {
 /// Publish the OS-provided policy. No-op once [`set_caret_blink`] has run, so
 /// an app override survives the event loop reading the system value on startup.
 /// Called by `sindon_app`; apps use [`set_caret_blink`] instead.
+#[doc(hidden)]
 pub fn set_caret_blink_from_system(blink: CaretBlink) {
     if CARET_BLINK_USER_SET.with(Cell::get) {
         return;

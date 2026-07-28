@@ -191,6 +191,10 @@ pub fn request_frame_at(at: Instant) {
 /// Clear the per-frame animation votes (both the next-frame flag and any timed
 /// wake deadline). The event loop calls this immediately before laying out /
 /// painting a frame; anything still in flight re-votes during that paint.
+///
+/// Pump internals: an app votes with [`request_frame`] / [`request_frame_at`]
+/// and never drives the reset/read side itself.
+#[doc(hidden)]
 pub fn reset_frame_request() {
     FRAME_REQUESTED.with(|f| f.set(false));
     FRAME_DEADLINE.with(|d| d.set(None));
@@ -199,6 +203,9 @@ pub fn reset_frame_request() {
 /// Whether any animation voted for another frame since the last
 /// [`reset_frame_request`]. The event loop calls this after painting and
 /// schedules a redraw when it returns `true`.
+///
+/// Pump internals — see [`reset_frame_request`].
+#[doc(hidden)]
 pub fn frame_requested() -> bool {
     FRAME_REQUESTED.with(|f| f.get())
 }
@@ -207,6 +214,9 @@ pub fn frame_requested() -> bool {
 /// last [`reset_frame_request`], or `None`. The event loop reads this after
 /// painting and parks until (at most) this instant, then repaints — giving the
 /// caret its blink toggle without a frame-rate busy loop.
+///
+/// Pump internals — see [`reset_frame_request`].
+#[doc(hidden)]
 pub fn frame_deadline() -> Option<Instant> {
     FRAME_DEADLINE.with(|d| d.get())
 }

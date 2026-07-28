@@ -37,8 +37,8 @@ use sindon_widgets::paint::PaintContext;
 ///
 /// The real rate matters more than it looks: on a 165 Hz display the budget
 /// is 6.1 ms, so a 7 ms frame drops every other refresh while still looking
-/// comfortably inside a 16.7 ms "60 Hz" budget. See
-/// [`FrameRecorder::set_budget`].
+/// comfortably inside a 16.7 ms "60 Hz" budget. The event loop replaces this
+/// with the measured rate via `FrameRecorder::set_budget`.
 pub const FRAME_BUDGET: Duration = Duration::from_micros(16_667);
 
 /// How long the rolling window used by [`FrameRecorder::snapshot`] looks
@@ -186,7 +186,7 @@ impl Aggregate {
 /// Rolling frame-timing recorder owned by the event loop: one `record` call
 /// per painted frame, from which both the HUD and the `SINDON_PERF` log's
 /// periodic summaries are derived.
-pub struct FrameRecorder {
+pub(crate) struct FrameRecorder {
     /// Recent frames, newest last, capped at [`RING_CAP`]. Feeds the 1 s
     /// window; the aggregates below cover the whole session.
     ring: VecDeque<(Instant, FrameTimings)>,
@@ -202,8 +202,7 @@ pub struct FrameRecorder {
 }
 
 /// A closed one-second window, as handed to the `SINDON_PERF` log.
-pub struct IntervalSummary {
-    pub seconds: f32,
+pub(crate) struct IntervalSummary {
     pub frames: u64,
     pub fps: f32,
     pub mean_ms: f32,
@@ -311,11 +310,6 @@ impl FrameRecorder {
         self.ring.push_back((at, timings));
     }
 
-    /// Frames painted since the app started.
-    pub fn session_frames(&self) -> u64 {
-        self.session.count
-    }
-
     /// Condense the trailing second into a [`PerfSnapshot`].
     pub fn snapshot(&self, now: Instant) -> PerfSnapshot {
         let cutoff = now.checked_sub(WINDOW).unwrap_or(now);
@@ -367,7 +361,6 @@ impl FrameRecorder {
             return None;
         }
         Some(IntervalSummary {
-            seconds: elapsed.as_secs_f32(),
             frames: agg.count,
             fps: agg.count as f32 / elapsed.as_secs_f32(),
             mean_ms: agg.mean_ms(),
@@ -381,7 +374,6 @@ impl FrameRecorder {
     /// Whole-session summary, for the line written on exit.
     pub fn session_summary(&self) -> IntervalSummary {
         IntervalSummary {
-            seconds: 0.0,
             frames: self.session.count,
             fps: 0.0,
             mean_ms: self.session.mean_ms(),
@@ -400,7 +392,7 @@ impl FrameRecorder {
 /// after the tree — never a widget, so it can't be laid out, focused, hit-
 /// tested or reached by a screen reader, and adding it can't perturb the
 /// tree whose cost it reports.
-pub struct PerfHud {
+pub(crate) struct PerfHud {
     /// The formatted lines, refreshed at [`HUD_REFRESH`] rather than every
     /// frame: at 60 fps a per-frame refresh would be unreadable *and* would
     /// miss the shape cache on every line, so the overlay would inflate the
@@ -701,7 +693,7 @@ mod tests {
             rec.record(start + Duration::from_millis(i), timings(1.0));
         }
         assert_eq!(rec.ring.len(), RING_CAP);
-        assert_eq!(rec.session_frames(), RING_CAP as u64 + 500);
+        assert_eq!(rec.session.count, RING_CAP as u64 + 500);
     }
 
     #[test]
