@@ -6,10 +6,19 @@ Notable changes to sindon. The format follows
 All ten crates share one version number and are released together, so an entry
 here covers the workspace rather than a single crate.
 
-## [Unreleased]
+## [0.1.1] - 2026-07-28
 
-Nothing has been published to crates.io yet; the names are reserved. This
-section describes what the first release will contain.
+### Fixed
+
+- The front page shipped with 0.1.0 still described the project as unreleased
+  ("nothing is on crates.io yet"). All ten crates inherit that one README, so
+  every crates.io landing page contradicted its own version. Corrected, and
+  added an install snippet and the platform-support caveats that until now only
+  this changelog carried.
+
+## [0.1.0] - 2026-07-28
+
+First release. All ten crates published together.
 
 ### Added
 
