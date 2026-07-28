@@ -141,7 +141,7 @@ pub mod platform {
 /// [`App::accessibility`](app::App::accessibility).
 pub mod app {
     pub use sindon_app::{
-        App, AppHandle, AppScope, FRAME_BUDGET, FrameContext, FrameTimings, PerfSnapshot,
-        system_theme_signal, theme_color, theme_value,
+        App, AppError, AppErrorKind, AppHandle, AppScope, FRAME_BUDGET, FrameContext, FrameTimings,
+        PerfSnapshot, system_theme_signal, theme_color, theme_value,
     };
 }

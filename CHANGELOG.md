@@ -6,6 +6,38 @@ Notable changes to sindon. The format follows
 All ten crates share one version number and are released together, so an entry
 here covers the workspace rather than a single crate.
 
+## [Unreleased]
+
+Found by running the published 0.1.2 on Linux for the first time — the same
+outside-in method as 0.1.2, moved one axis over. docs.rs only ever proved the
+crates *compile* there.
+
+### Added
+
+- `App::try_run`, returning `Result<(), AppError>` instead of panicking.
+  `App::run` still panics, but now with a message that names what failed and,
+  on Linux, the likely cause. Previously a headless machine or a compositor
+  crash surfaced as `panicked at .../event_loop.rs:849: event loop error:
+  ExitFailure(1)` — a winit enum quoted from inside sindon's own source, with
+  no way for an application to handle it. `AppError` keeps the platform error
+  as its `source()` so no winit type enters the public API.
+
+### Fixed
+
+- **`system_theme_signal()` documented a Linux behaviour it does not have.**
+  The doc said the signal "may stay `None` outside GNOME / KDE", implying it
+  works on those desktops. It never reports on Linux at all: winit's X11
+  backend returns no theme, and its Wayland backend returns only the
+  decoration theme the app itself set. Corrected, and listed in the README's
+  platform section.
+- **The README named no Linux runtime prerequisites.** On a minimal image an
+  X11 session aborts inside a transitive dependency (`Library
+  libxkbcommon-x11.so could not be loaded`) before any sindon code runs. The
+  packages are now listed, along with the fact that building needs only a C
+  toolchain — the graphics and input libraries are dlopened, not linked.
+- The README claimed macOS "builds and runs". It has never been run there and
+  there is no macOS CI; it is now marked unverified.
+
 ## [0.1.2] - 2026-07-28
 
 Everything here was found by building a throwaway `cargo add sindon` project
