@@ -741,11 +741,13 @@ fn push_run(
     strikethrough: bool,
     link: Option<String>,
 ) {
-    if let Some(last) = runs.last_mut() {
-        if last.style == style && last.strikethrough == strikethrough && last.link == link {
-            last.text.push_str(text);
-            return;
-        }
+    if let Some(last) = runs.last_mut()
+        && last.style == style
+        && last.strikethrough == strikethrough
+        && last.link == link
+    {
+        last.text.push_str(text);
+        return;
     }
     runs.push(InlineRun {
         text: text.to_string(),

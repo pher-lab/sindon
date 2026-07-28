@@ -109,15 +109,14 @@ fn main() {
                 }
 
                 let is_unlocked = matches!(state_for_tick.borrow().phase, Phase::Unlocked { .. });
-                if is_unlocked {
-                    if let Some(timeout) = settings::current_auto_lock().timeout() {
-                        if ctx.idle() >= timeout {
-                            state_for_tick.borrow_mut().lock_and_seal();
-                            let next = Rc::clone(&state_for_tick);
-                            ctx.event_ctx
-                                .replace_screen(move |tree| lock_screen::build(tree, next));
-                        }
-                    }
+                if is_unlocked
+                    && let Some(timeout) = settings::current_auto_lock().timeout()
+                    && ctx.idle() >= timeout
+                {
+                    state_for_tick.borrow_mut().lock_and_seal();
+                    let next = Rc::clone(&state_for_tick);
+                    ctx.event_ctx
+                        .replace_screen(move |tree| lock_screen::build(tree, next));
                 }
             });
 

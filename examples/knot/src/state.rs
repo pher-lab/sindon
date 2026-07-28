@@ -313,10 +313,10 @@ impl AppState {
     /// resident vec (defends against races where the editor's last
     /// callback fires after a delete).
     pub fn mark_dirty(&mut self, id: NoteId) {
-        if let Phase::Unlocked { notes, dirty, .. } = &mut self.phase {
-            if notes.iter().any(|n| n.id == id) {
-                dirty.insert(id);
-            }
+        if let Phase::Unlocked { notes, dirty, .. } = &mut self.phase
+            && notes.iter().any(|n| n.id == id)
+        {
+            dirty.insert(id);
         }
     }
 
@@ -330,10 +330,9 @@ impl AppState {
             dirty,
             ..
         } = &mut self.phase
+            && notes.iter().any(|n| n.id == *id)
         {
-            if notes.iter().any(|n| n.id == *id) {
-                dirty.insert(*id);
-            }
+            dirty.insert(*id);
         }
     }
 
@@ -379,10 +378,9 @@ impl AppState {
             notes,
             ..
         } = &self.phase
+            && let Some(note) = notes.iter().find(|n| n.id == *id)
         {
-            if let Some(note) = notes.iter().find(|n| n.id == *id) {
-                return note.tags.clone();
-            }
+            return note.tags.clone();
         }
         Vec::new()
     }

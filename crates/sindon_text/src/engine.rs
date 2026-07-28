@@ -273,10 +273,11 @@ impl ShapeCache {
     fn insert(&mut self, key: u64, value: ShapedText) {
         self.clock += 1;
         let clock = self.clock;
-        if self.map.len() >= SHAPE_CACHE_CAP && !self.map.contains_key(&key) {
-            if let Some((&lru, _)) = self.map.iter().min_by_key(|(_, (_, used))| *used) {
-                self.map.remove(&lru);
-            }
+        if self.map.len() >= SHAPE_CACHE_CAP
+            && !self.map.contains_key(&key)
+            && let Some((&lru, _)) = self.map.iter().min_by_key(|(_, (_, used))| *used)
+        {
+            self.map.remove(&lru);
         }
         self.map.insert(key, (value, clock));
     }
@@ -614,10 +615,10 @@ impl TextEngine {
             if before.contains(&face.id) {
                 continue;
             }
-            if let Some((family, _)) = face.families.first() {
-                if !names.contains(family) {
-                    names.push(family.clone());
-                }
+            if let Some((family, _)) = face.families.first()
+                && !names.contains(family)
+            {
+                names.push(family.clone());
             }
         }
 
@@ -1301,10 +1302,10 @@ impl TextEngine {
             let cursor_lo = Cursor::new(lo_line, lo_idx);
             let cursor_hi = Cursor::new(hi_line, hi_idx);
             for run in buffer.layout_runs() {
-                if let Some((x, w)) = run.highlight(cursor_lo, cursor_hi) {
-                    if w > 0.0 {
-                        return (x, run.line_top);
-                    }
+                if let Some((x, w)) = run.highlight(cursor_lo, cursor_hi)
+                    && w > 0.0
+                {
+                    return (x, run.line_top);
                 }
             }
             // No positive-width glyph at `off`. The common cause: the caret
@@ -1389,10 +1390,10 @@ impl TextEngine {
             underline_range,
             target_range,
         );
-        if let Some((memo_key, block)) = self.compose_memo.as_ref() {
-            if *memo_key == key {
-                return std::rc::Rc::clone(block);
-            }
+        if let Some((memo_key, block)) = self.compose_memo.as_ref()
+            && *memo_key == key
+        {
+            return std::rc::Rc::clone(block);
         }
         let mut buffer = self.take_edit_buffer(font_size, line_height, max_width);
         let t0 = std::time::Instant::now();
@@ -1967,10 +1968,10 @@ fn sync_edit_lines_rich<'a>(
         }
     }
 
-    if let Some(ending) = trailing_blank {
-        if set_or_push_line(buffer, body, "", ending, AttrsList::new(default_attrs)) {
-            changed += 1;
-        }
+    if let Some(ending) = trailing_blank
+        && set_or_push_line(buffer, body, "", ending, AttrsList::new(default_attrs))
+    {
+        changed += 1;
     }
 
     buffer.lines.truncate(lines.len());
@@ -2027,10 +2028,10 @@ fn selection_rects_in_buffer(
         // `highlight` returns the pixel span of this run's glyphs whose
         // cursor falls within [lo, hi]. A run with no intersecting glyphs
         // (e.g. a blank line between the endpoints) yields None.
-        if let Some((x, w)) = run.highlight(cursor_lo, cursor_hi) {
-            if w > 0.0 {
-                rects.push(Rect::new(x, run.line_top, w, run.line_height));
-            }
+        if let Some((x, w)) = run.highlight(cursor_lo, cursor_hi)
+            && w > 0.0
+        {
+            rects.push(Rect::new(x, run.line_top, w, run.line_height));
         }
 
         // Trailing sliver: when the selection reaches past this visual

@@ -578,10 +578,10 @@ impl EventContext {
     /// the fresh `None`s — attributing each push to the node that made it.
     pub(crate) fn stamp_pending_layer_opener(&mut self, node: usize) {
         for cmd in &mut self.commands {
-            if let TreeCommand::PushLayer { opener, .. } = cmd {
-                if opener.is_none() {
-                    *opener = Some(node);
-                }
+            if let TreeCommand::PushLayer { opener, .. } = cmd
+                && opener.is_none()
+            {
+                *opener = Some(node);
             }
         }
     }

@@ -188,10 +188,10 @@ fn backlinks_token(state: &Rc<RefCell<AppState>>) -> u64 {
             notes, selected, ..
         } => {
             selected.hash(&mut h);
-            if let Some(sel) = selected {
-                if let Some(note) = notes.iter().find(|n| n.id == *sel) {
-                    note.title.hash(&mut h);
-                }
+            if let Some(sel) = selected
+                && let Some(note) = notes.iter().find(|n| n.id == *sel)
+            {
+                note.title.hash(&mut h);
             }
             notes.len().hash(&mut h);
         }

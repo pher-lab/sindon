@@ -675,19 +675,19 @@ impl WidgetTree {
         // focused widget with an equivalent one (see `refocus_initially`);
         // the flag has to be captured here because `focus.set(None)` forces
         // it false, so by the time the builder runs it is gone.
-        if let Some(f) = self.focus.focused() {
-            if to_remove.contains(&f) {
-                self.dropped_focus_visible = Some(self.focus.visible());
-                self.focus.set(None);
-            }
+        if let Some(f) = self.focus.focused()
+            && to_remove.contains(&f)
+        {
+            self.dropped_focus_visible = Some(self.focus.visible());
+            self.focus.set(None);
         }
 
         // Drop a pointer capture held by anything we're about to remove, so a
         // tombstoned index can't keep receiving routed drag events.
-        if let Some(c) = self.pointer_capture {
-            if to_remove.contains(&c) {
-                self.pointer_capture = None;
-            }
+        if let Some(c) = self.pointer_capture
+            && to_remove.contains(&c)
+        {
+            self.pointer_capture = None;
         }
 
         // Drop nodes and their Taffy layout nodes. Widget `Drop` runs here
@@ -712,10 +712,8 @@ impl WidgetTree {
         // a rebuilt list and a whole-screen swap, and is why apps have no
         // tooltip state to reset. Runs after the drop loop so the pop below
         // sees a settled tree.
-        if hover_dropped {
-            if let Some(tip) = crate::tooltip::cancel() {
-                self.pop_layer(tip);
-            }
+        if hover_dropped && let Some(tip) = crate::tooltip::cancel() {
+            self.pop_layer(tip);
         }
     }
 
@@ -934,10 +932,10 @@ impl WidgetTree {
                     // (= blur) always passes through. FocusGained handlers
                     // may enqueue further commands; `drain_commands` keeps
                     // draining until the queue settles.
-                    if let Some(idx) = target {
-                        if !self.contains(idx) {
-                            continue;
-                        }
+                    if let Some(idx) = target
+                        && !self.contains(idx)
+                    {
+                        continue;
                     }
                     self.focus(target, event_ctx);
                 }
@@ -1390,12 +1388,12 @@ impl WidgetTree {
 
             // Pin the scroll view's content height to the full logical extent so
             // the scrollbar + clamp span all rows though only a window exists.
-            if let Some(sv) = sv_idx {
-                if let Some(node) = self.node_mut(sv) {
-                    let widget_any: &mut dyn std::any::Any = node.widget.as_mut();
-                    if let Some(scroll) = widget_any.downcast_mut::<ScrollView>() {
-                        scroll.set_pinned_content_height(count as f32 * row_h);
-                    }
+            if let Some(sv) = sv_idx
+                && let Some(node) = self.node_mut(sv)
+            {
+                let widget_any: &mut dyn std::any::Any = node.widget.as_mut();
+                if let Some(scroll) = widget_any.downcast_mut::<ScrollView>() {
+                    scroll.set_pinned_content_height(count as f32 * row_h);
                 }
             }
 
@@ -1418,10 +1416,12 @@ impl WidgetTree {
                         .downcast_ref::<VirtualList>()
                         .and_then(|vl| vl.last_window())
                 })
-            } {
-                if bv == data_v && bc == count && bf <= visible_first && visible_last <= bl {
-                    continue;
-                }
+            } && bv == data_v
+                && bc == count
+                && bf <= visible_first
+                && visible_last <= bl
+            {
+                continue;
             }
 
             // Rebuild: overscan the visible range so nearby scrolls stay cheap.
@@ -1738,11 +1738,11 @@ impl WidgetTree {
         let mut root_children: Vec<u64> = Vec::new();
 
         // Main tree, if any and visible.
-        if let Some(root) = self.root {
-            if self.node(root).is_some_and(|n| n.widget.visible()) {
-                root_children.push(root as u64);
-                self.walk_access(root, (0.0, 0.0), None, &mut entries);
-            }
+        if let Some(root) = self.root
+            && self.node(root).is_some_and(|n| n.widget.visible())
+        {
+            root_children.push(root as u64);
+            self.walk_access(root, (0.0, 0.0), None, &mut entries);
         }
 
         // Overlay layers. The topmost interactive layer is the modal surface;
@@ -2239,198 +2239,193 @@ impl WidgetTree {
         // cursor is inside the layer's interactive rect. Outside hits
         // either dismiss (configurable) or are silently swallowed, but
         // never fall through to the main tree.
-        if layer_active {
-            if let Some(pos) = event_position(event) {
-                // `pos` is viewport-space here — events are shifted by
-                // `-offset` into the target subtree's frame only *after* this
-                // block, so every layer's rect is tested in the same space
-                // (`entry.offset` + `entry.measured_size`, both from the last
-                // layout pass).
-                let point = Point::new(pos.x, pos.y);
-                // The active interactive layer (not necessarily the literal
-                // topmost — a tooltip may paint above it). `offset` above
-                // came from the same entry, so its rect agrees.
-                let top = self
-                    .topmost_interactive_layer()
-                    .expect("layer_active implies an interactive layer");
-                let top_rect = Rect::new(
-                    top.offset.0,
-                    top.offset.1,
-                    top.measured_size.width,
-                    top.measured_size.height,
-                );
-                // A scrim means "modal": everything behind it is blocked, so
-                // menu-switch pass-through (hover + one-click switch onto a
-                // trigger behind the layer) is disabled. Only chrome-less
-                // popovers (no scrim — dropdowns / toolbar menus) let a peer
-                // trigger stay live underneath.
-                let top_has_scrim = top.options.scrim.is_some();
-                if !top_rect.contains(point) {
-                    // Outside the topmost interactive layer's content rect.
-                    if let WidgetEvent::MouseMove { .. } = event {
-                        // Cursor over scrim / margin: normally drop any
-                        // layer-side hover (so widgets get a final MouseLeave)
-                        // without dismissing. Exception: a menu-switch trigger
-                        // sitting in the main tree (a peer toolbar button) stays
-                        // live, so it lights up on hover — without this a
-                        // one-click-switchable button gives no "pressable"
-                        // affordance while a sibling menu is open. Route the
-                        // move to the main tree so that trigger (and only it)
-                        // gets MouseEnter; moving back into the menu leaves it
-                        // again via the normal layer routing below (hover
-                        // enter/leave is LCA-based, so it spans the boundary).
-                        if !top_has_scrim {
-                            if let Some(main) = self.root {
-                                let over_switch = self
-                                    .hit_test_in(main, point)
-                                    .and_then(|h| self.node(h))
-                                    .map(|n| n.widget.menu_switch_trigger())
-                                    .unwrap_or(false);
-                                if over_switch {
-                                    self.update_hover_in(main, point, event_ctx);
-                                    return EventResult::Ignored;
-                                }
-                            }
-                        }
-                        self.clear_hover(event_ctx);
-                        return EventResult::Ignored;
-                    }
-                    if let WidgetEvent::MouseDown { .. } = event {
-                        // Location-aware collapse: a pointer carries a
-                        // position, and that position encodes how deep to
-                        // dismiss. Walk the interactive layers top→down and
-                        // pop the run that (a) does not contain the click and
-                        // (b) opts into outside-click dismiss, stopping at the
-                        // first layer that contains the click or refuses to
-                        // dismiss — that layer, and everything below it, stays.
-                        //
-                        // So a click in dead space outside the whole stack
-                        // collapses all of it in one go, while a click that
-                        // lands inside an *intermediate* layer (e.g. the
-                        // popover body beneath an open dropdown) peels only the
-                        // layers stacked above it. Escape, by contrast, always
-                        // peels a single level (a keystroke has no location) —
-                        // see the Escape interceptor above.
-                        //
-                        // Testing each layer's *own* rect is what makes a
-                        // dropdown that overflows its parent popover behave:
-                        // the click is judged against the dropdown's rect and
-                        // the popover's rect independently, not against a
-                        // parent box that visually swallows the child.
-                        let mut to_pop: Vec<usize> = Vec::new();
-                        // Openers of the layers being dismissed, so the
-                        // menu-switch path below can tell "clicked the trigger
-                        // that owns a just-closed menu" (toggle closed — don't
-                        // reopen) from "clicked a peer trigger" (switch).
-                        let mut popped_openers: Vec<usize> = Vec::new();
-                        for entry in self.layers.iter().rev() {
-                            if !entry.options.interactive {
-                                // Click-through overlay (tooltip): never a
-                                // dismiss target, and it doesn't shield the
-                                // interactive layers beneath it.
-                                continue;
-                            }
-                            let rect = Rect::new(
-                                entry.offset.0,
-                                entry.offset.1,
-                                entry.measured_size.width,
-                                entry.measured_size.height,
-                            );
-                            if rect.contains(point) || !entry.options.dismiss_on_outside_click {
-                                // The click landed inside this layer, or this
-                                // layer eats outside clicks without closing
-                                // (a non-dismissable modal). Stop: it and
-                                // everything below stay.
-                                break;
-                            }
-                            to_pop.push(entry.root);
-                            if let Some(opener) = entry.opener {
-                                popped_openers.push(opener);
-                            }
-                        }
-                        for root in to_pop {
-                            self.pop_layer(root);
-                        }
-
-                        // Menu-switch: if the dismissing click landed on a
-                        // widget that opts into the one-click switch (a peer
-                        // menu's trigger — e.g. a toolbar gear/overflow),
-                        // re-route this very MouseDown to the now-exposed tree
-                        // instead of swallowing it, so the trigger presses and
-                        // opens its own menu in the same click. Any other
-                        // target (a consequential button, dead space) still
-                        // swallows, so this is not a general pointer
-                        // pass-through — only opted-in menu triggers get it.
-                        //
-                        // The exposed target is recomputed exactly as
-                        // `dispatch_event` does; `menu_switch_trigger` is
-                        // hit-tested in that subtree's local space. Re-entry is
-                        // bounded: the trigger sits inside the exposed target's
-                        // rect (that is how the hit-test found it), so the
-                        // recursive dispatch skips this outside-click branch and
-                        // routes the press normally. A click on the trigger that
-                        // *owns* a just-closed menu is excluded (it stays a plain
-                        // toggle-closed) — re-routing there would immediately
-                        // reopen the menu it just dismissed.
-                        let (sw_target, sw_offset, sw_active) =
-                            match self.topmost_interactive_layer() {
-                                Some(layer) => (Some(layer.root), layer.offset, true),
-                                None => (self.root, (0.0, 0.0), false),
-                            };
-                        let is_primary = matches!(
-                            event,
-                            WidgetEvent::MouseDown {
-                                button: MouseButton::Left,
-                                ..
-                            }
-                        );
-                        if is_primary && !top_has_scrim {
-                            if let Some(root) = sw_target {
-                                let local =
-                                    Point::new(point.x - sw_offset.0, point.y - sw_offset.1);
-                                let hit = self.hit_test_in(root, local);
-                                let is_switch = hit
-                                    .and_then(|h| self.node(h))
-                                    .map(|n| n.widget.menu_switch_trigger())
-                                    .unwrap_or(false);
-                                let owns_closed_menu =
-                                    hit.map(|h| popped_openers.contains(&h)).unwrap_or(false);
-                                if is_switch && !owns_closed_menu {
-                                    event_ctx.current_layer_offset = sw_offset;
-                                    // Press the trigger with the real down...
-                                    self.dispatch_with_target(
-                                        sw_target, sw_offset, sw_active, event, event_ctx,
-                                    );
-                                    // ...then fire it now with a synthetic
-                                    // release, so the new menu opens on this same
-                                    // physical press. Closing the old menu (above)
-                                    // and opening the new one land in one
-                                    // dispatch, so no frame shows an empty gap —
-                                    // the "flicker" a real down→up wait exposes.
-                                    // The trailing real MouseUp arrives with the
-                                    // new menu already up and fires nothing,
-                                    // wherever it lands: outside the menu it is
-                                    // swallowed, and inside it every activatable
-                                    // widget needs a press first — `release`
-                                    // without one is `Release::Idle` (see
-                                    // [`InteractionState`]). So this does not rely
-                                    // on where a menu anchors relative to its
-                                    // trigger.
-                                    let release = WidgetEvent::MouseUp {
-                                        position: point,
-                                        button: MouseButton::Left,
-                                    };
-                                    return self.dispatch_with_target(
-                                        sw_target, sw_offset, sw_active, &release, event_ctx,
-                                    );
-                                }
-                            }
+        if layer_active && let Some(pos) = event_position(event) {
+            // `pos` is viewport-space here — events are shifted by
+            // `-offset` into the target subtree's frame only *after* this
+            // block, so every layer's rect is tested in the same space
+            // (`entry.offset` + `entry.measured_size`, both from the last
+            // layout pass).
+            let point = Point::new(pos.x, pos.y);
+            // The active interactive layer (not necessarily the literal
+            // topmost — a tooltip may paint above it). `offset` above
+            // came from the same entry, so its rect agrees.
+            let top = self
+                .topmost_interactive_layer()
+                .expect("layer_active implies an interactive layer");
+            let top_rect = Rect::new(
+                top.offset.0,
+                top.offset.1,
+                top.measured_size.width,
+                top.measured_size.height,
+            );
+            // A scrim means "modal": everything behind it is blocked, so
+            // menu-switch pass-through (hover + one-click switch onto a
+            // trigger behind the layer) is disabled. Only chrome-less
+            // popovers (no scrim — dropdowns / toolbar menus) let a peer
+            // trigger stay live underneath.
+            let top_has_scrim = top.options.scrim.is_some();
+            if !top_rect.contains(point) {
+                // Outside the topmost interactive layer's content rect.
+                if let WidgetEvent::MouseMove { .. } = event {
+                    // Cursor over scrim / margin: normally drop any
+                    // layer-side hover (so widgets get a final MouseLeave)
+                    // without dismissing. Exception: a menu-switch trigger
+                    // sitting in the main tree (a peer toolbar button) stays
+                    // live, so it lights up on hover — without this a
+                    // one-click-switchable button gives no "pressable"
+                    // affordance while a sibling menu is open. Route the
+                    // move to the main tree so that trigger (and only it)
+                    // gets MouseEnter; moving back into the menu leaves it
+                    // again via the normal layer routing below (hover
+                    // enter/leave is LCA-based, so it spans the boundary).
+                    if !top_has_scrim && let Some(main) = self.root {
+                        let over_switch = self
+                            .hit_test_in(main, point)
+                            .and_then(|h| self.node(h))
+                            .map(|n| n.widget.menu_switch_trigger())
+                            .unwrap_or(false);
+                        if over_switch {
+                            self.update_hover_in(main, point, event_ctx);
+                            return EventResult::Ignored;
                         }
                     }
-                    // MouseUp / Scroll / other position-bearing events
-                    // outside the layer are silently swallowed.
-                    return EventResult::Consumed;
+                    self.clear_hover(event_ctx);
+                    return EventResult::Ignored;
                 }
+                if let WidgetEvent::MouseDown { .. } = event {
+                    // Location-aware collapse: a pointer carries a
+                    // position, and that position encodes how deep to
+                    // dismiss. Walk the interactive layers top→down and
+                    // pop the run that (a) does not contain the click and
+                    // (b) opts into outside-click dismiss, stopping at the
+                    // first layer that contains the click or refuses to
+                    // dismiss — that layer, and everything below it, stays.
+                    //
+                    // So a click in dead space outside the whole stack
+                    // collapses all of it in one go, while a click that
+                    // lands inside an *intermediate* layer (e.g. the
+                    // popover body beneath an open dropdown) peels only the
+                    // layers stacked above it. Escape, by contrast, always
+                    // peels a single level (a keystroke has no location) —
+                    // see the Escape interceptor above.
+                    //
+                    // Testing each layer's *own* rect is what makes a
+                    // dropdown that overflows its parent popover behave:
+                    // the click is judged against the dropdown's rect and
+                    // the popover's rect independently, not against a
+                    // parent box that visually swallows the child.
+                    let mut to_pop: Vec<usize> = Vec::new();
+                    // Openers of the layers being dismissed, so the
+                    // menu-switch path below can tell "clicked the trigger
+                    // that owns a just-closed menu" (toggle closed — don't
+                    // reopen) from "clicked a peer trigger" (switch).
+                    let mut popped_openers: Vec<usize> = Vec::new();
+                    for entry in self.layers.iter().rev() {
+                        if !entry.options.interactive {
+                            // Click-through overlay (tooltip): never a
+                            // dismiss target, and it doesn't shield the
+                            // interactive layers beneath it.
+                            continue;
+                        }
+                        let rect = Rect::new(
+                            entry.offset.0,
+                            entry.offset.1,
+                            entry.measured_size.width,
+                            entry.measured_size.height,
+                        );
+                        if rect.contains(point) || !entry.options.dismiss_on_outside_click {
+                            // The click landed inside this layer, or this
+                            // layer eats outside clicks without closing
+                            // (a non-dismissable modal). Stop: it and
+                            // everything below stay.
+                            break;
+                        }
+                        to_pop.push(entry.root);
+                        if let Some(opener) = entry.opener {
+                            popped_openers.push(opener);
+                        }
+                    }
+                    for root in to_pop {
+                        self.pop_layer(root);
+                    }
+
+                    // Menu-switch: if the dismissing click landed on a
+                    // widget that opts into the one-click switch (a peer
+                    // menu's trigger — e.g. a toolbar gear/overflow),
+                    // re-route this very MouseDown to the now-exposed tree
+                    // instead of swallowing it, so the trigger presses and
+                    // opens its own menu in the same click. Any other
+                    // target (a consequential button, dead space) still
+                    // swallows, so this is not a general pointer
+                    // pass-through — only opted-in menu triggers get it.
+                    //
+                    // The exposed target is recomputed exactly as
+                    // `dispatch_event` does; `menu_switch_trigger` is
+                    // hit-tested in that subtree's local space. Re-entry is
+                    // bounded: the trigger sits inside the exposed target's
+                    // rect (that is how the hit-test found it), so the
+                    // recursive dispatch skips this outside-click branch and
+                    // routes the press normally. A click on the trigger that
+                    // *owns* a just-closed menu is excluded (it stays a plain
+                    // toggle-closed) — re-routing there would immediately
+                    // reopen the menu it just dismissed.
+                    let (sw_target, sw_offset, sw_active) = match self.topmost_interactive_layer() {
+                        Some(layer) => (Some(layer.root), layer.offset, true),
+                        None => (self.root, (0.0, 0.0), false),
+                    };
+                    let is_primary = matches!(
+                        event,
+                        WidgetEvent::MouseDown {
+                            button: MouseButton::Left,
+                            ..
+                        }
+                    );
+                    if is_primary
+                        && !top_has_scrim
+                        && let Some(root) = sw_target
+                    {
+                        let local = Point::new(point.x - sw_offset.0, point.y - sw_offset.1);
+                        let hit = self.hit_test_in(root, local);
+                        let is_switch = hit
+                            .and_then(|h| self.node(h))
+                            .map(|n| n.widget.menu_switch_trigger())
+                            .unwrap_or(false);
+                        let owns_closed_menu =
+                            hit.map(|h| popped_openers.contains(&h)).unwrap_or(false);
+                        if is_switch && !owns_closed_menu {
+                            event_ctx.current_layer_offset = sw_offset;
+                            // Press the trigger with the real down...
+                            self.dispatch_with_target(
+                                sw_target, sw_offset, sw_active, event, event_ctx,
+                            );
+                            // ...then fire it now with a synthetic
+                            // release, so the new menu opens on this same
+                            // physical press. Closing the old menu (above)
+                            // and opening the new one land in one
+                            // dispatch, so no frame shows an empty gap —
+                            // the "flicker" a real down→up wait exposes.
+                            // The trailing real MouseUp arrives with the
+                            // new menu already up and fires nothing,
+                            // wherever it lands: outside the menu it is
+                            // swallowed, and inside it every activatable
+                            // widget needs a press first — `release`
+                            // without one is `Release::Idle` (see
+                            // [`InteractionState`]). So this does not rely
+                            // on where a menu anchors relative to its
+                            // trigger.
+                            let release = WidgetEvent::MouseUp {
+                                position: point,
+                                button: MouseButton::Left,
+                            };
+                            return self.dispatch_with_target(
+                                sw_target, sw_offset, sw_active, &release, event_ctx,
+                            );
+                        }
+                    }
+                }
+                // MouseUp / Scroll / other position-bearing events
+                // outside the layer are silently swallowed.
+                return EventResult::Consumed;
             }
         }
 
@@ -2711,22 +2706,22 @@ impl WidgetTree {
             return prev;
         }
 
-        if let Some(p) = prev {
-            if let Some(n) = self.node(p) {
-                let rect = self.layout.absolute_rect(n.layout_node);
-                if let Some(node) = self.node_mut(p) {
-                    node.widget.event(&WidgetEvent::FocusLost, rect, event_ctx);
-                }
+        if let Some(p) = prev
+            && let Some(n) = self.node(p)
+        {
+            let rect = self.layout.absolute_rect(n.layout_node);
+            if let Some(node) = self.node_mut(p) {
+                node.widget.event(&WidgetEvent::FocusLost, rect, event_ctx);
             }
         }
 
-        if let Some(n) = new {
-            if let Some(nd) = self.node(n) {
-                let rect = self.layout.absolute_rect(nd.layout_node);
-                if let Some(node) = self.node_mut(n) {
-                    node.widget
-                        .event(&WidgetEvent::FocusGained, rect, event_ctx);
-                }
+        if let Some(n) = new
+            && let Some(nd) = self.node(n)
+        {
+            let rect = self.layout.absolute_rect(nd.layout_node);
+            if let Some(node) = self.node_mut(n) {
+                node.widget
+                    .event(&WidgetEvent::FocusGained, rect, event_ctx);
             }
         }
 
@@ -3016,10 +3011,10 @@ impl WidgetTree {
         let layout_rect = self.layout.absolute_rect(node.layout_node);
 
         // Hit test for mouse events
-        if let Some(pos) = event_position(event) {
-            if !layout_rect.contains(pos) {
-                return EventResult::Ignored;
-            }
+        if let Some(pos) = event_position(event)
+            && !layout_rect.contains(pos)
+        {
+            return EventResult::Ignored;
         }
 
         // Borrow widget mutably (safe because we're not accessing children here)

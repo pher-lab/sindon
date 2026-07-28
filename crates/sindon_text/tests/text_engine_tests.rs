@@ -130,15 +130,15 @@ fn rasterize_color_emoji_keeps_rgba() {
     let result = engine.shape_text("😀", 32.0, 40.0, None);
 
     for glyph in &result.glyphs {
-        if let Some(img) = engine.rasterize(glyph.cache_key) {
-            if img.is_color {
-                assert_eq!(
-                    img.data.len(),
-                    (img.width * img.height * 4) as usize,
-                    "a color glyph must carry width*height*4 RGBA bytes"
-                );
-                return;
-            }
+        if let Some(img) = engine.rasterize(glyph.cache_key)
+            && img.is_color
+        {
+            assert_eq!(
+                img.data.len(),
+                (img.width * img.height * 4) as usize,
+                "a color glyph must carry width*height*4 RGBA bytes"
+            );
+            return;
         }
     }
 }

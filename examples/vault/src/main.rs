@@ -351,10 +351,10 @@ fn build_row(tree: &mut WidgetTree, parent: usize, state: &Rc<RefCell<AppState>>
             let AppState {
                 state, clipboard, ..
             } = &mut *s;
-            if let VaultState::Unlocked(entries) = state {
-                if let Some(e) = entries.get(idx) {
-                    let _ = clipboard.write_secure(&e.password);
-                }
+            if let VaultState::Unlocked(entries) = state
+                && let Some(e) = entries.get(idx)
+            {
+                let _ = clipboard.write_secure(&e.password);
             }
         }),
     );

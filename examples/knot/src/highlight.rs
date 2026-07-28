@@ -289,24 +289,24 @@ fn tokenize_line(line: &str, lang: &Lang, mut in_block: bool) -> (Vec<Token>, bo
 
         // Block comment open: scan for the closer; if absent, the line ends
         // still inside the comment.
-        if let Some((open, close)) = lang.block_comment {
-            if matches_at(&chars, i, open) {
-                let start = i;
-                i += open.chars().count();
-                loop {
-                    if i >= n {
-                        push(&mut tokens, &chars[start..n], TokenClass::Comment);
-                        return (tokens, true);
-                    }
-                    if matches_at(&chars, i, close) {
-                        i += close.chars().count();
-                        break;
-                    }
-                    i += 1;
+        if let Some((open, close)) = lang.block_comment
+            && matches_at(&chars, i, open)
+        {
+            let start = i;
+            i += open.chars().count();
+            loop {
+                if i >= n {
+                    push(&mut tokens, &chars[start..n], TokenClass::Comment);
+                    return (tokens, true);
                 }
-                push(&mut tokens, &chars[start..i], TokenClass::Comment);
-                continue;
+                if matches_at(&chars, i, close) {
+                    i += close.chars().count();
+                    break;
+                }
+                i += 1;
             }
+            push(&mut tokens, &chars[start..i], TokenClass::Comment);
+            continue;
         }
 
         // String / char literal: from the opening quote to its match. A
@@ -376,11 +376,11 @@ fn push(tokens: &mut Vec<Token>, slice: &[char], class: TokenClass) {
     if slice.is_empty() {
         return;
     }
-    if let Some(last) = tokens.last_mut() {
-        if last.class == class {
-            last.text.extend(slice.iter());
-            return;
-        }
+    if let Some(last) = tokens.last_mut()
+        && last.class == class
+    {
+        last.text.extend(slice.iter());
+        return;
     }
     tokens.push(Token {
         text: slice.iter().collect(),

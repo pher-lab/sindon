@@ -438,15 +438,15 @@ fn union_drag_units(a: (usize, usize), d: (usize, usize)) -> (usize, usize) {
 /// `None` bounds are unbounded on that side. Used by numeric-mode editing.
 fn clamp_opt(v: i64, min: Option<i64>, max: Option<i64>) -> i64 {
     let mut out = v;
-    if let Some(lo) = min {
-        if out < lo {
-            out = lo;
-        }
+    if let Some(lo) = min
+        && out < lo
+    {
+        out = lo;
     }
-    if let Some(hi) = max {
-        if out > hi {
-            out = hi;
-        }
+    if let Some(hi) = max
+        && out > hi
+    {
+        out = hi;
     }
     out
 }
@@ -1627,22 +1627,22 @@ impl Input {
                 }
             }
         }
-        if let Some(src) = self.number_source.as_ref() {
-            if !self.focused {
-                // Render raw, no clamp — what `sig.get()` says is what the
-                // user sees. `min_value` / `max_value` are documented as
-                // applying only to user edits; external out-of-range writes
-                // are the caller's responsibility.
-                let rendered = src.get().to_string();
-                let mut buf = self.value.borrow_mut();
-                if *buf != rendered {
-                    let new_len = rendered.len();
-                    *buf = rendered;
-                    if self.cursor.get() > new_len {
-                        self.cursor.set(new_len);
-                    }
-                    self.clear_history();
+        if let Some(src) = self.number_source.as_ref()
+            && !self.focused
+        {
+            // Render raw, no clamp — what `sig.get()` says is what the
+            // user sees. `min_value` / `max_value` are documented as
+            // applying only to user edits; external out-of-range writes
+            // are the caller's responsibility.
+            let rendered = src.get().to_string();
+            let mut buf = self.value.borrow_mut();
+            if *buf != rendered {
+                let new_len = rendered.len();
+                *buf = rendered;
+                if self.cursor.get() > new_len {
+                    self.cursor.set(new_len);
                 }
+                self.clear_history();
             }
         }
         // Adopt an externally-set caret last, after the buffer has rebased, so
@@ -1712,10 +1712,10 @@ impl Input {
     /// in particular on `FocusLost`, which fires before a clicked toolbar
     /// button's handler runs, so the toolbar reads the pre-blur caret.
     fn push_cursor_to_source(&self) {
-        if let Some(csrc) = self.cursor_source.as_ref() {
-            if csrc.get() != self.cursor.get() {
-                csrc.set(self.cursor.get());
-            }
+        if let Some(csrc) = self.cursor_source.as_ref()
+            && csrc.get() != self.cursor.get()
+        {
+            csrc.set(self.cursor.get());
         }
     }
 
@@ -2373,23 +2373,23 @@ impl Widget for Input {
         // reveal flag) nudge the viewport so the caret line is fully visible. A
         // wheel scroll does not set the flag, so mouse scrolling is not undone.
         if self.multiline {
-            if self.reveal_caret.take() {
-                if let Some((_cx, cy)) = caret_xy {
-                    // Reveal against the logical target, then snap: a caret moved
-                    // by typing / nav / click is shown immediately, never lazily
-                    // glided to (only wheel input eases). A no-op reveal (caret
-                    // already in range) leaves an in-flight glide untouched.
-                    let mut t = self.scroll_anim.target();
-                    if cy < t {
-                        t = cy;
-                    } else if cy + line_height > t + viewport_h {
-                        t = cy + line_height - viewport_h;
-                    }
-                    t = t.clamp(0.0, max_scroll);
-                    if t != self.scroll_anim.target() {
-                        self.scroll_anim.snap(t);
-                        displayed = t;
-                    }
+            if self.reveal_caret.take()
+                && let Some((_cx, cy)) = caret_xy
+            {
+                // Reveal against the logical target, then snap: a caret moved
+                // by typing / nav / click is shown immediately, never lazily
+                // glided to (only wheel input eases). A no-op reveal (caret
+                // already in range) leaves an in-flight glide untouched.
+                let mut t = self.scroll_anim.target();
+                if cy < t {
+                    t = cy;
+                } else if cy + line_height > t + viewport_h {
+                    t = cy + line_height - viewport_h;
+                }
+                t = t.clamp(0.0, max_scroll);
+                if t != self.scroll_anim.target() {
+                    self.scroll_anim.snap(t);
+                    displayed = t;
                 }
             }
             self.last_max_scroll.set(max_scroll);
@@ -2426,46 +2426,47 @@ impl Widget for Input {
         // stays legible on top of the translucent fill. Suppressed while
         // composing — the composed string has its own (preedit) byte layout, so
         // a stale `value`-based selection range would land on the wrong glyphs.
-        if self.focused && !composing {
-            if let Some((lo, hi)) = self.selection_range() {
-                let sel_color = self
-                    .selection_color
-                    .as_ref()
-                    .map(|c| c.get())
-                    .unwrap_or(ctx.theme.colors.selection_background);
-                let rects = {
-                    let v = self.value.borrow();
-                    // `_with_trailing`: a multi-line selection draws a small
-                    // sliver past each non-final row's last glyph so the
-                    // included line breaks are visible (FW-6). Shaped with the
-                    // field's attrs so the highlight tracks a bold value.
-                    match edit_buffer.as_ref().and_then(|_| {
-                        ctx.text_engine
-                            .edit_selection_rects_with_trailing(&v, lo, hi, font_size)
-                    }) {
-                        Some(rects) => rects,
-                        None => ctx.text_engine.selection_rects_with_trailing_attrs(
-                            &v,
-                            lo,
-                            hi,
-                            font_size,
-                            line_height,
-                            wrap_width,
-                            &self.attrs,
-                        ),
-                    }
-                };
-                for r in rects {
-                    ctx.fill_rect(
-                        Rect::new(
-                            text_x + r.origin.x,
-                            text_y + r.origin.y,
-                            r.size.width,
-                            r.size.height,
-                        ),
-                        sel_color,
-                    );
+        if self.focused
+            && !composing
+            && let Some((lo, hi)) = self.selection_range()
+        {
+            let sel_color = self
+                .selection_color
+                .as_ref()
+                .map(|c| c.get())
+                .unwrap_or(ctx.theme.colors.selection_background);
+            let rects = {
+                let v = self.value.borrow();
+                // `_with_trailing`: a multi-line selection draws a small
+                // sliver past each non-final row's last glyph so the
+                // included line breaks are visible (FW-6). Shaped with the
+                // field's attrs so the highlight tracks a bold value.
+                match edit_buffer.as_ref().and_then(|_| {
+                    ctx.text_engine
+                        .edit_selection_rects_with_trailing(&v, lo, hi, font_size)
+                }) {
+                    Some(rects) => rects,
+                    None => ctx.text_engine.selection_rects_with_trailing_attrs(
+                        &v,
+                        lo,
+                        hi,
+                        font_size,
+                        line_height,
+                        wrap_width,
+                        &self.attrs,
+                    ),
                 }
+            };
+            for r in rects {
+                ctx.fill_rect(
+                    Rect::new(
+                        text_x + r.origin.x,
+                        text_y + r.origin.y,
+                        r.size.width,
+                        r.size.height,
+                    ),
+                    sel_color,
+                );
             }
         }
 
@@ -2826,10 +2827,10 @@ impl Widget for Input {
 
             WidgetEvent::MouseMove { position } if self.scroll_dragging.is_some() => {
                 // Scrollbar drag in flight: track the pointer 1:1 (snap, no ease).
-                if let Some(grab_dy) = self.scroll_dragging {
-                    if let Some(geom) = self.scrollbar_geom_cached(layout) {
-                        self.scrollbar_drag_to(position.y, grab_dy, &geom);
-                    }
+                if let Some(grab_dy) = self.scroll_dragging
+                    && let Some(geom) = self.scrollbar_geom_cached(layout)
+                {
+                    self.scrollbar_drag_to(position.y, grab_dy, &geom);
                 }
                 scrollbar_gesture = true;
                 EventResult::Consumed

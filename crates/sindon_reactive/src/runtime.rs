@@ -173,10 +173,10 @@ impl ReactiveRuntime {
         // Register as child of parent scope
         if let Some(parent_id) = parent {
             let mut nodes = self.nodes.borrow_mut();
-            if let Some(parent_node) = nodes.get_mut(parent_id) {
-                if let NodeKind::Scope { children, .. } = &mut parent_node.kind {
-                    children.push(id);
-                }
+            if let Some(parent_node) = nodes.get_mut(parent_id)
+                && let NodeKind::Scope { children, .. } = &mut parent_node.kind
+            {
+                children.push(id);
             }
         }
         id
@@ -192,10 +192,10 @@ impl ReactiveRuntime {
 
     pub fn add_cleanup(&self, scope_id: ReactiveId, cleanup: impl FnOnce() + 'static) {
         let mut nodes = self.nodes.borrow_mut();
-        if let Some(node) = nodes.get_mut(scope_id) {
-            if let NodeKind::Scope { cleanups, .. } = &mut node.kind {
-                cleanups.push(Box::new(cleanup));
-            }
+        if let Some(node) = nodes.get_mut(scope_id)
+            && let NodeKind::Scope { cleanups, .. } = &mut node.kind
+        {
+            cleanups.push(Box::new(cleanup));
         }
     }
 
@@ -354,16 +354,16 @@ impl ReactiveRuntime {
 
         let mut nodes = self.nodes.borrow_mut();
 
-        if let Some(source) = nodes.get_mut(source_id) {
-            if !source.subscribers.contains(&observer_id) {
-                source.subscribers.push(observer_id);
-            }
+        if let Some(source) = nodes.get_mut(source_id)
+            && !source.subscribers.contains(&observer_id)
+        {
+            source.subscribers.push(observer_id);
         }
 
-        if let Some(observer) = nodes.get_mut(observer_id) {
-            if !observer.sources.contains(&source_id) {
-                observer.sources.push(source_id);
-            }
+        if let Some(observer) = nodes.get_mut(observer_id)
+            && !observer.sources.contains(&source_id)
+        {
+            observer.sources.push(source_id);
         }
     }
 
@@ -404,12 +404,12 @@ impl ReactiveRuntime {
         // Queue effects
         {
             let nodes = self.nodes.borrow();
-            if let Some(node) = nodes.get(id) {
-                if matches!(node.kind, NodeKind::Effect { .. }) {
-                    let mut pending = self.pending_effects.borrow_mut();
-                    if !pending.contains(&id) {
-                        pending.push(id);
-                    }
+            if let Some(node) = nodes.get(id)
+                && matches!(node.kind, NodeKind::Effect { .. })
+            {
+                let mut pending = self.pending_effects.borrow_mut();
+                if !pending.contains(&id) {
+                    pending.push(id);
                 }
             }
         }
@@ -438,12 +438,12 @@ impl ReactiveRuntime {
         // Queue effects
         {
             let nodes = self.nodes.borrow();
-            if let Some(node) = nodes.get(id) {
-                if matches!(node.kind, NodeKind::Effect { .. }) {
-                    let mut pending = self.pending_effects.borrow_mut();
-                    if !pending.contains(&id) {
-                        pending.push(id);
-                    }
+            if let Some(node) = nodes.get(id)
+                && matches!(node.kind, NodeKind::Effect { .. })
+            {
+                let mut pending = self.pending_effects.borrow_mut();
+                if !pending.contains(&id) {
+                    pending.push(id);
                 }
             }
         }
@@ -563,10 +563,10 @@ impl ReactiveRuntime {
         if changed {
             let mut nodes = self.nodes.borrow_mut();
             for &sub_id in &subscribers {
-                if let Some(sub) = nodes.get_mut(sub_id) {
-                    if sub.state == NodeState::MaybeDirty {
-                        sub.state = NodeState::Dirty;
-                    }
+                if let Some(sub) = nodes.get_mut(sub_id)
+                    && sub.state == NodeState::MaybeDirty
+                {
+                    sub.state = NodeState::Dirty;
                 }
             }
         }
@@ -625,10 +625,10 @@ impl ReactiveRuntime {
         if changed {
             let mut nodes = self.nodes.borrow_mut();
             for &sub_id in &subscribers {
-                if let Some(sub) = nodes.get_mut(sub_id) {
-                    if sub.state == NodeState::MaybeDirty {
-                        sub.state = NodeState::Dirty;
-                    }
+                if let Some(sub) = nodes.get_mut(sub_id)
+                    && sub.state == NodeState::MaybeDirty
+                {
+                    sub.state = NodeState::Dirty;
                 }
             }
         }
@@ -726,10 +726,10 @@ impl ReactiveRuntime {
         };
 
         let mut nodes = self.nodes.borrow_mut();
-        if let Some(scope) = nodes.get_mut(scope_id) {
-            if let NodeKind::Scope { children, .. } = &mut scope.kind {
-                children.push(id);
-            }
+        if let Some(scope) = nodes.get_mut(scope_id)
+            && let NodeKind::Scope { children, .. } = &mut scope.kind
+        {
+            children.push(id);
         }
     }
 
