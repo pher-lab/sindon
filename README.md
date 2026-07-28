@@ -99,11 +99,35 @@ applications.
 
 ## Platform support
 
-Windows is the developed and verified target. Linux and macOS build and run, but
-two features are Windows-only by nature and no-op elsewhere: display-capture
-prevention (no equivalent OS API) and the signature-policy diagnostics. The
-AccessKit integration has been verified with a real screen reader on Windows
-only.
+Windows is the developed and verified target, and the only platform where the
+AccessKit integration has been checked with a real screen reader.
+
+**Linux** builds and runs. Verified against the published crates from a
+throwaway `cargo add sindon` project on Ubuntu 24.04: every facade-only example
+builds and renders, keyboard input and focus reach the widgets, and the OS
+locale is reported correctly. Three things degrade, none of them fatal:
+
+- display-capture prevention is a no-op (no equivalent OS API)
+- the signature-policy diagnostics are Windows-only
+- OS light/dark detection never reports — `system_theme_signal()` stays `None`
+  and apps fall back to their own theme, because winit reports no theme on X11
+  and only the app's own decoration preference on Wayland
+
+Building needs a C toolchain (`build-essential` on Debian/Ubuntu) and nothing
+else: the graphics and input libraries are opened at runtime rather than
+linked, so no `-dev` packages are required. Running under X11 does need those
+runtime libraries present, which a minimal image will not have:
+
+```sh
+sudo apt install libxkbcommon-x11-0 libxcursor1 libxrandr2 libxi6
+```
+
+Without them the process aborts inside a transitive dependency (`Library
+libxkbcommon-x11.so could not be loaded`) before any sindon code runs. A
+Wayland session needed no extra packages on the same image.
+
+**macOS** compiles the same platform-gated code paths as Linux, but nothing has
+ever been run there and there is no macOS CI. Treat it as unverified.
 
 ## Examples
 

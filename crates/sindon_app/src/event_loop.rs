@@ -26,6 +26,92 @@ use winit::window::WindowId;
 /// Default cadence for the periodic tick when an `on_frame` hook is set.
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Which stage of starting the platform event loop failed.
+///
+/// Marked `#[non_exhaustive]`: sindon may learn to distinguish further
+/// failures (a lost GPU device, say) without that being a breaking
+/// change, so `match` on it needs a `_` arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AppErrorKind {
+    /// No event loop could be created at all. The window never appeared
+    /// and the build closure never ran.
+    EventLoopUnavailable,
+    /// The event loop was created, ran, and then ended in failure —
+    /// typically because the display server went away underneath it.
+    EventLoopFailed,
+}
+
+/// Why [`App::try_run`] could not start, or could not finish, the
+/// platform event loop.
+///
+/// The underlying platform error is carried as the
+/// [`source`](std::error::Error::source) rather than in this type's
+/// shape, so no winit type reaches sindon's public API.
+#[derive(Debug)]
+pub struct AppError {
+    kind: AppErrorKind,
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl AppError {
+    fn new(kind: AppErrorKind, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            kind,
+            source: Box::new(source),
+        }
+    }
+
+    /// Which stage failed.
+    pub fn kind(&self) -> AppErrorKind {
+        self.kind
+    }
+}
+
+/// Appended to [`AppErrorKind::EventLoopUnavailable`] only where it is
+/// the likely cause. A headless Linux box (container, CI, plain SSH) is
+/// the common way to reach this, and the panic that used to come out of
+/// `run` named a winit type rather than the missing display server.
+const NO_DISPLAY_HINT: &str = if cfg!(target_os = "linux") {
+    " — on Linux this usually means the process is headless: no compositor or \
+     X server was reachable"
+} else {
+    ""
+};
+
+/// Counterpart for a loop that started and then died. A compositor
+/// crash reaches the client as a closed socket, which winit reports as
+/// a bare exit code.
+const LOST_DISPLAY_HINT: &str = if cfg!(target_os = "linux") {
+    " — on Linux this usually means the compositor or X server closed the \
+     connection"
+} else {
+    ""
+};
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            AppErrorKind::EventLoopUnavailable => write!(
+                f,
+                "sindon could not create a platform event loop: {}{}",
+                self.source, NO_DISPLAY_HINT
+            ),
+            AppErrorKind::EventLoopFailed => write!(
+                f,
+                "the platform event loop stopped with an error: {}{}",
+                self.source, LOST_DISPLAY_HINT
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AppError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 /// Open the frame perf log from `SINDON_PERF`, or `None` when unset.
 ///
 /// `SINDON_PERF=1` / `stderr` / `-` streams to stderr — the shorthand every
@@ -117,10 +203,19 @@ thread_local! {
 /// [`AppScope::system_theme`]) when an `AppScope` is already in hand.
 ///
 /// The Signal payload starts as `None` and becomes `Some(Light | Dark)`
-/// the moment the window reports a preference. On Linux outside
-/// GNOME / KDE this may stay `None` for the life of the app — code
-/// reading the signal should always treat `None` as "fall back to
-/// app default".
+/// the moment the window reports a preference. Code reading the signal
+/// must always treat `None` as "fall back to app default".
+///
+/// # Platform behaviour
+///
+/// Windows and macOS report the OS preference, and update it live.
+/// **On Linux the signal stays `None` for the life of the app**,
+/// desktop environment regardless: winit's X11 backend reports no
+/// theme at all, and its Wayland backend reports back only the
+/// decoration theme the app itself set. An app that wants to follow
+/// the desktop setting on Linux has to read the XDG desktop portal
+/// (`org.freedesktop.appearance` / `color-scheme`) itself and write
+/// the result into this signal.
 pub fn system_theme_signal() -> Signal<Option<SystemTheme>> {
     SYSTEM_THEME_SIGNAL.with(|cell| *cell.get_or_init(|| Signal::new(None)))
 }
@@ -342,7 +437,8 @@ impl AppScope {
     }
 
     /// Convenience accessor for the OS-theme signal — thin wrapper
-    /// over [`system_theme_signal`].
+    /// over [`system_theme_signal`], including its platform behaviour
+    /// (the signal never leaves `None` on Linux).
     ///
     /// Both return the same underlying `Signal<Option<SystemTheme>>`;
     /// the free-fn form exists for code that needs to read the signal
@@ -732,7 +828,44 @@ impl App {
     /// [`AppHandle`] and UI-thread registration points such as
     /// [`AppScope::on_frame`]. Return the fully-constructed
     /// [`WidgetTree`] from the closure.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the platform event loop cannot be created or ends in
+    /// failure — the same conditions [`try_run`](Self::try_run) reports
+    /// as an [`AppError`]. Use `try_run` to handle them instead: a
+    /// headless machine and a compositor that dies mid-session both
+    /// land here, and neither is a bug in the application.
+    ///
+    /// The panic is `#[track_caller]`, so it is reported at the
+    /// `App::run` call site rather than somewhere inside sindon.
+    #[track_caller]
     pub fn run<F>(self, build: F)
+    where
+        F: FnOnce(&mut AppScope) -> WidgetTree,
+    {
+        if let Err(e) = self.try_run(build) {
+            panic!("{e}");
+        }
+    }
+
+    /// Same as [`run`](Self::run), but returns the failure instead of
+    /// panicking.
+    ///
+    /// Returns `Ok(())` once the event loop exits normally. There is no
+    /// way to fall out of the loop while the window is still up, so an
+    /// `Err` always means the app either never started or lost its
+    /// display server.
+    ///
+    /// ```no_run
+    /// # use sindon_app::App;
+    /// # use sindon_widgets::tree::WidgetTree;
+    /// if let Err(e) = App::new().try_run(|_| WidgetTree::new()) {
+    ///     eprintln!("{e}");
+    ///     std::process::exit(1);
+    /// }
+    /// ```
+    pub fn try_run<F>(self, build: F) -> Result<(), AppError>
     where
         F: FnOnce(&mut AppScope) -> WidgetTree,
     {
@@ -790,7 +923,7 @@ impl App {
 
         let event_loop = EventLoop::<AppEvent>::with_user_event()
             .build()
-            .expect("failed to create event loop");
+            .map_err(|e| AppError::new(AppErrorKind::EventLoopUnavailable, e))?;
         let handle = AppHandle {
             proxy: event_loop.create_proxy(),
         };
@@ -846,7 +979,9 @@ impl App {
             perf_start: Instant::now(),
         };
 
-        event_loop.run_app(&mut handler).expect("event loop error");
+        event_loop
+            .run_app(&mut handler)
+            .map_err(|e| AppError::new(AppErrorKind::EventLoopFailed, e))
     }
 }
 
@@ -2147,6 +2282,42 @@ impl ApplicationHandler<AppEvent> for SindonEventLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The message an app prints on a headless box has to name the
+    /// cause. Before `try_run` existed, the only thing a consumer saw
+    /// was a panic quoting a winit enum from inside sindon's own
+    /// source — measured on Linux against the published 0.1.2.
+    #[test]
+    fn app_error_reports_the_stage_and_keeps_the_platform_error_as_source() {
+        use std::error::Error as _;
+
+        let io = std::io::Error::other("no display server");
+        let err = AppError::new(AppErrorKind::EventLoopUnavailable, io);
+
+        assert_eq!(err.kind(), AppErrorKind::EventLoopUnavailable);
+
+        let text = err.to_string();
+        assert!(
+            text.contains("could not create a platform event loop"),
+            "must name the stage that failed, got: {text}"
+        );
+        assert!(
+            text.contains("no display server"),
+            "must carry the platform error's own message, got: {text}"
+        );
+        // Linux is where this is reachable without a bug in the app, so
+        // that is the only platform the hint costs anything to print.
+        assert_eq!(
+            text.contains("WAYLAND_DISPLAY"),
+            cfg!(target_os = "linux"),
+            "the display-server hint belongs on Linux only, got: {text}"
+        );
+
+        assert!(
+            err.source().is_some(),
+            "the platform error must stay reachable as the source"
+        );
+    }
 
     #[test]
     fn space_named_key_routes_to_char_input() {

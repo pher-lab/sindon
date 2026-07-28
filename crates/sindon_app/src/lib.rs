@@ -15,6 +15,7 @@ pub mod event_loop;
 pub mod perf;
 
 pub use event_loop::{
-    App, AppHandle, AppScope, FrameContext, system_theme_signal, theme_color, theme_value,
+    App, AppError, AppErrorKind, AppHandle, AppScope, FrameContext, system_theme_signal,
+    theme_color, theme_value,
 };
 pub use perf::{FRAME_BUDGET, FrameTimings, PerfSnapshot};
