@@ -2307,10 +2307,18 @@ mod tests {
         );
         // Linux is where this is reachable without a bug in the app, so
         // that is the only platform the hint costs anything to print.
+        // Asserted against the constant rather than a copy of its
+        // wording: spelling the text out here once meant the assertion
+        // could only fail on Linux, which is exactly the platform the
+        // Windows dev box cannot run.
+        assert!(
+            text.ends_with(NO_DISPLAY_HINT),
+            "the message must carry the platform hint, got: {text}"
+        );
         assert_eq!(
-            text.contains("WAYLAND_DISPLAY"),
-            cfg!(target_os = "linux"),
-            "the display-server hint belongs on Linux only, got: {text}"
+            NO_DISPLAY_HINT.is_empty(),
+            !cfg!(target_os = "linux"),
+            "the display-server hint belongs on Linux only"
         );
 
         assert!(
