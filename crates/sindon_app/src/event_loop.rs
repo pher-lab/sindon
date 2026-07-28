@@ -736,25 +736,25 @@ impl App {
     where
         F: FnOnce(&mut AppScope) -> WidgetTree,
     {
-        if self.config.disable_core_dumps {
-            if let Err(e) = hardening::disable_core_dumps() {
-                log::warn!("Failed to disable core dumps: {}", e);
-            }
+        if self.config.disable_core_dumps
+            && let Err(e) = hardening::disable_core_dumps()
+        {
+            log::warn!("Failed to disable core dumps: {}", e);
         }
-        if self.config.ptrace_protection {
-            if let Err(e) = hardening::enable_ptrace_protection() {
-                log::warn!("Failed to enable ptrace protection: {}", e);
-            }
+        if self.config.ptrace_protection
+            && let Err(e) = hardening::enable_ptrace_protection()
+        {
+            log::warn!("Failed to enable ptrace protection: {}", e);
         }
-        if self.config.exploit_mitigation {
-            if let Err(e) = hardening::enable_exploit_mitigation() {
-                log::warn!("Failed to enable exploit mitigation: {}", e);
-            }
+        if self.config.exploit_mitigation
+            && let Err(e) = hardening::enable_exploit_mitigation()
+        {
+            log::warn!("Failed to enable exploit mitigation: {}", e);
         }
-        if self.config.image_load_hardening {
-            if let Err(e) = hardening::enable_image_load_hardening() {
-                log::warn!("Failed to enable image-load hardening: {}", e);
-            }
+        if self.config.image_load_hardening
+            && let Err(e) = hardening::enable_image_load_hardening()
+        {
+            log::warn!("Failed to enable image-load hardening: {}", e);
         }
         // Diagnostic escape hatch, deliberately env-var-only and absent
         // from the builder: `SINDON_CIG_AUDIT=1` turns on Code Integrity
@@ -1207,24 +1207,24 @@ impl SindonEventLoop {
 
         // Text first: the common case, and an image copy carries no text, so
         // a non-empty text read short-circuits the image path below.
-        if let Ok(text) = clipboard.read() {
-            if !text.is_empty() {
-                for ch in text.chars() {
-                    tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut self.event_ctx);
-                }
-                self.request_redraw();
-                return;
+        if let Ok(text) = clipboard.read()
+            && !text.is_empty()
+        {
+            for ch in text.chars() {
+                tree.dispatch_event(&WidgetEvent::CharInput { ch }, &mut self.event_ctx);
             }
+            self.request_redraw();
+            return;
         }
 
         // No text — try an image. Encode the raw clipboard pixels to PNG so
         // the handler receives a self-describing blob (the same shape the
         // file-drop path hands over) rather than format-specific raw RGBA.
-        if let Ok(img) = clipboard.read_image() {
-            if let Ok(png) = sindon_render::encode_png(img.width, img.height, &img.rgba) {
-                tree.dispatch_image_paste(&png, &mut self.event_ctx);
-                self.request_redraw();
-            }
+        if let Ok(img) = clipboard.read_image()
+            && let Ok(png) = sindon_render::encode_png(img.width, img.height, &img.rgba)
+        {
+            tree.dispatch_image_paste(&png, &mut self.event_ctx);
+            self.request_redraw();
         }
     }
 
@@ -1543,10 +1543,10 @@ impl ApplicationHandler<AppEvent> for SindonEventLoop {
         // watches focus / activation to drive AT hand-shakes). Take the window
         // Arc out before borrowing the adapter mutably so the two field borrows
         // don't overlap. Cheap and a no-op while no AT is connected.
-        if let Some(win) = self.window.as_ref().map(|w| w.arc()) {
-            if let Some(adapter) = self.adapter.as_mut() {
-                adapter.process_event(win.as_ref(), &event);
-            }
+        if let Some(win) = self.window.as_ref().map(|w| w.arc())
+            && let Some(adapter) = self.adapter.as_mut()
+        {
+            adapter.process_event(win.as_ref(), &event);
         }
 
         match event {

@@ -6,6 +6,42 @@
 //! This crate is the facade: it names the surface an *application* builds
 //! against. Most applications only need [`app`] and [`widgets`].
 //!
+//! # Quickstart
+//!
+//! A window with centered text — the whole program:
+//!
+//! ```no_run
+//! use sindon::app::App;
+//! use sindon::core::Color;
+//! use sindon::widgets::tree::WidgetTree;
+//! use sindon::widgets::{Container, TextWidget};
+//!
+//! App::new()
+//!     .title("hello")
+//!     .size(800, 600)
+//!     .run(|_scope| {
+//!         let mut tree = WidgetTree::new();
+//!         let root = tree.set_root(Container::column().width(800.0).height(600.0).center());
+//!         tree.add_child(
+//!             root,
+//!             TextWidget::new("Hello, sindon!")
+//!                 .font_size(32.0)
+//!                 .color(Color::rgb(0.2, 0.8, 0.7)),
+//!         );
+//!         tree
+//!     });
+//! ```
+//!
+//! [`App::run`](app::App::run) takes the window over and returns when it
+//! closes. From there, [`widgets`] holds the widget set and [`reactive`] the
+//! signals that drive it; secrets live in [`security`]'s types and reach the
+//! screen through `SecureInput` / `SecureText`.
+//!
+//! One note for reading the rest of these docs: the per-item examples live on
+//! the crates re-exported below, so they are written as
+//! `sindon_widgets::Container` rather than `sindon::widgets::Container`. Those
+//! are the same item — a crate depending on `sindon` spells it the second way.
+//!
 //! # What this facade promises
 //!
 //! Under the hood sindon is nine crates, and several of them carry

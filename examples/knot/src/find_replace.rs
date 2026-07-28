@@ -320,28 +320,26 @@ fn replace_current(
 
     // Only replace when the selection is exactly on a match; otherwise fall back
     // to Find Next.
-    if let Some(sel) = selection_sig.get() {
-        if matches.contains(&sel) {
-            let (lo, hi) = sel;
-            let (new_body, caret) = replace_span(&body, lo, hi, &repl);
-            commit_body(state, body_sig, new_body);
-            // Step to the next match *after* the caret (which sits past the
-            // inserted text, so a replacement that itself contains the query
-            // isn't immediately re-matched). If none remain, just place the
-            // caret there.
-            let after = find_matches(&body_sig.get_clone(), &query);
-            match next_match(&after, caret) {
-                Some((nlo, nhi)) => {
-                    select_in_body(cursor_sig, selection_sig, body_idx, ctx, nlo, nhi)
-                }
-                None => {
-                    selection_sig.set(None);
-                    cursor_sig.set(caret);
-                    ctx.focus(body_idx.get());
-                }
+    if let Some(sel) = selection_sig.get()
+        && matches.contains(&sel)
+    {
+        let (lo, hi) = sel;
+        let (new_body, caret) = replace_span(&body, lo, hi, &repl);
+        commit_body(state, body_sig, new_body);
+        // Step to the next match *after* the caret (which sits past the
+        // inserted text, so a replacement that itself contains the query
+        // isn't immediately re-matched). If none remain, just place the
+        // caret there.
+        let after = find_matches(&body_sig.get_clone(), &query);
+        match next_match(&after, caret) {
+            Some((nlo, nhi)) => select_in_body(cursor_sig, selection_sig, body_idx, ctx, nlo, nhi),
+            None => {
+                selection_sig.set(None);
+                cursor_sig.set(caret);
+                ctx.focus(body_idx.get());
             }
-            return;
         }
+        return;
     }
 
     // No match selected yet → behave as Find Next.

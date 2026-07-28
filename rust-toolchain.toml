@@ -3,8 +3,10 @@
 # 1.96, so newer clippy/rustdoc lints failed only in CI. Bump this in lockstep
 # when intentionally moving to a newer stable.
 #
-# Keep in sync with the moxcms `=0.8.0` pin in the workspace Cargo.toml: 0.8.1
-# ICEs on some stable toolchains, so verify a build before bumping either pin.
+# This file is the right place to fix a compiler version, because it is local
+# only. A dependency `=` pin is not: it is published into our crates' metadata
+# and becomes the consumer's problem. The moxcms requirement in the workspace
+# Cargo.toml used to be one and had to be undone — see the comment there.
 [toolchain]
 channel = "1.96.0"
 components = ["clippy", "rustfmt"]

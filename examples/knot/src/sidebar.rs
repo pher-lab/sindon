@@ -856,14 +856,14 @@ fn import_note(w: &SidebarWiring, ctx: &mut EventContext) {
     };
 
     // Refuse a pathologically large file before reading it into memory.
-    if let Ok(meta) = std::fs::metadata(&path) {
-        if meta.len() > MAX_IMPORT_BYTES {
-            notice::show(
-                i18n::tr(Key::ErrImportTooLarge)
-                    .replace("{n}", &(MAX_IMPORT_BYTES / (1024 * 1024)).to_string()),
-            );
-            return;
-        }
+    if let Ok(meta) = std::fs::metadata(&path)
+        && meta.len() > MAX_IMPORT_BYTES
+    {
+        notice::show(
+            i18n::tr(Key::ErrImportTooLarge)
+                .replace("{n}", &(MAX_IMPORT_BYTES / (1024 * 1024)).to_string()),
+        );
+        return;
     }
 
     let body = match std::fs::read_to_string(&path) {

@@ -53,10 +53,10 @@ pub fn write_json_atomic<T: Serialize>(path: impl AsRef<Path>, value: &T) -> io:
     let path = path.as_ref();
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     let tmp = tmp_path_for(path);
     std::fs::write(&tmp, &bytes)?;

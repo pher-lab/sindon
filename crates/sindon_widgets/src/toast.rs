@@ -185,10 +185,10 @@ fn push(message: String, kind: ToastKind, hold: Duration) -> ToastId {
 /// rather than waiting out its hold. No-op if it's already gone.
 pub fn dismiss(id: ToastId) {
     TOASTS.with(|t| {
-        if let Some(toast) = t.borrow_mut().iter_mut().find(|x| x.id == id) {
-            if toast.dismissed.is_none() {
-                toast.dismissed = Some(animation::now());
-            }
+        if let Some(toast) = t.borrow_mut().iter_mut().find(|x| x.id == id)
+            && toast.dismissed.is_none()
+        {
+            toast.dismissed = Some(animation::now());
         }
     });
     request_frame();

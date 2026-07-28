@@ -877,10 +877,10 @@ impl Widget for Container {
         // Four-sided border stroke, over the fill and children so it reads on
         // top of a background and on its own for a transparent outlined box.
         // Reuses the same rounded-SDF path as Input's frame.
-        if self.border_width > 0.0 {
-            if let Some(color) = self.border_color.as_ref().map(|c| c.get()) {
-                ctx.stroke_rect_rounded(layout, color, self.radius, self.border_width);
-            }
+        if self.border_width > 0.0
+            && let Some(color) = self.border_color.as_ref().map(|c| c.get())
+        {
+            ctx.stroke_rect_rounded(layout, color, self.radius, self.border_width);
         }
 
         // Single-side borders (dividers). Each is a sharp filled line hugging
@@ -915,11 +915,10 @@ impl Widget for Container {
             button: MouseButton::Right,
             position,
         } = event
+            && let Some(handler) = &mut self.on_context_menu
         {
-            if let Some(handler) = &mut self.on_context_menu {
-                handler(*position, ctx);
-                return EventResult::Consumed;
-            }
+            handler(*position, ctx);
+            return EventResult::Consumed;
         }
 
         // Left press → on_press / on_press_rect (independent of hoverable,

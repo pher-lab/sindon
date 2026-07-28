@@ -325,13 +325,13 @@ impl ScrollView {
     /// content leaves it untouched, so an active scroll position is preserved.
     pub(crate) fn clamp_scroll(&mut self, viewport_height: f32) {
         let max = self.max_scroll_y(viewport_height);
-        if let Some(a) = &self.scroll_anim {
-            if a.target() > max {
-                // Re-clamp is a system correction, not a user gesture — snap
-                // instantly so switching to a shorter note doesn't visibly
-                // slide the (reused) viewport back up.
-                a.snap(max);
-            }
+        if let Some(a) = &self.scroll_anim
+            && a.target() > max
+        {
+            // Re-clamp is a system correction, not a user gesture — snap
+            // instantly so switching to a shorter note doesn't visibly
+            // slide the (reused) viewport back up.
+            a.snap(max);
         }
     }
 

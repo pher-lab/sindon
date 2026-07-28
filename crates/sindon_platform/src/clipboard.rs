@@ -98,11 +98,11 @@ impl SecureClipboard {
     /// Call this periodically (e.g., once per frame or per second).
     /// Returns `true` if the clipboard was cleared.
     pub fn tick(&mut self) -> bool {
-        if let Some(write_time) = self.secure_write_time {
-            if write_time.elapsed() >= self.auto_clear_duration {
-                self.force_clear();
-                return true;
-            }
+        if let Some(write_time) = self.secure_write_time
+            && write_time.elapsed() >= self.auto_clear_duration
+        {
+            self.force_clear();
+            return true;
         }
         false
     }
