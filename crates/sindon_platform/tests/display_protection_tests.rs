@@ -51,12 +51,33 @@ fn platform_supported_returns_consistent_value() {
 #[test]
 fn max_supported_level_is_valid() {
     let level = DisplayProtection::max_supported_level();
-    // On Windows, should be ContentProtection
-    // On other platforms, should be None
     #[cfg(target_os = "windows")]
     assert_eq!(level, DisplayProtectionLevel::ContentProtection);
-    #[cfg(not(target_os = "windows"))]
+    // Deliberately one rung lower than Windows, and this assertion is the
+    // guard on that. macOS reaches NSWindowSharingNone through winit, which is
+    // the ExcludeFromCapture class — weaker even within it, since QuickTime is
+    // documented as reading through it. There is no macOS counterpart to
+    // WDA_MONITOR, so a future edit that "tidies" this into the Windows arm
+    // would invent a DRM-level promise nothing on the platform can keep.
+    #[cfg(target_os = "macos")]
+    assert_eq!(level, DisplayProtectionLevel::ExcludeFromCapture);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     assert_eq!(level, DisplayProtectionLevel::None);
+}
+
+/// The support query and the level table have to agree about macOS, because
+/// they are read by different callers: an app branches on
+/// `platform_supported()`, while the docs and `App::capture_prevention` quote
+/// the level. Before this was wired, both said "nothing here"; the failure
+/// mode now is one of them being updated without the other.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_reports_support_without_claiming_content_protection() {
+    assert!(DisplayProtection::platform_supported());
+    assert_ne!(
+        DisplayProtection::max_supported_level(),
+        DisplayProtectionLevel::ContentProtection
+    );
 }
 
 #[test]

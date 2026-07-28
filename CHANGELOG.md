@@ -8,6 +8,39 @@ here covers the workspace rather than a single crate.
 
 ## [Unreleased]
 
+### Added
+
+- **Display-capture prevention on macOS**, through
+  `NSWindow.setSharingType(.none)`. `App::capture_prevention(true)` now reaches
+  the OS there instead of logging a warning into a logger sindon never
+  installs, and `DisplayProtection::platform_supported()` reports `true`.
+
+  Two limits, neither of them visible in the `DisplayProtectionResult` an app
+  gets back. It is a **weaker guarantee** than the Windows one:
+  `NSWindowSharingNone` belongs to the `WDA_EXCLUDEFROMCAPTURE` class and
+  QuickTime is documented as still able to read a window that has it, so the
+  DRM-level `ContentProtection` — `WDA_MONITOR` on Windows — reports
+  `Unsupported` on macOS instead of quietly aliasing the level below it. And it
+  is **unverified**: capture prevention is a claim about what another process
+  sees, the only honest test is a screenshot taken from outside that comes back
+  blank, and a hosted runner grants no screen recording. AppKit's setter
+  returns no status either, so `Applied` on macOS means the request was made,
+  not that the OS agreed. The module docs, `docs/SECURITY.md` and the README
+  all say this rather than leaving it to be inferred.
+
+  Note for anyone reading winit's docs alongside this: its rustdoc for
+  `set_content_protected` states the mapping backwards ("if `false`,
+  `NSWindowSharingNone` is used") while its implementation passes
+  `NSWindowSharingNone` for `true`. sindon follows the implementation.
+
+- **A macOS CI job that builds `knot` and `vault`, and starts `knot`.** The
+  existing macOS job excludes both — they build SQLCipher and OpenSSL from
+  source and are not published — which is right for the question that job asks
+  but left the one app exercising IME, the clipboard and file dialogs never
+  compiled for Darwin. It takes about two minutes: Darwin's system Perl and
+  clang satisfy OpenSSL's configure unassisted, where Windows needs Strawberry
+  Perl ahead of msys2's on `PATH`.
+
 ## [0.1.3] - 2026-07-28
 
 The release that ran sindon on the two platforms it had only ever claimed.

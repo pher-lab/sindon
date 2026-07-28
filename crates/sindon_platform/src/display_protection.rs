@@ -4,15 +4,37 @@
 //!
 //! | Platform | Applied? | Why |
 //! |----------|----------|-----|
-//! | Windows  | yes | `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` |
-//! | macOS    | no  | Reachable — winit's `set_content_protected` calls `NSWindow.setSharingType(.none)` — but not wired up, because nothing can observe the result without real hardware |
+//! | Windows  | yes, both levels | `SetWindowDisplayAffinity` — `WDA_EXCLUDEFROMCAPTURE`, or `WDA_MONITOR` for [`ContentProtection`](DisplayProtectionLevel::ContentProtection) |
+//! | macOS    | up to [`ExcludeFromCapture`](DisplayProtectionLevel::ExcludeFromCapture), never observed | `NSWindow.setSharingType(.none)`, through winit |
 //! | Linux/X11 | no | No X11 API for capture prevention exists |
 //! | Linux/Wayland | no | No standard protocol; a compositor may add an opt-in one later |
 //!
-//! Everywhere except Windows, all operations return `false` / `Unsupported`.
-//! The column says what the window actually gets, not what the platform could
-//! in principle offer: a table that reads "Full" next to code returning
-//! `Unsupported` is how a security claim outlives the thing it described.
+//! On Linux every operation returns `false` / `Unsupported`. The column says
+//! what the window actually gets, not what the platform could in principle
+//! offer: a table that reads "Full" next to code returning `Unsupported` is how
+//! a security claim outlives the thing it described.
+//!
+//! # macOS is not the Windows guarantee
+//!
+//! Two things separate that row from the one above it, and a
+//! [`DisplayProtectionResult`] shows neither.
+//!
+//! **It protects less.** `NSWindowSharingNone` belongs to the
+//! `WDA_EXCLUDEFROMCAPTURE` class, and even inside that class it is the weaker
+//! member: winit documents QuickTime as still able to read a window that has
+//! it. Nothing on macOS corresponds to `WDA_MONITOR`, so
+//! [`ContentProtection`](DisplayProtectionLevel::ContentProtection) reports
+//! `Unsupported` there instead of quietly aliasing the level below it.
+//!
+//! **Nobody has watched it work.** Capture prevention is a claim about what
+//! *another* process sees, so the only honest test is a screenshot taken from
+//! outside that comes back blank — and a hosted macOS runner grants no screen
+//! recording, which is why CI cannot be that test no matter how green it is.
+//! Worse, the call it delegates to returns `()`: AppKit's setter reports no
+//! failure, so `Applied` on macOS means *the request was made*, where on
+//! Windows it means the OS returned success. Until someone takes that
+//! screenshot on real hardware, this row is an implementation, not a
+//! verification.
 
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -28,11 +50,14 @@ pub enum DisplayProtectionLevel {
     /// Exclude from screen capture and recording.
     /// Window appears as a black rectangle in screenshots/recordings.
     /// Windows: `WDA_EXCLUDEFROMCAPTURE` (Win10 2004+).
+    /// macOS: `NSWindowSharingNone`, which is weaker — QuickTime is
+    /// documented as still able to read such a window.
     ExcludeFromCapture,
     /// Full content protection (DRM-level).
     /// Window content is protected even from hardware capture paths.
     /// Windows: `WDA_MONITOR` — content is replaced with a solid color
     /// in both software and some hardware capture scenarios.
+    /// macOS has no equivalent and reports `Unsupported` for this level.
     ContentProtection,
 }
 
@@ -58,7 +83,7 @@ impl DisplayProtectionResult {
 
 /// Query and apply display protection for a window.
 pub struct DisplayProtection {
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
     window: Arc<Window>,
     current_level: DisplayProtectionLevel,
 }
@@ -84,9 +109,7 @@ impl DisplayProtection {
 
     /// Static check for platform support (no window needed).
     pub fn platform_supported() -> bool {
-        cfg!(target_os = "windows")
-        // macOS: reachable through winit but deliberately not wired — see
-        // apply_level_macos for why, and what would change it
+        cfg!(any(target_os = "windows", target_os = "macos"))
         // Linux: false (no universal API)
     }
 
@@ -98,7 +121,15 @@ impl DisplayProtection {
             // WDA_MONITOR has been available since Win7
             DisplayProtectionLevel::ContentProtection
         }
-        #[cfg(not(target_os = "windows"))]
+        // One rung below Windows, on purpose. macOS has no counterpart to
+        // WDA_MONITOR, and `NSWindowSharingNone` is weaker than even the level
+        // named here (see the module docs). Returning `ContentProtection`
+        // would make this function the place a DRM-level promise gets invented.
+        #[cfg(target_os = "macos")]
+        {
+            DisplayProtectionLevel::ExcludeFromCapture
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
             DisplayProtectionLevel::None
         }
@@ -183,28 +214,39 @@ impl DisplayProtection {
 
     #[cfg(target_os = "macos")]
     fn apply_level_macos(&self, level: DisplayProtectionLevel) -> DisplayProtectionResult {
-        // Unsupported by choice, not for want of an API — and the reason is
-        // not the one this comment used to give. It said a full implementation
-        // needed objc2 integration to reach `NSWindow.setSharingType(.none)`.
-        // That has not been true for as long as we have depended on winit:
-        // `Window::set_content_protected(true)` calls exactly that, and winit
-        // already routes it per platform (Windows gets WDA_EXCLUDEFROMCAPTURE,
-        // the same affinity the Windows arm above sets by hand).
+        // Everything here follows winit 0.30's *implementation*
+        // (platform_impl/macos/window_delegate.rs), not its rustdoc, because
+        // the two disagree: the public doc says "if `false`,
+        // NSWindowSharingNone is used", while the code passes
+        // NSWindowSharingNone for `true` and NSWindowSharingReadOnly — the
+        // AppKit default — for `false`. Read the source before trusting the
+        // sentence; a mapping copied from that doc would invert the feature.
         //
-        // What is actually missing is a way to verify it. Capture prevention
-        // is a claim about what another process sees, and the only honest test
-        // is to take a screenshot from outside and find it blank. macOS CI
-        // cannot do that -- a hosted runner grants no screen recording -- so
-        // shipping this would mean turning a documented no-op into an
-        // undocumented "probably", on the one platform where nobody has
-        // watched sindon draw a single frame. A framework that names secrets
-        // in its pitch does not get to guess about that.
-        //
-        // Trigger: real Mac hardware. It is a one-line call plus a mapping
-        // decision (winit's bool cannot distinguish ExcludeFromCapture from
-        // ContentProtection, which on Windows are different affinities).
-        let _ = level;
-        DisplayProtectionResult::Unsupported
+        // `set_content_protected` returns `()`. AppKit's setter has no failure
+        // signal at all, so unlike the Windows arm above — which checks what
+        // `SetWindowDisplayAffinity` returned — there is nothing here to
+        // check. `Applied` therefore means "the request was made", one notch
+        // weaker than the same value means on Windows, and no amount of it
+        // substitutes for the screenshot-from-outside nobody has taken yet.
+        match level {
+            DisplayProtectionLevel::None => {
+                self.window.set_content_protected(false);
+                DisplayProtectionResult::Applied
+            }
+            DisplayProtectionLevel::ExcludeFromCapture => {
+                self.window.set_content_protected(true);
+                DisplayProtectionResult::Applied
+            }
+            // Not folded in with the arm above, which is the whole decision in
+            // this function. `ContentProtection` means WDA_MONITOR on Windows:
+            // protection that survives capture paths WDA_EXCLUDEFROMCAPTURE
+            // does not. macOS has no such tier — NSWindowSharingNone is the
+            // weaker class, and winit names QuickTime as reading through it.
+            // Aliasing the two would let an app ask for the strongest level,
+            // be told `Applied`, and get less than it asked for on one
+            // platform only. Refusing is the answer that stays true.
+            DisplayProtectionLevel::ContentProtection => DisplayProtectionResult::Unsupported,
+        }
     }
 
     // ── Linux ────────────────────────────────────────────────────

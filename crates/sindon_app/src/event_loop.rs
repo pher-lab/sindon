@@ -682,10 +682,22 @@ impl App {
 
     /// Enable screen capture prevention.
     ///
-    /// When enabled, the window content appears black in screenshots
-    /// and screen recordings. Uses `SetWindowDisplayAffinity` on Windows;
-    /// a no-op on platforms without capture prevention support.
-    /// Defaults to `false`.
+    /// When enabled, the window content appears black in screenshots and
+    /// screen recordings. Defaults to `false`.
+    ///
+    /// - **Windows**: `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`.
+    /// - **macOS**: `NSWindow.setSharingType(.none)`. A weaker guarantee than
+    ///   the Windows one — QuickTime is documented as still able to read such
+    ///   a window — and one no one has yet confirmed from outside the process,
+    ///   because the only honest test is a screenshot taken on real hardware
+    ///   and CI runners grant no screen recording.
+    /// - **Linux**: a no-op. Neither X11 nor Wayland offers an equivalent.
+    ///
+    /// Failure is never fatal and never reported here: a platform that cannot
+    /// apply it logs through the `log` crate and carries on. Applications that
+    /// need to *know* should ask
+    /// [`DisplayProtection`](sindon_platform::display_protection::DisplayProtection)
+    /// directly, whose docs spell out what each platform's success means.
     pub fn capture_prevention(mut self, on: bool) -> Self {
         self.config.capture_prevention = on;
         self
