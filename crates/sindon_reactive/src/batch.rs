@@ -6,9 +6,11 @@ use crate::runtime::RUNTIME;
 /// not flushed. After the closure returns (or panics), all pending effects
 /// run exactly once.
 ///
-/// ```ignore
+/// ```
+/// # use sindon_reactive::{Effect, Signal, batch};
 /// let a = Signal::new(0);
 /// let b = Signal::new(0);
+/// # Effect::new(move || { let _ = (a.get(), b.get()); });
 ///
 /// // Without batch: effect runs twice (once per set)
 /// // With batch: effect runs once after both sets

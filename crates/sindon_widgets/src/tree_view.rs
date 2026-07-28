@@ -37,7 +37,11 @@
 //!
 //! # Building
 //!
-//! ```ignore
+//! ```
+//! # use sindon_widgets::tree::WidgetTree;
+//! # use sindon_widgets::{Container, TreeItem, TreeView};
+//! # let mut tree = WidgetTree::new();
+//! # let parent = tree.set_root(Container::column());
 //! let items = vec![
 //!     TreeItem::new(1, "src").child(TreeItem::new(2, "main.rs")),
 //!     TreeItem::new(3, "README.md"),

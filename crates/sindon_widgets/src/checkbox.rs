@@ -10,7 +10,8 @@ use sindon_layout::FlexStyle;
 /// A checkbox with an optional text label.
 ///
 /// # Example (conceptual)
-/// ```ignore
+/// ```
+/// # use sindon_widgets::Checkbox;
 /// let cb = Checkbox::new("Remember me")
 ///     .on_change(|checked, _ctx| println!("checked: {checked}"));
 /// ```

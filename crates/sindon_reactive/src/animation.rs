@@ -17,7 +17,8 @@
 //! another redraw. When every animation has settled, no votes are cast and
 //! the loop goes idle — no busy-looping at rest.
 //!
-//! ```ignore
+//! ```
+//! # use sindon_core::Color;
 //! use std::time::Duration;
 //! use sindon_reactive::animation::{Animated, Easing};
 //!

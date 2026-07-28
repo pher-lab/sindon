@@ -37,7 +37,9 @@ type ChangeHandler = Box<dyn FnMut(usize, &mut EventContext)>;
 /// A horizontal single-select control over a fixed set of labelled segments.
 ///
 /// # Example (conceptual)
-/// ```ignore
+/// ```
+/// # use sindon_reactive::Signal;
+/// # use sindon_widgets::Segmented;
 /// let mode = Signal::new(0usize);
 /// let seg = Segmented::new(["Edit", "Preview"])
 ///     .bind(mode)

@@ -22,7 +22,13 @@
 //! [`SplitPane::build`] mounts the machinery into the tree and hands back the
 //! two pane node ids to populate:
 //!
-//! ```ignore
+//! ```
+//! # use sindon_widgets::tree::WidgetTree;
+//! # use sindon_widgets::{Container, SplitPane, TextWidget};
+//! # let mut tree = WidgetTree::new();
+//! # let root = tree.set_root(Container::row());
+//! # let sidebar = TextWidget::new("files");
+//! # let editor = TextWidget::new("body");
 //! let (left, right) = SplitPane::horizontal().ratio(0.35).build(&mut tree, root);
 //! tree.add_child(left, sidebar);
 //! tree.add_child(right, editor);

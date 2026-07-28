@@ -318,7 +318,11 @@ impl AppScope {
     /// `shortcut_router_mut().remove(...)` to drop the binding later.
     /// Most apps register once in the build closure and never remove.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use sindon_app::App;
+    /// # use sindon_widgets::shortcut::Shortcut;
+    /// # use sindon_widgets::tree::WidgetTree;
+    /// # fn build_lock_screen(_tree: &mut WidgetTree) {}
     /// App::new().run(|scope| {
     ///     scope.on_shortcut(Shortcut::ctrl('l'), |ctx| {
     ///         ctx.event_ctx.replace_screen(|t| build_lock_screen(t));
@@ -346,7 +350,11 @@ impl AppScope {
     /// `Reactive<Theme>` to hand to `App::theme(...)`). Use whichever
     /// shape reads naturally at the call site.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use sindon_app::App;
+    /// # use sindon_platform::SystemTheme;
+    /// # use sindon_widgets::tree::WidgetTree;
+    /// # use sindon_widgets::{Container, TextWidget};
     /// App::new().run(|scope| {
     ///     let os_theme = scope.system_theme();
     ///     let label = TextWidget::reactive(move || match os_theme.get() {
@@ -354,7 +362,10 @@ impl AppScope {
     ///         Some(SystemTheme::Light) => "OS prefers light",
     ///         None => "OS preference unknown",
     ///     }.to_string());
-    ///     /* … */
+    ///     let mut tree = WidgetTree::new();
+    ///     let root = tree.set_root(Container::column());
+    ///     tree.add_child(root, label);
+    ///     tree
     /// });
     /// ```
     pub fn system_theme(&self) -> Signal<Option<SystemTheme>> {

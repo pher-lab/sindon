@@ -8,11 +8,11 @@
 //!
 //! Pull-based: there is no subscription. The widget tree re-reads every
 //! `Reactive<T>` on each repaint; the surrounding event loop is responsible
-//! for triggering redraws when state changes. See Phase 12 notes in memory.
+//! for triggering redraws when state changes.
 //!
-//! # Examples (conceptual — widget APIs accepting `Reactive<T>` come in 14b)
+//! # Examples
 //!
-//! ```ignore
+//! ```
 //! use sindon_reactive::{Reactive, Signal};
 //!
 //! // Static value
@@ -55,10 +55,15 @@ impl<T> Reactive<T> {
     /// Used when neither a literal nor a `Signal`/`Memo` conversion applies,
     /// e.g. when deriving a value from multiple signals:
     ///
-    /// ```ignore
+    /// ```
+    /// # use sindon_core::Color;
+    /// # use sindon_reactive::{Reactive, Signal};
+    /// # let enabled = Signal::new(true);
+    /// let accent = Color::rgb(0.2, 0.5, 1.0);
     /// let bg = Reactive::derive(move || {
-    ///     if enabled.get() { Color::BLUE } else { Color::GRAY }
+    ///     if enabled.get() { accent } else { Color::TRANSPARENT }
     /// });
+    /// # assert_eq!(bg.get(), accent);
     /// ```
     pub fn derive(f: impl Fn() -> T + 'static) -> Self {
         Reactive::Dynamic(Rc::new(f))

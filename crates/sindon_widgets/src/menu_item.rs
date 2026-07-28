@@ -54,11 +54,12 @@ const V_PADDING: f32 = 6.0;
 /// enqueue `pop_top_layer` / `push_layer` / focus changes — the typical
 /// shape is "do something, then dismiss":
 ///
-/// ```ignore
-/// MenuItem::new("Delete", |ctx| {
+/// ```
+/// # use sindon_widgets::MenuItem;
+/// let delete = MenuItem::new("Delete", |ctx| {
 ///     // ... do work ...
 ///     ctx.pop_top_layer();
-/// })
+/// });
 /// ```
 pub struct MenuItem {
     label: String,

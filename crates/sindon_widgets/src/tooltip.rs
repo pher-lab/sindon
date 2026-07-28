@@ -3,9 +3,13 @@
 //! Wrap whatever should carry a tip in a [`Tooltip`] and add the real widget
 //! as its child:
 //!
-//! ```ignore
+//! ```
+//! # use sindon_widgets::tree::WidgetTree;
+//! # use sindon_widgets::{Button, Container, Tooltip};
+//! # let mut tree = WidgetTree::new();
+//! # let row = tree.set_root(Container::row());
 //! let cell = tree.add_child(row, Tooltip::new("Bold"));
-//! tree.add_child(cell, icon_button(Icon::Bold).on_click(..));
+//! tree.add_child(cell, Button::new("B").on_click(|_ctx| { /* toggle bold */ }));
 //! ```
 //!
 //! The wrapper hugs its child and reports its own layout rect on hover, which

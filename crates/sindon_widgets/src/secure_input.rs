@@ -65,7 +65,10 @@ type LengthHandler = Box<dyn FnMut(usize)>;
 /// - `SecureString` zeroizes on drop.
 ///
 /// # Example (conceptual)
-/// ```ignore
+/// ```
+/// # use sindon_security::SecureString;
+/// # use sindon_widgets::{ClearTrigger, SecureInput};
+/// # fn unlock(_pw: &SecureString) {}
 /// let clear = ClearTrigger::new();
 /// let input = SecureInput::new()
 ///     .placeholder("Enter password")
@@ -385,7 +388,9 @@ impl SecureInput {
     /// meter. Fires only on a *change*; the initial empty state is not reported,
     /// so initialize any bound signal to match a fresh (empty) field.
     ///
-    /// ```ignore
+    /// ```
+    /// # use sindon_reactive::Signal;
+    /// # use sindon_widgets::{Button, SecureInput};
     /// let empty = Signal::new(true);
     /// let field = SecureInput::new().on_length_change(move |n| empty.set(n == 0));
     /// let unlock = Button::new("Unlock").disabled(empty); // dimmed until typed

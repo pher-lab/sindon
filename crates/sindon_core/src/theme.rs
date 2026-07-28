@@ -385,14 +385,19 @@ impl Theme {
     /// are all multiplied by `scale`. Colors, spacing, shape, focus, and hover
     /// tokens are unchanged.
     ///
-    /// Pair with `Reactive::derive` to drive UI-wide font scaling from a
-    /// `Signal` (the same pattern as Phase 30's live theme swap):
-    ///
-    /// ```ignore
-    /// let scale: Signal<f32> = Signal::new(1.0);
-    /// let theme = Reactive::derive(move || Theme::dark().with_font_scale(scale.get()));
-    /// App::new().theme(theme).run(...);
     /// ```
+    /// # use sindon_core::Theme;
+    /// let base = Theme::dark();
+    /// let big = base.clone().with_font_scale(1.25);
+    /// assert_eq!(big.typography.body.font_size, base.typography.body.font_size * 1.25);
+    /// assert_eq!(big.colors.background, base.colors.background);
+    /// ```
+    ///
+    /// To drive font scaling live, wrap it in a `Reactive::derive` reading a
+    /// `Signal<f32>` and hand that to `App::theme` — the whole tree re-reads
+    /// the theme each paint. That pairing is not shown as a runnable example
+    /// here because `sindon_core` has no dependencies, so the reactive and
+    /// app types are out of scope; see the `theme_swap_demo` example.
     pub fn with_font_scale(mut self, scale: f32) -> Self {
         self.typography.heading = self.typography.heading.scaled(scale);
         self.typography.body = self.typography.body.scaled(scale);

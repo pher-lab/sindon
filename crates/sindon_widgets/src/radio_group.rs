@@ -37,7 +37,9 @@ type ChangeHandler = Box<dyn FnMut(usize, &mut EventContext)>;
 /// A vertical single-select control: a list of labelled radio rows.
 ///
 /// # Example (conceptual)
-/// ```ignore
+/// ```
+/// # use sindon_reactive::Signal;
+/// # use sindon_widgets::RadioGroup;
 /// let theme = Signal::new(0usize);
 /// let rg = RadioGroup::new(["System", "Light", "Dark"])
 ///     .bind(theme)

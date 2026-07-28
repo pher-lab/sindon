@@ -653,8 +653,11 @@ impl Container {
     /// `paint`'s `layout` argument) and the event context, so the
     /// typical body opens a context menu layer anchored at the cursor:
     ///
-    /// ```ignore
-    /// Container::row().on_context_menu(|pos, ctx| {
+    /// ```
+    /// # use sindon_core::Rect;
+    /// # use sindon_widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement};
+    /// # use sindon_widgets::{Container, MenuItem};
+    /// let row = Container::row().on_context_menu(|pos, ctx| {
     ///     let anchor = Rect::new(pos.x, pos.y, 0.0, 0.0);
     ///     ctx.push_layer(
     ///         LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
@@ -662,13 +665,13 @@ impl Container {
     ///             prefer: Placement::Below,
     ///             align: HAlign::Start,
     ///         }),
-    ///         ContextMenuRoot::new(),
+    ///         Container::column(),
     ///         |tree, root| {
     ///             tree.add_child(root, MenuItem::new("Rename", |c| { /* … */ c.pop_top_layer(); }));
     ///             tree.add_child(root, MenuItem::new("Delete", |c| { /* … */ c.pop_top_layer(); }));
     ///         },
     ///     );
-    /// })
+    /// });
     /// ```
     ///
     /// Setting this also opts the container into pointer events so the
@@ -714,18 +717,20 @@ impl Container {
     /// cursor point, which can anchor a menu at the cursor but not to the
     /// trigger's box.
     ///
-    /// ```ignore
-    /// Container::row().hoverable().on_press_rect(|rect, ctx| {
+    /// ```
+    /// # use sindon_widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement};
+    /// # use sindon_widgets::Container;
+    /// let trigger = Container::row().hoverable().on_press_rect(|rect, ctx| {
     ///     ctx.push_layer(
     ///         LayerOptions::popover().anchor(LayerAnchor::AnchorRect {
     ///             rect,
     ///             prefer: Placement::Below,
     ///             align: HAlign::End, // right-0
     ///         }),
-    ///         menu_panel(),
+    ///         Container::column(), // the menu panel
     ///         |tree, root| { /* populate */ },
     ///     );
-    /// })
+    /// });
     /// ```
     ///
     /// Fires on `MouseDown` and consumes the event, like
@@ -747,18 +752,20 @@ impl Container {
     /// [`LayerAnchor::AnchorRect`](crate::LayerAnchor) so the typical body
     /// opens a tooltip anchored to the trigger:
     ///
-    /// ```ignore
-    /// Container::row().on_hover_enter(|rect, ctx| {
+    /// ```
+    /// # use sindon_widgets::layer::{HAlign, LayerAnchor, LayerOptions, Placement};
+    /// # use sindon_widgets::{Container, TextWidget};
+    /// let hovered = Container::row().on_hover_enter(|rect, ctx| {
     ///     ctx.push_layer(
     ///         LayerOptions::tooltip().anchor(LayerAnchor::AnchorRect {
     ///             rect,
     ///             prefer: Placement::Below,
     ///             align: HAlign::Start,
     ///         }),
-    ///         tooltip_bubble("Bold"),
+    ///         TextWidget::new("Bold"), // the bubble
     ///         |_tree, _root| {},
     ///     );
-    /// })
+    /// });
     /// ```
     ///
     /// Setting this opts the container into hover-event routing **without**

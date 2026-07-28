@@ -17,12 +17,19 @@
 //! each row) is a separate, larger effort; uniform rows cover the vault / table
 //! shape this was built for.
 //!
-//! ```ignore
+//! ```
+//! # use std::cell::RefCell;
+//! # use std::rc::Rc;
+//! # use sindon_widgets::tree::WidgetTree;
+//! # use sindon_widgets::{Container, ScrollView, TextWidget, VirtualList};
+//! # let mut tree = WidgetTree::new();
+//! # let root = tree.set_root(Container::column());
+//! # let state: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
 //! let sv = tree.add_child(root, ScrollView::new().width_full().grow(1.0));
 //! VirtualList::new(44.0)
 //!     .items({ let s = state.clone(); move || s.borrow().len() })
 //!     .on_row(move |tree, parent, i| {
-//!         tree.add_child(parent, /* one row widget for item `i` */);
+//!         tree.add_child(parent, TextWidget::new(format!("row {i}")));
 //!     })
 //!     .build(&mut tree, sv);
 //! ```

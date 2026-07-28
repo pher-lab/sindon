@@ -57,7 +57,9 @@ use zeroize::Zeroizing;
 /// A standard text input field.
 ///
 /// # Example (conceptual)
-/// ```ignore
+/// ```
+/// # use sindon_reactive::Signal;
+/// # use sindon_widgets::Input;
 /// let text = Signal::new(String::new());
 /// let input = Input::new()
 ///     .placeholder("Enter username")

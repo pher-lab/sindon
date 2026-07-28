@@ -35,7 +35,9 @@ type ChangeHandler = Box<dyn FnMut(bool, &mut EventContext)>;
 /// A boolean on/off toggle with an optional trailing label.
 ///
 /// # Example (conceptual)
-/// ```ignore
+/// ```
+/// # use sindon_reactive::Signal;
+/// # use sindon_widgets::Switch;
 /// let dark_mode = Signal::new(false);
 /// let sw = Switch::new()
 ///     .bind(dark_mode)
