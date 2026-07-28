@@ -19,6 +19,11 @@ import QuartzCore
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
+    // The step running this is `continue-on-error`, which makes the API report
+    // a failed step as `conclusion: success` — so the failure has to announce
+    // itself in the run summary or it reads as green. Annotations are parsed
+    // from stdout, hence the second write.
+    print("::warning title=macOS GPU control failed::\(message). The run smoke below cannot be read as a statement about sindon.")
     exit(1)
 }
 

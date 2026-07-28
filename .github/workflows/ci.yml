@@ -222,6 +222,13 @@ jobs:
       # gating once they have proven stable — or delete them, if it turns out
       # hosted runners cannot present at all and only real hardware can answer.
       #
+      # `continue-on-error` has a sharp edge: the API reports such a step with
+      # `conclusion: success` even when it failed (only the separate `outcome`
+      # field disagrees), so a job whose steps all read green can contain a
+      # failed smoke. Both scripts therefore emit a `::warning` annotation of
+      # their own on failure, the way the residue job does for an absorbed
+      # flake, and still exit non-zero so the step is marked in the UI.
+      #
       # The control runs first because it decides how to read the smoke. See
       # ci/macos-window-control.swift for why it draws instead of just opening
       # a window, and ci/macos-run-smoke.sh for what "survives" means.

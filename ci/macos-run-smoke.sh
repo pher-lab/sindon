@@ -44,11 +44,24 @@ echo "--- stderr ---"
 cat "$err"
 
 rc=0
+reason=""
 if [[ "$verdict" != alive ]]; then
     rc=1
+    reason="$verdict"
 fi
 if [[ -s "$err" ]]; then
     echo "smoke: stderr was not empty"
     rc=1
+    reason="${reason:+$reason, }wrote to stderr"
+fi
+
+# The step that runs this is `continue-on-error`, and under that setting a
+# failed step is still reported with `conclusion: success` by the API -- only
+# the separate `outcome` field says otherwise. Anyone reading the job's step
+# list, this script's author included, would see green. So say it out loud in
+# the run summary, the way the residue job does for an absorbed flake, and
+# still exit non-zero so the step itself is marked in the UI.
+if [[ $rc -ne 0 ]]; then
+    echo "::warning title=macOS run smoke failed::$bin: $reason. Read the control step first — if the control also failed, this says nothing about sindon."
 fi
 exit "$rc"
