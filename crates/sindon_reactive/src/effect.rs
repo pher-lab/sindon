@@ -6,7 +6,8 @@ use crate::runtime::RUNTIME;
 /// They are owned by the enclosing `Scope` (if any) and disposed when that scope
 /// is dropped.
 ///
-/// ```ignore
+/// ```
+/// # use sindon_reactive::{Effect, Signal};
 /// let count = Signal::new(0);
 /// Effect::new(move || {
 ///     println!("count is {}", count.get());

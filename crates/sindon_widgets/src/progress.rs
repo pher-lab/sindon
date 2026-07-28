@@ -88,7 +88,9 @@ const BAR_PERIOD: Duration = Duration::from_millis(1150);
 /// indeterminate ([`indeterminate`](ProgressBar::indeterminate)).
 ///
 /// # Example (conceptual)
-/// ```ignore
+/// ```
+/// # use sindon_reactive::Signal;
+/// # use sindon_widgets::ProgressBar;
 /// // Determinate, driven by a signal in `[0, 1]`:
 /// let done = Signal::new(0.0);
 /// let bar = ProgressBar::new(done).label("Importing");
@@ -262,9 +264,10 @@ const SPINNER_RING_FRAC: f32 = 0.36;
 /// continuously while visible (see the module docs).
 ///
 /// # Example (conceptual)
-/// ```ignore
-/// let s = Spinner::new().size(18.0);              // inline, in a button
-/// let s = Spinner::new().label("Loading vault");  // named for a screen reader
+/// ```
+/// # use sindon_widgets::Spinner;
+/// let inline = Spinner::new().size(18.0);             // inline, in a button
+/// let named = Spinner::new().label("Loading vault");  // named for a screen reader
 /// ```
 pub struct Spinner {
     size: f32,

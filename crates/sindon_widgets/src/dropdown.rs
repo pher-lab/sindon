@@ -42,7 +42,9 @@ use sindon_reactive::{Reactive, Signal};
 ///
 /// # Example (conceptual)
 ///
-/// ```ignore
+/// ```
+/// # use sindon_reactive::Signal;
+/// # use sindon_widgets::Dropdown;
 /// let selected = Signal::new(0_usize);
 /// let dropdown = Dropdown::new(
 ///     vec!["Light".into(), "Dark".into(), "System".into()],

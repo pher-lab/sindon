@@ -40,7 +40,9 @@ type ChangeHandler = Box<dyn FnMut(f32, &mut EventContext)>;
 /// A horizontal slider selecting an `f32` in `[min, max]`.
 ///
 /// # Example (conceptual)
-/// ```ignore
+/// ```
+/// # use sindon_reactive::Signal;
+/// # use sindon_widgets::Slider;
 /// let opacity = Signal::new(0.8);
 /// let sl = Slider::new(0.0, 1.0)
 ///     .bind(opacity)

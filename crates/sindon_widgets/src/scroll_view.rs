@@ -21,7 +21,8 @@ use std::time::Duration;
 /// A scrollable viewport.
 ///
 /// # Example (conceptual)
-/// ```ignore
+/// ```
+/// # use sindon_widgets::ScrollView;
 /// let sv = ScrollView::new()
 ///     .height(300.0)
 ///     .width_full()

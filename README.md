@@ -18,16 +18,20 @@ the design:
   means no V8/JIT attack surface, no DOM leaks, no JS sandbox escape
   exposure.
 - **Process-level hardening** — core dumps disabled, `ptrace` attach
-  denied on Linux/macOS, Windows exploit mitigation applied. All default
-  on via `App::run()`.
+  denied on Linux/macOS, and Windows image-load hardening applied: all
+  default on via `App::run()`. Windows *exploit mitigation*
+  (`ProcessExtensionPointDisablePolicy`) is deliberately **off** by
+  default — it blocks the extension-DLL path CJK IMEs load through, so
+  enabling it silently breaks Japanese/Chinese/Korean input. Opt in with
+  `App::exploit_mitigation(true)` where an IME isn't needed.
 
 ## Workspace layout
 
 | Crate | Role |
 |---|---|
-| `sindon` | Facade — re-exports the others under `app`, `widgets`, ... |
+| `sindon` | Facade — the application-facing surface, under `app`, `widgets`, ... |
 | `sindon_app` | Winit event loop + fluent `App` builder |
-| `sindon_core` | Geometry, ids, theme, security level |
+| `sindon_core` | Geometry, theme, security level (no dependencies) |
 | `sindon_security` | `SecureString`, `SecureBuffer`, `SecureArena`, constant-time ops, hardening |
 | `sindon_reactive` | Fine-grained signals (`Signal`, `Memo`, `Effect`, `batch`) |
 | `sindon_layout` | Flexbox via `taffy` |
@@ -35,6 +39,15 @@ the design:
 | `sindon_render` | wgpu renderer + dual atlas (one cleared per-frame for secrets) |
 | `sindon_platform` | Window, clipboard, display-capture prevention |
 | `sindon_widgets` | `Container`, `Text`, `Button`, `Input`, `SecureInput`, ... |
+
+Build against `sindon` and you get the application surface. It re-exports the
+crates above selectively, following one rule: **no third-party type an
+application would have to name or construct appears in `sindon::*`**. So
+`wgpu`, `winit`, `taffy`, `accesskit` and the cosmic-text fork are reachable
+only by depending on the lower crates directly — which is supported, and is
+what integrating sindon into an existing renderer or event loop looks like.
+The practical effect is that bumping any of them is not a breaking change for
+applications.
 
 ## Examples
 
