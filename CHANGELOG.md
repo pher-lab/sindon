@@ -6,6 +6,42 @@ Notable changes to sindon. The format follows
 All ten crates share one version number and are released together, so an entry
 here covers the workspace rather than a single crate.
 
+## [0.1.2] - 2026-07-28
+
+Everything here was found by building a throwaway `cargo add sindon` project
+outside this workspace — consuming the published crates the way a new user
+does, which nothing in CI had ever done.
+
+### Fixed
+
+- **`cargo build` failed outright on rustc older than 1.96**, with a compiler
+  crash (`STATUS_ACCESS_VIOLATION` in a const-eval of `PQ_LUT_TABLE`) inside
+  `moxcms`, a dependency of `image` most users have never heard of.
+  `sindon_render` published an exact `moxcms = "=0.8.0"` requirement; 0.8.0 is
+  the version that crashes and 0.8.1 compiles cleanly. Because an exact
+  requirement cannot be overridden downstream — `--precise` violates it — there
+  was no consumer-side workaround short of changing toolchain. The requirement
+  is now a floor (`0.8.1`) instead of a pin. The workspace never saw any of
+  this: its `Cargo.lock` held a working resolution, and lockfiles are not
+  published.
+- **`rust-version` claimed 1.87, which had never been true.** Cargo rejects
+  that graph immediately — our own `sindon-cosmic-text` fork requires 1.89, as
+  do `smol_str` and (at 1.88) `image`. Corrected to the floor that is now
+  actually compiled in CI.
+
+### Added
+
+- **A quickstart on both landing pages.** The README (which is every crate's
+  crates.io front page) and the `sindon` crate documentation (the docs.rs front
+  page) each carried zero lines of code: `cargo add sindon` had no next step,
+  and the examples directory is only reachable by leaving for GitHub. Both now
+  open with the complete program for a window with text. The API docs' per-item
+  examples are written against the re-exported crates (`sindon_widgets::…`)
+  because those crates cannot depend on the facade; both pages now say so, so
+  a copied snippet's import path is not a puzzle.
+- **A CI job that compiles the declared `rust-version`.** It reads the value
+  from the manifest, so it cannot drift from the claim it checks.
+
 ## [0.1.1] - 2026-07-28
 
 ### Fixed

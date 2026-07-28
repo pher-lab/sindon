@@ -44,9 +44,13 @@ members = [
 exclude = ["third_party/cosmic-text"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-rust-version = "1.87"
+# Verified by the `msrv` CI job, not asserted here. This read 1.87 from the
+# first release until 2026-07-28, when a `cargo add sindon` project on an older
+# stable was the first thing ever to test it: cargo rejects that graph outright
+# (our own sindon-cosmic-text fork needs 1.89, smol_str 1.89, image 1.88).
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/pher-lab/sindon"
 # Inherited paths resolve from the workspace root, so all ten crates ship the
@@ -93,11 +97,20 @@ argon2 = "0.5"
 chacha20poly1305 = "0.10"
 sys-locale = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-# Pinned to 0.8.0 because 0.8.1 ICEs rustc 1.93.0 stable on the
-# `defaults::PQ_LUT_TABLE` const-eval ("`is_signed` on non-scalar ABI
-# ScalarPair"). image 0.25.10 requires `^0.8.0` so 0.8.0 still resolves.
-# Revisit when rustc fixes the const-eval ABI bug.
-moxcms = "=0.8.0"
+# Pulled in by image; declared here only to keep 0.8.0 out of the graph.
+#
+# ⚠ Do not turn this back into an `=` pin. It was `=0.8.0` to dodge a
+# const-eval ICE that 0.8.1 hit on rustc 1.93 — but an exact requirement is
+# published verbatim into sindon_render's dependencies, where a consumer
+# cannot override it (`--precise` violates the requirement, so their only
+# escape is changing toolchain). Measured 2026-07-28 building a fresh
+# `cargo add sindon` project: it is now *0.8.0* that ICEs 1.93
+# (`defaults::PQ_LUT_TABLE`, STATUS_ACCESS_VIOLATION) while 0.8.1 compiles
+# clean on 1.93 and 1.96 alike. The pin had inverted into the very failure it
+# was written to prevent, and only the workspace's Cargo.lock — which is not
+# published — was hiding it from us. A floor, not a pin: it excludes the
+# known-bad 0.8.0 and lets each consumer's toolchain resolve upward.
+moxcms = "0.8.1"
 rfd = "0.15"
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
@@ -110,12 +123,12 @@ serde_json = "1"
 # `cargo publish` refuses the crate outright ("all dependencies must have a
 # version specified"), so the whole workspace is unpublishable — keep them in
 # lockstep with [workspace.package] version above.
-sindon_core = { version = "0.1.1", path = "crates/sindon_core" }
-sindon_security = { version = "0.1.1", path = "crates/sindon_security" }
-sindon_reactive = { version = "0.1.1", path = "crates/sindon_reactive" }
-sindon_layout = { version = "0.1.1", path = "crates/sindon_layout" }
-sindon_render = { version = "0.1.1", path = "crates/sindon_render" }
-sindon_text = { version = "0.1.1", path = "crates/sindon_text" }
-sindon_widgets = { version = "0.1.1", path = "crates/sindon_widgets" }
-sindon_platform = { version = "0.1.1", path = "crates/sindon_platform" }
-sindon_app = { version = "0.1.1", path = "crates/sindon_app" }
+sindon_core = { version = "0.1.2", path = "crates/sindon_core" }
+sindon_security = { version = "0.1.2", path = "crates/sindon_security" }
+sindon_reactive = { version = "0.1.2", path = "crates/sindon_reactive" }
+sindon_layout = { version = "0.1.2", path = "crates/sindon_layout" }
+sindon_render = { version = "0.1.2", path = "crates/sindon_render" }
+sindon_text = { version = "0.1.2", path = "crates/sindon_text" }
+sindon_widgets = { version = "0.1.2", path = "crates/sindon_widgets" }
+sindon_platform = { version = "0.1.2", path = "crates/sindon_platform" }
+sindon_app = { version = "0.1.2", path = "crates/sindon_app" }

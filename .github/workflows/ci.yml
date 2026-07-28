@@ -115,6 +115,44 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps --workspace
 
+  msrv:
+    name: MSRV (declared rust-version)
+    runs-on: ubuntu-latest
+    # `rust-version` is a promise published into all ten crates' metadata, and
+    # until 2026-07-28 nothing compiled it even once. Every other job here runs
+    # the toolchain pinned in rust-toolchain.toml, so the declared floor was
+    # free to drift — and it had, to 1.87, which cargo rejects outright because
+    # our own cosmic-text fork needs 1.89. A consumer on a toolchain between
+    # the claim and the truth is the only one who finds out.
+    #
+    # The version is read from the manifest rather than written here, so this
+    # job cannot drift from the thing it is checking. Cargo's graph check fails
+    # in seconds if the claim is impossible; the compile after it covers the
+    # half that needs a real build.
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read the declared floor
+        id: msrv
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          echo "declared rust-version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev \
+            libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev \
+            libgl1-mesa-dev
+      - uses: Swatinem/rust-cache@v2
+      # Scoped to the facade, which pulls in the other nine: `rust-version` is a
+      # promise about the *published* crates, and the examples are not published.
+      # Checking them here would also drag in knot's bundled SQLCipher/OpenSSL
+      # source build for no added coverage.
+      - run: cargo +${{ steps.msrv.outputs.version }} check -p sindon
+
   fork-propagation:
     name: Fork reaches downstream
     runs-on: ubuntu-latest

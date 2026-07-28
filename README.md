@@ -33,6 +33,46 @@ the design:
 cargo add sindon
 ```
 
+Requires rustc 1.89 or newer — the floor is declared in the manifest and
+compiled by CI, so cargo will tell you cleanly rather than failing deep in a
+dependency.
+
+## Quickstart
+
+A window with centered text — the whole program:
+
+```rust
+use sindon::app::App;
+use sindon::core::Color;
+use sindon::widgets::tree::WidgetTree;
+use sindon::widgets::{Container, TextWidget};
+
+fn main() {
+    App::new()
+        .title("hello")
+        .size(800, 600)
+        .run(|_scope| {
+            let mut tree = WidgetTree::new();
+            let root = tree.set_root(Container::column().width(800.0).height(600.0).center());
+            tree.add_child(
+                root,
+                TextWidget::new("Hello, sindon!")
+                    .font_size(32.0)
+                    .color(Color::rgb(0.2, 0.8, 0.7)),
+            );
+            tree
+        });
+}
+```
+
+`run` takes the window over and returns when it closes. Everything an
+application needs hangs off `sindon::{app, widgets, core, reactive, security}`.
+
+One note for reading the API docs: the per-item examples live on the crates
+being re-exported, so they are written as `sindon_widgets::Container` rather
+than `sindon::widgets::Container`. Those are the same item — a crate that
+depends on `sindon` spells it with the second path.
+
 ## Workspace layout
 
 | Crate | Role |
@@ -92,8 +132,10 @@ cargo doc --no-deps --workspace --open
 bash ci/check-fork-propagation.sh   # see below
 ```
 
-CI (GitHub Actions) runs fmt / clippy / test / build / doc on Ubuntu stable.
-Benches are not wired into CI (criterion is time-sensitive on shared
+CI (GitHub Actions) runs fmt / clippy / test / build / doc on Ubuntu with the
+toolchain pinned in `rust-toolchain.toml`, plus one job that compiles the
+declared `rust-version` so the MSRV stays a checked claim rather than a stated
+one. Benches are not wired into CI (criterion is time-sensitive on shared
 runners — run locally for regression checks).
 
 Two further jobs guard the zeroize-first promise, and they split it in half
