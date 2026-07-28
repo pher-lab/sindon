@@ -181,6 +181,40 @@ jobs:
       - name: cosmic-text fork reaches a downstream consumer
         run: bash ci/check-fork-propagation.sh
 
+  macos:
+    name: macOS (compile + test)
+    runs-on: macos-latest
+    # Until this job existed, no macOS compiler had ever seen this workspace.
+    # CI covered ubuntu and windows; docs.rs builds on Linux. So every
+    # `#[cfg(target_os = "macos")]` arm shipped to crates.io untype-checked —
+    # and those arms are not stubs. `sindon_security::hardening` calls
+    # `libc::ptrace` with a hard-coded `PT_DENY_ATTACH = 31`, and
+    # `sindon_platform::display_protection` has its own Darwin branch: the
+    # crate carrying the security promise had a platform arm nobody had
+    # compiled. "It builds on macOS" was never a claim anyone had tested,
+    # which is why the README now marks macOS unverified.
+    #
+    # One `cargo test --workspace` answers the three questions in the order
+    # they can fail: the crates compile for Darwin, the example binaries link
+    # against the system frameworks (an rlib-only check would not), and the
+    # suite passes on a host where the selected platform arms are the macOS
+    # ones — including `hardening.rs`, whose smoke test calls PT_DENY_ATTACH
+    # for real. knot and vault are excluded for the same reason the residue
+    # job excludes knot: they build SQLCipher with vendored OpenSSL from
+    # source, they are not published, and neither contains macOS-specific
+    # code. Nothing else is skipped.
+    #
+    # The question this job answers is "does sindon exist on macOS". It is
+    # deliberately not "is it lint-clean there" (clippy would rebuild the
+    # whole graph to answer a different question) and not "does it run" —
+    # running needs a window server and a GPU, and gets its own steps below
+    # because the answer may be about the runner rather than about sindon.
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --exclude knot --exclude vault
+
   residue:
     name: Secret residue (Windows)
     runs-on: windows-latest
