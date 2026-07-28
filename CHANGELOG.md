@@ -8,9 +8,12 @@ here covers the workspace rather than a single crate.
 
 ## [Unreleased]
 
-Found by running the published 0.1.2 on Linux for the first time — the same
-outside-in method as 0.1.2, moved one axis over. docs.rs only ever proved the
-crates *compile* there.
+## [0.1.3] - 2026-07-28
+
+The release that ran sindon on the two platforms it had only ever claimed.
+Linux came first — the published 0.1.2, driven under Xvfb from a `cargo add`
+project outside this workspace — and macOS followed it into CI. docs.rs had
+only ever proved the crates *compile*, and only on Linux.
 
 ### Added
 
@@ -35,8 +38,27 @@ crates *compile* there.
   libxkbcommon-x11.so could not be loaded`) before any sindon code runs. The
   packages are now listed, along with the fact that building needs only a C
   toolchain — the graphics and input libraries are dlopened, not linked.
-- The README claimed macOS "builds and runs". It has never been run there and
-  there is no macOS CI; it is now marked unverified.
+- **`sindon_platform`'s display-protection docs listed macOS as "Full"** while
+  the code returned `Unsupported` there, with a note that wiring it up needed
+  `objc2` integration. Both halves were wrong: the table described a
+  capability no window ever received, and the API has been one winit call away
+  (`set_content_protected` → `NSWindow.setSharingType(.none)`) for as long as
+  we have depended on winit. What actually blocks it is verification —
+  capture prevention is a claim about what *another* process sees, and a
+  hosted macOS runner grants no screen recording. The table, the module docs
+  and `docs/SECURITY.md` now say that, and Linux/Wayland's "Partial" is gone
+  for the same reason. No behaviour change: it was a no-op before and is a
+  no-op now.
+- **The README claimed macOS "builds and runs" on no evidence at all.** No
+  macOS compiler had ever seen this workspace: CI covered Linux and Windows,
+  docs.rs builds on Linux, so every `#[cfg(target_os = "macos")]` arm — the
+  `ptrace(PT_DENY_ATTACH)` call in `sindon_security` among them — shipped
+  without being type-checked once. There is now a macOS CI job that compiles
+  the published crates for Darwin, links the examples against the system
+  frameworks, runs the suite, and starts an example on the runner. All of it
+  passed on the first attempt, so the claim was true; it had simply never been
+  a claim anyone could make. The README now says what that does and does not
+  cover.
 
 ## [0.1.2] - 2026-07-28
 

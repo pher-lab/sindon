@@ -181,6 +181,70 @@ jobs:
       - name: cosmic-text fork reaches a downstream consumer
         run: bash ci/check-fork-propagation.sh
 
+  macos:
+    name: macOS (compile + test)
+    runs-on: macos-latest
+    # Until this job existed, no macOS compiler had ever seen this workspace.
+    # CI covered ubuntu and windows; docs.rs builds on Linux. So every
+    # `#[cfg(target_os = "macos")]` arm shipped to crates.io untype-checked —
+    # and those arms are not stubs. `sindon_security::hardening` calls
+    # `libc::ptrace` with a hard-coded `PT_DENY_ATTACH = 31`, and
+    # `sindon_platform::display_protection` has its own Darwin branch: the
+    # crate carrying the security promise had a platform arm nobody had
+    # compiled. "It builds on macOS" was never a claim anyone had tested,
+    # which is why the README now marks macOS unverified.
+    #
+    # One `cargo test --workspace` answers the three questions in the order
+    # they can fail: the crates compile for Darwin, the example binaries link
+    # against the system frameworks (an rlib-only check would not), and the
+    # suite passes on a host where the selected platform arms are the macOS
+    # ones — including `hardening.rs`, whose smoke test calls PT_DENY_ATTACH
+    # for real. knot and vault are excluded for the same reason the residue
+    # job excludes knot: they build SQLCipher with vendored OpenSSL from
+    # source, they are not published, and neither contains macOS-specific
+    # code. Nothing else is skipped.
+    #
+    # The question this job answers is "does sindon exist on macOS". It is
+    # deliberately not "is it lint-clean there" (clippy would rebuild the
+    # whole graph to answer a different question) and not "does it run" —
+    # running needs a window server and a GPU, and gets its own steps below
+    # because the answer may be about the runner rather than about sindon.
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --exclude knot --exclude vault
+
+      # And does it run? Both steps below are non-gating on purpose: whether a
+      # hosted macOS runner can host a GPU window is a fact about the runner,
+      # not about sindon, and this job's green has to keep meaning "compiles
+      # and tests on macOS" until that fact is established. Promote them to
+      # gating once they have proven stable — or delete them, if it turns out
+      # hosted runners cannot present at all and only real hardware can answer.
+      #
+      # `continue-on-error` has a sharp edge: the API reports such a step with
+      # `conclusion: success` even when it failed (only the separate `outcome`
+      # field disagrees), so a job whose steps all read green can contain a
+      # failed smoke. Both scripts therefore emit a `::warning` annotation of
+      # their own on failure, the way the residue job does for an absorbed
+      # flake, and still exit non-zero so the step is marked in the UI.
+      #
+      # The control runs first because it decides how to read the smoke. See
+      # ci/macos-window-control.swift for why it draws instead of just opening
+      # a window, and ci/macos-run-smoke.sh for what "survives" means.
+      - name: Can this runner host a GPU window? (control)
+        continue-on-error: true
+        run: swift ci/macos-window-control.swift
+
+      # Invoked via `bash` rather than as ./script for the same reason as the
+      # fork-propagation job: the executable bit does not survive a checkout
+      # from a Windows working copy, where core.filemode is typically off.
+      - name: hello_world survives a run
+        continue-on-error: true
+        run: |
+          cargo build -p hello_world
+          bash ci/macos-run-smoke.sh target/debug/hello_world
+
   residue:
     name: Secret residue (Windows)
     runs-on: windows-latest

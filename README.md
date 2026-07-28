@@ -126,8 +126,25 @@ Without them the process aborts inside a transitive dependency (`Library
 libxkbcommon-x11.so could not be loaded`) before any sindon code runs. A
 Wayland session needed no extra packages on the same image.
 
-**macOS** compiles the same platform-gated code paths as Linux, but nothing has
-ever been run there and there is no macOS CI. Treat it as unverified.
+**macOS** builds, passes the test suite, and starts — in CI on Apple Silicon,
+never yet on real hardware. Each CI run compiles the published crates for
+Darwin, links the examples against the system frameworks, runs the full suite
+(including the hardening smoke test, which calls `ptrace(PT_DENY_ATTACH)` and
+`setrlimit(RLIMIT_CORE, 0)` for real), and then starts `hello_world` there,
+where it survives with nothing on stderr — after a Metal control has shown the
+runner can present a window at all.
+
+Treat that as a floor rather than a verification: nobody has looked at a frame
+sindon drew on macOS, and the runner's GPU is paravirtual. Untested there:
+input and IME, clipboard, file dialogs, Retina scaling, and the screen-reader
+integration. Two things are known to degrade:
+
+- display-capture prevention is a no-op — `DisplayProtection` reports
+  `Unsupported`, unlike Linux not for want of an OS API
+- the signature-policy diagnostics are Windows-only
+
+OS light/dark detection is implemented by the platform backend, unlike on
+Linux, but has not been watched working.
 
 ## Examples
 

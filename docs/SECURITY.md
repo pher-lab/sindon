@@ -204,7 +204,11 @@ call `write_secure` / `read_secure`.
 ### Display-capture prevention is platform-dependent
 
 - Windows: implemented.
-- macOS: not implemented (depends on `objc2` integration).
+- macOS: not implemented. Not blocked on an API — winit's
+  `set_content_protected` reaches `NSWindow.setSharingType(.none)` — but
+  blocked on verification: capture prevention is a claim about what another
+  process sees, and a hosted macOS runner grants no screen recording, so
+  nothing here could observe whether it worked. Waiting on real hardware.
 - Linux: `Unsupported`. Wayland and X11 do not provide an equivalent
   to `WDA_EXCLUDEFROMCAPTURE`; the right answer is compositor-level
   policy, which is outside the application's control.
