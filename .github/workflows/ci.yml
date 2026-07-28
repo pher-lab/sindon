@@ -245,6 +245,56 @@ jobs:
           cargo build -p hello_world
           bash ci/macos-run-smoke.sh target/debug/hello_world
 
+  macos-apps:
+    name: macOS (example apps)
+    runs-on: macos-latest
+    # The job above excludes knot and vault, and that exclusion is right for the
+    # question it asks — neither is published, neither contains macOS-specific
+    # Rust. But it leaves a different question unanswered, and that one has a
+    # deadline attached: knot is the only thing in this repo that exercises IME,
+    # the clipboard, file dialogs, Retina text and capture prevention together,
+    # so it is what time on a borrowed Mac would actually be spent on. If it
+    # cannot build there, the place to find that out is here — not on hardware
+    # that has to go back.
+    #
+    # The risk lives entirely in the dependency graph rather than in our code
+    # (a grep for `cfg(target_os` across examples/ returns nothing): `rusqlite`
+    # with `bundled-sqlcipher-vendored-openssl` compiles SQLite, the SQLCipher
+    # patch set and OpenSSL from source, and OpenSSL's configure is a Perl
+    # program. That is the same build that needs Strawberry Perl first on PATH
+    # on Windows — fragile enough there that the residue job below avoids it on
+    # purpose. Whether Darwin's system Perl and clang satisfy it is a fact
+    # nobody has tested.
+    #
+    # Gating, unlike the smokes: "does it compile" is a fact about this
+    # workspace and its dependencies. "can a hosted runner present a GPU
+    # window" is not.
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p knot -p vault
+
+      # Its own control rather than a reference to the one in the job above:
+      # that control ran on a different runner, so it is evidence about that
+      # machine and not this one. Cheap enough (a single-file Swift program) to
+      # be worth keeping honest.
+      - name: Can this runner host a GPU window? (control)
+        continue-on-error: true
+        run: swift ci/macos-window-control.swift
+
+      # What makes knot worth running in addition to hello_world is everything
+      # hello_world never touches: a bundled icon font, a `Yu Gothic UI` family
+      # that does not exist on macOS, SQLCipher opening a file, and
+      # `capture_prevention(true)` — which on macOS reports failure through
+      # `log::warn!`, and sindon installs no logger, so it is silent by
+      # construction rather than by success. A clean 15 seconds here is not
+      # evidence that any of that is *correct*; it is evidence that none of it
+      # aborts before a human on real hardware can look at it.
+      - name: knot survives a run
+        continue-on-error: true
+        run: bash ci/macos-run-smoke.sh target/debug/knot
+
   residue:
     name: Secret residue (Windows)
     runs-on: windows-latest
