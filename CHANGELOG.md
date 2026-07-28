@@ -35,8 +35,16 @@ crates *compile* there.
   libxkbcommon-x11.so could not be loaded`) before any sindon code runs. The
   packages are now listed, along with the fact that building needs only a C
   toolchain — the graphics and input libraries are dlopened, not linked.
-- The README claimed macOS "builds and runs". It has never been run there and
-  there is no macOS CI; it is now marked unverified.
+- **The README claimed macOS "builds and runs" on no evidence at all.** No
+  macOS compiler had ever seen this workspace: CI covered Linux and Windows,
+  docs.rs builds on Linux, so every `#[cfg(target_os = "macos")]` arm — the
+  `ptrace(PT_DENY_ATTACH)` call in `sindon_security` among them — shipped
+  without being type-checked once. There is now a macOS CI job that compiles
+  the published crates for Darwin, links the examples against the system
+  frameworks, runs the suite, and starts an example on the runner. All of it
+  passed on the first attempt, so the claim was true; it had simply never been
+  a claim anyone could make. The README now says what that does and does not
+  cover.
 
 ## [0.1.2] - 2026-07-28
 
