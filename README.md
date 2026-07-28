@@ -2,8 +2,10 @@
 
 Secret-aware Rust UI framework — zeroize-first, GPU-rendered, no WebView.
 
-> **Status: pre-release.** APIs are unstable and nothing is on crates.io yet;
-> the names are reserved. Licensing is settled (MIT OR Apache-2.0, see below).
+> **Status: released on crates.io.** Pre-1.0, so expect breaking changes between
+> 0.x releases — the `Widget` trait, the surface you implement to write a custom
+> widget, has no implementors outside this workspace yet and is the most likely
+> to move. Licensing is settled (MIT OR Apache-2.0, see below).
 
 ## What it is
 
@@ -24,6 +26,12 @@ the design:
   default — it blocks the extension-DLL path CJK IMEs load through, so
   enabling it silently breaks Japanese/Chinese/Korean input. Opt in with
   `App::exploit_mitigation(true)` where an IME isn't needed.
+
+## Install
+
+```sh
+cargo add sindon
+```
 
 ## Workspace layout
 
@@ -48,6 +56,14 @@ only by depending on the lower crates directly — which is supported, and is
 what integrating sindon into an existing renderer or event loop looks like.
 The practical effect is that bumping any of them is not a breaking change for
 applications.
+
+## Platform support
+
+Windows is the developed and verified target. Linux and macOS build and run, but
+two features are Windows-only by nature and no-op elsewhere: display-capture
+prevention (no equivalent OS API) and the signature-policy diagnostics. The
+AccessKit integration has been verified with a real screen reader on Windows
+only.
 
 ## Examples
 
