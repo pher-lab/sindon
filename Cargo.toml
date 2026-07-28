@@ -44,7 +44,7 @@ members = [
 exclude = ["third_party/cosmic-text"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 # Verified by the `msrv` CI job, not asserted here. This read 1.87 from the
 # first release until 2026-07-28, when a `cargo add sindon` project on an older
@@ -123,12 +123,12 @@ serde_json = "1"
 # `cargo publish` refuses the crate outright ("all dependencies must have a
 # version specified"), so the whole workspace is unpublishable — keep them in
 # lockstep with [workspace.package] version above.
-sindon_core = { version = "0.1.2", path = "crates/sindon_core" }
-sindon_security = { version = "0.1.2", path = "crates/sindon_security" }
-sindon_reactive = { version = "0.1.2", path = "crates/sindon_reactive" }
-sindon_layout = { version = "0.1.2", path = "crates/sindon_layout" }
-sindon_render = { version = "0.1.2", path = "crates/sindon_render" }
-sindon_text = { version = "0.1.2", path = "crates/sindon_text" }
-sindon_widgets = { version = "0.1.2", path = "crates/sindon_widgets" }
-sindon_platform = { version = "0.1.2", path = "crates/sindon_platform" }
-sindon_app = { version = "0.1.2", path = "crates/sindon_app" }
+sindon_core = { version = "0.1.3", path = "crates/sindon_core" }
+sindon_security = { version = "0.1.3", path = "crates/sindon_security" }
+sindon_reactive = { version = "0.1.3", path = "crates/sindon_reactive" }
+sindon_layout = { version = "0.1.3", path = "crates/sindon_layout" }
+sindon_render = { version = "0.1.3", path = "crates/sindon_render" }
+sindon_text = { version = "0.1.3", path = "crates/sindon_text" }
+sindon_widgets = { version = "0.1.3", path = "crates/sindon_widgets" }
+sindon_platform = { version = "0.1.3", path = "crates/sindon_platform" }
+sindon_app = { version = "0.1.3", path = "crates/sindon_app" }

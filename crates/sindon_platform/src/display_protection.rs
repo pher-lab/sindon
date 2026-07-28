@@ -2,14 +2,17 @@
 //!
 //! # Platform support
 //!
-//! | Platform | Support | API |
-//! |----------|---------|-----|
-//! | Windows  | Full    | `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` |
-//! | macOS    | Full    | `NSWindow.setSharingType(.none)` (requires objc2, not yet wired) |
-//! | Linux/X11 | None   | No X11 API exists for capture prevention |
-//! | Linux/Wayland | Partial | No standard protocol; some compositors may support it in the future |
+//! | Platform | Applied? | Why |
+//! |----------|----------|-----|
+//! | Windows  | yes | `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` |
+//! | macOS    | no  | Reachable — winit's `set_content_protected` calls `NSWindow.setSharingType(.none)` — but not wired up, because nothing can observe the result without real hardware |
+//! | Linux/X11 | no | No X11 API for capture prevention exists |
+//! | Linux/Wayland | no | No standard protocol; a compositor may add an opt-in one later |
 //!
-//! On unsupported platforms, all operations return `false` / `Unsupported`.
+//! Everywhere except Windows, all operations return `false` / `Unsupported`.
+//! The column says what the window actually gets, not what the platform could
+//! in principle offer: a table that reads "Full" next to code returning
+//! `Unsupported` is how a security claim outlives the thing it described.
 
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -82,7 +85,8 @@ impl DisplayProtection {
     /// Static check for platform support (no window needed).
     pub fn platform_supported() -> bool {
         cfg!(target_os = "windows")
-        // macOS: would be true once objc2 integration is added
+        // macOS: reachable through winit but deliberately not wired — see
+        // apply_level_macos for why, and what would change it
         // Linux: false (no universal API)
     }
 
@@ -179,18 +183,26 @@ impl DisplayProtection {
 
     #[cfg(target_os = "macos")]
     fn apply_level_macos(&self, level: DisplayProtectionLevel) -> DisplayProtectionResult {
-        // macOS supports `NSWindow.setSharingType(.none)` to prevent capture.
-        // Full implementation requires objc2 crate integration:
+        // Unsupported by choice, not for want of an API — and the reason is
+        // not the one this comment used to give. It said a full implementation
+        // needed objc2 integration to reach `NSWindow.setSharingType(.none)`.
+        // That has not been true for as long as we have depended on winit:
+        // `Window::set_content_protected(true)` calls exactly that, and winit
+        // already routes it per platform (Windows gets WDA_EXCLUDEFROMCAPTURE,
+        // the same affinity the Windows arm above sets by hand).
         //
-        //   use objc2_app_kit::NSWindowSharingType;
-        //   let ns_window: &NSWindow = ...;
-        //   match level {
-        //       None => ns_window.setSharingType(NSWindowSharingType::ReadWrite),
-        //       ExcludeFromCapture | ContentProtection =>
-        //           ns_window.setSharingType(NSWindowSharingType::None),
-        //   }
+        // What is actually missing is a way to verify it. Capture prevention
+        // is a claim about what another process sees, and the only honest test
+        // is to take a screenshot from outside and find it blank. macOS CI
+        // cannot do that -- a hosted runner grants no screen recording -- so
+        // shipping this would mean turning a documented no-op into an
+        // undocumented "probably", on the one platform where nobody has
+        // watched sindon draw a single frame. A framework that names secrets
+        // in its pitch does not get to guess about that.
         //
-        // For now, return Unsupported until objc2 is integrated.
+        // Trigger: real Mac hardware. It is a one-line call plus a mapping
+        // decision (winit's bool cannot distinguish ExcludeFromCapture from
+        // ContentProtection, which on Windows are different affinities).
         let _ = level;
         DisplayProtectionResult::Unsupported
     }
