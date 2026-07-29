@@ -15,6 +15,12 @@ way to lose the session.
 Completing §Tier 1 is the trigger for publishing 0.1.4. The `[Unreleased]`
 section of `CHANGELOG.md` is already holding work that waits on it.
 
+Write the answers into
+[macos-verification-results.md](macos-verification-results.md) — the same
+checks as a form, short enough to keep open beside the app, plus the commands
+to paste, the permissions to ask the owner for, and what to clean up before
+handing borrowed hardware back.
+
 ## Already settled — do not spend Mac time here
 
 | Question | Answer | Where |
@@ -189,7 +195,9 @@ System Settings → Appearance → Light/Dark. `knot` follows the OS theme throu
 
 ## Recording what happens
 
-Findings go where the equivalent Linux and Windows findings went:
+Fill in [macos-verification-results.md](macos-verification-results.md) as you
+go, on the machine, while looking at the thing being judged. Afterwards the
+findings go where the equivalent Linux and Windows findings went:
 
 - a bug or a degraded behaviour → `CHANGELOG.md` `[Unreleased]`, and the
   README's Platform support section if it changes what a user should expect
