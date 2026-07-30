@@ -28,6 +28,19 @@ break, that is a bug.
   comparison (`subtle::ConstantTimeEq`).
 - `Debug` prints `[REDACTED]`.
 
+Every line above says "in `Drop`", which means all of it is conditional
+on the process ending in a way that runs destructors. Closing the window
+does. So does `AppHandle::exit()`, which is the same path: it ends the
+event loop, the loop drops the widget tree and every secret in it, and
+only then does `App::run` / `App::try_run` return to the caller.
+
+`std::process::exit` does not, and neither does any other immediate
+termination (`abort`, a SIGKILL, a panic with `panic = "abort"`). Those
+leave secrets in memory the process no longer owns. An app that wants a
+Quit command or a panic button should reach for `AppHandle::exit`;
+`process::exit` after a deliberate wipe is defensible, but it is then the
+app's job to have done the wiping.
+
 ### Capacity is fixed at construction (no realloc residue)
 
 - `SecureString` and `SecureBuffer` are sized at construction. Any
