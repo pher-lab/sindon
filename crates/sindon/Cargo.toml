@@ -9,6 +9,11 @@ repository.workspace = true
 readme.workspace = true
 keywords = ["gui", "ui", "security", "zeroize", "desktop"]
 categories = ["gui", "cryptography"]
+# tests/facade_drift.rs reads the sibling crates' lib.rs to check that this
+# crate still re-exports what it claims to. Those sources are not in the
+# published .crate, so shipping the test would hand every consumer a suite
+# that cannot pass. It is a repository gate, not a property of the artifact.
+exclude = ["tests/"]
 
 [dependencies]
 sindon_core = { workspace = true }
