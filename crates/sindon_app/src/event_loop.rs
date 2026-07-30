@@ -303,6 +303,8 @@ pub(crate) enum AppEvent {
     /// how external producers (timer threads, async tasks, IPC) push UI
     /// updates without touching the widget tree directly.
     Wake,
+    /// End the event loop, as if the user had closed the window.
+    Exit,
     /// An event from the accessibility adapter (an AT connected and wants the
     /// initial tree, requested an action, or disconnected). Delivered through
     /// the same event-loop proxy the adapter is handed in `resumed`.
@@ -312,6 +314,27 @@ pub(crate) enum AppEvent {
 impl From<A11yEvent> for AppEvent {
     fn from(event: A11yEvent) -> Self {
         AppEvent::Accessibility(event)
+    }
+}
+
+/// What a custom event asks the loop to do.
+///
+/// `SindonEventLoop::user_event` is the only caller. The mapping lives
+/// out here because an `ActiveEventLoop` cannot be built off the
+/// platform's main thread, so no test can call `user_event` itself — and
+/// the arm that ends the loop is worth more than zero coverage.
+#[derive(Debug)]
+enum UserAction {
+    Redraw,
+    Exit,
+    Accessibility(A11yEvent),
+}
+
+fn classify_user_event(event: AppEvent) -> UserAction {
+    match event {
+        AppEvent::Wake => UserAction::Redraw,
+        AppEvent::Exit => UserAction::Exit,
+        AppEvent::Accessibility(a11y) => UserAction::Accessibility(a11y),
     }
 }
 
@@ -337,6 +360,38 @@ impl AppHandle {
     /// are swallowed because by that point nothing can observe the wake.
     pub fn wake(&self) {
         let _ = self.proxy.send_event(AppEvent::Wake);
+    }
+
+    /// End the app from any thread, as if the user had closed the window.
+    ///
+    /// [`App::try_run`] returns `Ok(())` and [`App::run`] returns
+    /// normally. The event loop drops what it owns on the way out, so the
+    /// widget tree — and every secret living in it — is zeroized before
+    /// either of them hands control back.
+    ///
+    /// That last sentence is the reason this exists. `std::process::exit`
+    /// runs no destructor: an app that quits that way skips every
+    /// `Zeroize` sindon leans on and leaves its secrets in memory it no
+    /// longer owns. Quit through here instead.
+    ///
+    /// Non-blocking, and a no-op once the loop has already ended (the
+    /// same swallowed-error reasoning as [`wake`](Self::wake)).
+    ///
+    /// The handle is `Clone`, so a shortcut handler reaches it by
+    /// capturing a clone made in the build closure:
+    ///
+    /// ```no_run
+    /// # use sindon_app::App;
+    /// # use sindon_widgets::shortcut::Shortcut;
+    /// # use sindon_widgets::tree::WidgetTree;
+    /// App::new().run(|scope| {
+    ///     let handle = scope.handle().clone();
+    ///     scope.on_shortcut(Shortcut::ctrl('q'), move |_ctx| handle.exit());
+    ///     WidgetTree::new()
+    /// });
+    /// ```
+    pub fn exit(&self) {
+        let _ = self.proxy.send_event(AppEvent::Exit);
     }
 }
 
@@ -1637,10 +1692,14 @@ impl ApplicationHandler<AppEvent> for SindonEventLoop {
         window_arc.request_redraw();
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
-        match event {
-            AppEvent::Wake => self.request_redraw(),
-            AppEvent::Accessibility(a11y) => self.handle_a11y_event(a11y),
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        match classify_user_event(event) {
+            UserAction::Redraw => self.request_redraw(),
+            // The same call `WindowEvent::CloseRequested` makes, so a
+            // programmatic quit and a click on the window's X leave by
+            // one path and drop the same state.
+            UserAction::Exit => event_loop.exit(),
+            UserAction::Accessibility(a11y) => self.handle_a11y_event(a11y),
         }
     }
 
@@ -2337,6 +2396,24 @@ mod tests {
             err.source().is_some(),
             "the platform error must stay reachable as the source"
         );
+    }
+
+    #[test]
+    fn exit_event_ends_the_loop_and_wake_still_only_redraws() {
+        // `AppHandle::exit` is the only way an app can quit without
+        // `std::process::exit`, which runs no destructor and so skips
+        // every zeroize. The refactor this guards against is folding
+        // Exit in beside Wake: the app would go back to being
+        // unquittable, every other test would stay green, and the only
+        // symptom would be a secret left in freed memory.
+        assert!(matches!(
+            classify_user_event(AppEvent::Exit),
+            UserAction::Exit
+        ));
+        assert!(matches!(
+            classify_user_event(AppEvent::Wake),
+            UserAction::Redraw
+        ));
     }
 
     #[test]

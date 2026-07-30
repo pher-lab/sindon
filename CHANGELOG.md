@@ -10,6 +10,26 @@ here covers the workspace rather than a single crate.
 
 ### Added
 
+- **`AppHandle::exit()` — a way for an app to quit itself.** There was
+  none. `App::try_run` documents `Ok(())` as "the event loop exited
+  normally", but the only thing that could cause a normal exit was the
+  user closing the window: `AppHandle` carried `wake()` alone, and no
+  quit command existed on `AppScope`, `FrameContext` or `EventContext`.
+  Meanwhile sindon's own docs advertised the feature — `ShortcutScope::Global`
+  is described as "right for lock/panic/quit" — so an app could bind
+  Ctrl+Q and then find its handler had nothing to call.
+
+  This matters more here than it would in another framework. The only
+  exit left to an app was `std::process::exit`, which runs no destructor
+  and therefore skips every zeroize sindon's guarantees rest on, leaving
+  secrets in memory the process no longer owns. `exit()` takes the same
+  path as a click on the window's X: the loop ends, drops the widget tree
+  and everything in it, and only then does `run` / `try_run` return.
+
+  Found by building a `cargo add sindon` project outside the workspace,
+  which is also why it lasted this long — no example or app in the
+  workspace has ever needed to quit, so nothing in-tree could miss it.
+
 - **Display-capture prevention on macOS**, through
   `NSWindow.setSharingType(.none)`. `App::capture_prevention(true)` now reaches
   the OS there instead of logging a warning into a logger sindon never
