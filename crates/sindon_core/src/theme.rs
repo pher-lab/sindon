@@ -2,6 +2,107 @@
 //!
 //! A `Theme` defines colors, typography, and spacing that widgets
 //! use as defaults. Per-widget overrides still work via builder methods.
+//!
+//! # Writing a custom theme
+//!
+//! Start from a built-in theme and override what differs, rather than
+//! filling in every field:
+//!
+//! ```
+//! use sindon_core::{Color, Colors, Theme};
+//!
+//! let brand = Theme {
+//!     colors: Colors {
+//!         primary: Color::rgb(0.85, 0.20, 0.40),
+//!         primary_hover: Color::rgb(0.90, 0.30, 0.50),
+//!         ..Theme::dark().colors
+//!     },
+//!     ..Theme::dark()
+//! };
+//!
+//! assert_eq!(brand.colors.primary, Color::rgb(0.85, 0.20, 0.40));
+//! // Every token not named keeps the base theme's value.
+//! assert_eq!(brand.colors.background, Theme::dark().colors.background);
+//! ```
+//!
+//! Mutating a base value does the same job and is equally safe — that is
+//! how the `knot` example builds its palette:
+//!
+//! ```
+//! # use sindon_core::{Color, Theme};
+//! let mut brand = Theme::dark();
+//! brand.colors.primary = Color::rgb(0.85, 0.20, 0.40);
+//! ```
+//!
+//! # Adding tokens: what this module promises
+//!
+//! The token structs are expected to gain fields — the semantic
+//! `on_error` / `on_warning` / `on_success` trio and a `link` color are
+//! known gaps. How that growth is allowed to happen is therefore part of
+//! the public contract, so it is stated rather than left to be discovered
+//! one break at a time:
+//!
+//! > Token structs grow by **addition**, and every field stays `pub`.
+//! > Adding a token is a non-breaking, minor-version change *for a theme
+//! > written against a base value* — functional record update
+//! > (`..Theme::dark().colors`, `..Default::default()`) or mutation of a
+//! > base, i.e. both forms above. A theme spelled out as an exhaustive
+//! > struct literal is not covered by that promise: it stops compiling on
+//! > the first token added, which is precisely why the idioms above are
+//! > the documented ones.
+//!
+//! To keep a base always within reach, every token struct implements
+//! [`Default`], returning the corresponding part of [`Theme::dark()`] (the
+//! theme `Theme::default()` itself returns):
+//!
+//! ```
+//! use sindon_core::Color;
+//! use sindon_core::theme::{Colors, FocusStyle, HoverStyle, Shape, Spacing};
+//! use sindon_core::theme::{TextStyle, Theme, Typography};
+//!
+//! // Every token struct takes the same shape, so a theme can be assembled
+//! // from defaults a group at a time and stay additive-safe throughout.
+//! let t = Theme {
+//!     colors: Colors::default(),
+//!     typography: Typography {
+//!         heading: TextStyle {
+//!             font_size: 32.0,
+//!             ..Default::default()
+//!         },
+//!         ..Default::default()
+//!     },
+//!     spacing: Spacing {
+//!         md: 12.0,
+//!         ..Default::default()
+//!     },
+//!     shape: Shape {
+//!         radius_md: 12.0,
+//!         ..Default::default()
+//!     },
+//!     focus: FocusStyle {
+//!         ring_width: 3.0,
+//!         ..Default::default()
+//!     },
+//!     hover: HoverStyle {
+//!         bg: Color::rgb(0.20, 0.20, 0.26),
+//!         ..Default::default()
+//!     },
+//! };
+//! assert_eq!(t.typography.heading.font_size, 32.0);
+//! assert_eq!(t.typography.body, Theme::dark().typography.body);
+//! ```
+//!
+//! Marking the structs `#[non_exhaustive]` would make additions
+//! non-breaking by construction, and is deliberately **not** done. The
+//! attribute bans struct-expression syntax outside this crate altogether —
+//! including record update, so a downstream theme could no longer write
+//! `Colors { primary: x, ..Theme::dark().colors }` at all. It would buy
+//! compile-time safety by removing the very pattern that safety is for.
+//!
+//! Inside this crate the compiler already enforces the maintenance side: the
+//! two built-in themes and the [`Lerp`] impls construct these structs
+//! exhaustively, so a token added without being given a value in both themes
+//! — or without being wired into the cross-fade — does not build.
 
 use crate::{Color, Lerp};
 
@@ -422,6 +523,58 @@ impl Default for Theme {
     }
 }
 
+// --- Token-group defaults --------------------------------------------------
+//
+// Every token struct has a `Default` so `..Default::default()` is always an
+// available base for record update — the idiom that keeps a downstream theme
+// compiling when a token is added (see this module's docs). Each one is the
+// matching part of `Theme::default()` rather than a second set of literals,
+// so there is one place where a built-in value lives and no way for these to
+// drift from the theme they claim to come from.
+
+impl Default for Colors {
+    fn default() -> Self {
+        Theme::default().colors
+    }
+}
+
+impl Default for Typography {
+    fn default() -> Self {
+        Theme::default().typography
+    }
+}
+
+impl Default for TextStyle {
+    /// Body text — the style most of a UI is set in.
+    fn default() -> Self {
+        Theme::default().typography.body
+    }
+}
+
+impl Default for Spacing {
+    fn default() -> Self {
+        Theme::default().spacing
+    }
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Theme::default().shape
+    }
+}
+
+impl Default for FocusStyle {
+    fn default() -> Self {
+        Theme::default().focus
+    }
+}
+
+impl Default for HoverStyle {
+    fn default() -> Self {
+        Theme::default().hover
+    }
+}
+
 // --- Interpolation (theme cross-fade) --------------------------------------
 //
 // `Lerp for Theme` lets a theme swap animate as a cross-fade rather than a
@@ -585,6 +738,40 @@ mod tests {
 
         let light = Theme::light().colors;
         assert!(light.on_disabled.g > light.on_surface.g);
+    }
+
+    #[test]
+    fn token_group_defaults_are_the_default_themes_own_tokens() {
+        // `..Default::default()` is documented as a base for record update, so
+        // each group default has to *be* the corresponding part of the default
+        // theme — a second set of literals here would let a token drift from
+        // the theme it claims to come from.
+        let base = Theme::default();
+        assert_eq!(Colors::default(), base.colors);
+        assert_eq!(Typography::default(), base.typography);
+        assert_eq!(TextStyle::default(), base.typography.body);
+        assert_eq!(Spacing::default(), base.spacing);
+        assert_eq!(Shape::default(), base.shape);
+        assert_eq!(FocusStyle::default(), base.focus);
+        assert_eq!(HoverStyle::default(), base.hover);
+    }
+
+    #[test]
+    fn record_update_keeps_every_token_not_named() {
+        // The additive-safety promise in the module docs rests on this: a theme
+        // written against a base carries the base's value for everything it did
+        // not mention, so a token added later arrives with a sane value instead
+        // of a compile error. (That the *syntax* stays available to another
+        // crate — i.e. that these structs never become `#[non_exhaustive]` and
+        // never lose a `pub` — is what the module's doc tests guard, since a
+        // doc test compiles as its own crate and this one does not.)
+        let brand = Colors {
+            primary: Color::rgb(0.85, 0.2, 0.4),
+            ..Theme::dark().colors
+        };
+        assert_eq!(brand.primary, Color::rgb(0.85, 0.2, 0.4));
+        assert_eq!(brand.background, Theme::dark().colors.background);
+        assert_eq!(brand.on_disabled, Theme::dark().colors.on_disabled);
     }
 
     #[test]

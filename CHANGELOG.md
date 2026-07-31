@@ -10,6 +10,39 @@ here covers the workspace rather than a single crate.
 
 ### Added
 
+- **A stated policy for growing the theme tokens, and a `Default` for every
+  token struct.** `Colors`, `Typography`, `TextStyle`, `Spacing`, `Shape`,
+  `FocusStyle` and `HoverStyle` each get one, returning the matching part of
+  `Theme::default()`, so `..Default::default()` is always available as a base
+  for record update.
+
+  The tokens are going to grow — semantic `on_error` / `on_warning` /
+  `on_success` and a `link` color are known gaps — and how they are allowed to
+  grow is part of the public contract, because a downstream theme is a struct
+  literal over these types. That contract is now written down in the `theme`
+  module docs: token structs grow by **addition**, every field stays `pub`,
+  and adding a token is non-breaking *for a theme written against a base
+  value* — record update (`..Theme::dark().colors`, `..Default::default()`) or
+  mutation of a base. A theme spelled out field by field is not covered, which
+  is why the two supported idioms are now the documented ones, with runnable
+  examples.
+
+  `#[non_exhaustive]` is deliberately not used: it makes additions safe by
+  construction, but it bans struct-expression syntax outside the defining
+  crate altogether — including record update — so it would remove the exact
+  pattern that additive safety exists to protect.
+
+  The doc examples are the enforcement, not decoration: a doc test compiles as
+  its own crate, so it sees these types the way an application does. Marking
+  either struct group `#[non_exhaustive]`, or dropping a `pub` from a field,
+  was each confirmed to turn them red (`E0639`, `E0451`) before this was
+  called done.
+
+  This was in scope for the API sweep before 0.1.0 and did not get decided
+  there. Nothing shipped is affected — the change is purely additive — but the
+  first added token would have been a breaking change for anyone who had
+  written a theme the only way that was documented at the time.
+
 - **`AppHandle::exit()` — a way for an app to quit itself.** There was
   none. `App::try_run` documents `Ok(())` as "the event loop exited
   normally", but the only thing that could cause a normal exit was the
