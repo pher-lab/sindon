@@ -132,3 +132,29 @@ sindon_text = { version = "0.1.3", path = "crates/sindon_text" }
 sindon_widgets = { version = "0.1.3", path = "crates/sindon_widgets" }
 sindon_platform = { version = "0.1.3", path = "crates/sindon_platform" }
 sindon_app = { version = "0.1.3", path = "crates/sindon_app" }
+
+# Debug info is this workspace's dominant disk cost, and it is a shape problem,
+# not a discipline problem: the binary count is what multiplies it. 97 test
+# suites + 24 example binaries each link the full wgpu / naga / cosmic-text /
+# taffy graph, and on the MSVC target every one of them gets its own PDB
+# carrying that graph's debug info again.
+#
+# Measured 2026-08-03, before this section existed:
+#   target/                       434.7 GB   (97% of the project)
+#   └ debug/deps/*.pdb            304.1 GB   1,698 files, 180 MB avg, 558 MB max
+#   same tree's release/deps/*.pdb  0.7 GB     208 files, 3.4 MB avg
+# The 53x per-file gap is debug info and nothing else. Cargo never collects old
+# artifact generations either, so every hash change since March was still on
+# disk — but that is only half of it: the *current* generation alone was 173 GB,
+# so periodic cleaning could never have held the line here.
+#
+# `line-tables-only` keeps what this project actually reads from a debug build —
+# panic locations and backtrace file:line — and drops the type and variable info
+# that a debugger would want. `[profile.dev.package."*"]` then zeroes it for
+# everything outside the workspace, which is where the bulk lives. profile.test
+# inherits from dev, so the 97 suites are covered without a separate section.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
